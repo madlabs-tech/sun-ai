@@ -596,6 +596,52 @@ async fn checkouts_and_seat_purchases_follow_a_recount() {
     assert_eq!(body["seat_capacity"]["used"], members);
 }
 
+/// `?currency=` on summary and prices, and `currency` in a checkout, pass
+/// through when they are `usd` or `idr`; anything else stops here.
+#[tokio::test]
+async fn currencies_pass_through_from_the_allowlist() {
+    let cloud = Cloud::default();
+    let (k, app) = connected(&cloud).await;
+    let bob = member_token(&k.store, "bob", Role::Viewer).await;
+    let admin = member_token(&k.store, "ada", Role::Admin).await;
+    for what in ["summary", "prices"] {
+        let base = format!("/api/v1/subscriptions/{MAIN}/{what}");
+        let (status, _) = call_as(&app, &bob, "GET", &format!("{base}?currency=IDR"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cloud.last().path, format!("{base}?currency=idr"));
+        call_as(&app, &bob, "GET", &format!("{base}?currency=usd&x=1"), None).await;
+        assert_eq!(cloud.last().path, format!("{base}?currency=usd"));
+        call_as(&app, &bob, "GET", &base, None).await;
+        assert_eq!(cloud.last().path, base);
+        let before = cloud.count();
+        for bad in ["eur", "usd%26plan%3Dfree", ""] {
+            let path = format!("{base}?currency={bad}");
+            let (status, body) = call_as(&app, &bob, "GET", &path, None).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {body}");
+        }
+        assert_eq!(cloud.count(), before);
+    }
+    // An admin's summary in a currency: the recount, then the summary in it.
+    let base = format!("/api/v1/subscriptions/{MAIN}/summary");
+    call_as(&app, &admin, "GET", &format!("{base}?currency=idr"), None).await;
+    assert_eq!(cloud.last().path, format!("{base}?currency=idr"));
+
+    let path = "/api/v1/subscriptions/checkout-sessions";
+    let checkout = |currency: Value| {
+        json!({ "workspace_id": MAIN, "plan": "pro", "interval": "month", "seats": 5,
+            "idempotency_key": "c-1", "currency": currency })
+    };
+    let (status, _) = call_as(&app, &admin, "POST", path, Some(checkout(json!("IDR")))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cloud.last().body["currency"], "idr");
+    let before = cloud.count();
+    for bad in [json!("eur"), json!(""), json!(5)] {
+        let (status, body) = call_as(&app, &admin, "POST", path, Some(checkout(bad.clone()))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {body}");
+    }
+    assert_eq!(cloud.count(), before);
+}
+
 #[tokio::test]
 async fn seat_count_answers_only_sun_cloud() {
     let (k, app) = connected(&Cloud::default()).await;

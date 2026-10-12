@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -285,6 +285,31 @@ fn seats(n: u32, field: &str) -> ApiResult<u32> {
     }
 }
 
+/// `usd` or `idr`, the currencies Sun Cloud prices in (any case).
+fn currency(text: &str) -> ApiResult<&'static str> {
+    match text.to_ascii_lowercase().as_str() {
+        "usd" => Ok("usd"),
+        "idr" => Ok("idr"),
+        _ => Err(ApiError::invalid("`currency` must be `usd` or `idr`.")),
+    }
+}
+
+/// `?currency=`: which of the cloud's currencies to show prices in.
+#[derive(Deserialize)]
+struct InCurrency {
+    currency: Option<String>,
+}
+
+impl InCurrency {
+    /// The query to pass on: `?currency=usd`, or nothing.
+    fn query(&self) -> ApiResult<String> {
+        Ok(match self.currency.as_deref() {
+            Some(text) => format!("?currency={}", currency(text)?),
+            None => String::new(),
+        })
+    }
+}
+
 /// A token the cloud made (a purchase version): short and URL-safe.
 fn token_like(text: &str, field: &str) -> ApiResult<()> {
     let valid = !text.is_empty()
@@ -327,14 +352,16 @@ async fn read_workspace(api: &Api, caller: &Caller, text: &str, what: &str) -> A
         .await
 }
 
-/// `GET /subscriptions/{id}/summary`. For an owner or admin the cloud
+/// `GET /subscriptions/{id}/summary?currency=`. For an owner or admin the cloud
 /// recounts the members first, so `used` is the real count; a recount that
 /// fails still shows the last count (a read never fails on a refresh).
 async fn summary(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Path(text): Path<String>,
+    Query(query): Query<InCurrency>,
 ) -> ApiResult<Response> {
+    let what = format!("summary{}", query.query()?);
     let workspace = workspace(&api, &text).await?;
     if may_pay(&caller, workspace).is_ok() {
         let (cloud, user) = (cloud(&api)?, person(&caller)?);
@@ -342,15 +369,18 @@ async fn summary(
             tracing::warn!("seat recount for {workspace}: {}", refused.status());
         }
     }
-    read_workspace(&api, &caller, &text, "summary").await
+    read_workspace(&api, &caller, &text, &what).await
 }
 
+/// `GET /subscriptions/{id}/prices?currency=`: the plans in that currency.
 async fn prices(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Path(text): Path<String>,
+    Query(query): Query<InCurrency>,
 ) -> ApiResult<Response> {
-    read_workspace(&api, &caller, &text, "prices").await
+    let what = format!("prices{}", query.query()?);
+    read_workspace(&api, &caller, &text, &what).await
 }
 
 #[derive(Deserialize)]
@@ -361,6 +391,8 @@ struct NewCheckout {
     interval: String,
     seats: u32,
     idempotency_key: String,
+    #[serde(default)]
+    currency: Option<String>,
 }
 
 /// `POST /subscriptions/checkout-sessions`: `{checkout_url, session_id}`;
@@ -381,12 +413,13 @@ async fn checkout(
         return Err(ApiError::invalid("`interval` must be `month` or `year`."));
     }
     let seats = seats(input.seats, "seats")?;
+    let currency = input.currency.as_deref().map(currency).transpose()?;
     let path = "/api/v1/subscriptions/checkout-sessions";
     let key = idempotency(user, path, &input.idempotency_key)?;
     if let Some(refused) = cloud.recount(workspace, user).await? {
         return Ok(refused);
     }
-    let body = json!({
+    let mut body = json!({
         "workspace_id": workspace,
         "plan": input.plan,
         "interval": input.interval,
@@ -394,6 +427,9 @@ async fn checkout(
         "idempotency_key": key,
         "customer_email": caller.email(),
     });
+    if let Some(currency) = currency {
+        body["currency"] = json!(currency);
+    }
     cloud
         .send(reqwest::Method::POST, path, user, Some(body), Some(&key))
         .await

@@ -899,7 +899,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
   if (parts[0] === 'memory' || (['corrections', 'notes'].includes(parts[0]) && parts[2] === 'star')) return memory_route(method, parts, input);
   if (parts[0] === 'evals' || parts[0] === 'eval_sets') return eval_route(method, parts, input);
   if (parts[0] === 'marketplace') return market_route(method, parts, input, params);
-  if (parts[0] === 'subscriptions' || parts[0] === 'support') return billing_route(method, parts, input);
+  if (parts[0] === 'subscriptions' || parts[0] === 'support') return billing_route(method, parts, input, params);
   if (is_vcs_route(method, parts)) return vcs_route(method, parts, params, input);
   if (parts[0] === 'tasks' && (parts[2] === 'pull_requests' || parts[2] === 'pr_auto_complete')) return pull_request_route(method, parts, input);
   if (method === 'GET' && path === '/agents') return in_workspace(agents_route(method, parts, input) as Agent[]);

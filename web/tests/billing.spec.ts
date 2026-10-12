@@ -33,6 +33,11 @@ test('owner: seats, Upgrade to Business yearly on the hosted checkout, back on t
   await expect(form).toContainText('Total: $76.00 a month');
   await form.getByLabel('Billed').selectOption('year');
   await expect(form).toContainText('Total: $760.00 a year');
+  // The cloud prices in two currencies: the switch reprices the order.
+  const currency = form.getByLabel('Currency');
+  await expect(currency.locator('option')).toHaveText(['US dollar (USD)', 'Indonesian rupiah (IDR)']);
+  await currency.selectOption('idr');
+  await expect(form).toContainText(/Total: Rp\s?11\.960\.000 a year/);
   expect(await overflow(page)).toBeLessThanOrEqual(0);
 
   await form.getByRole('button', { name: 'Continue to checkout' }).click();

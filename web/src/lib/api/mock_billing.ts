@@ -1,8 +1,9 @@
 // In-memory Sun Cloud billing for the mock: each workspace's subscription (`subscriptions/**`) and the
-// signed-in person's support tickets (`support`; `?plan=free` refuses new ones: nobody pays). Main is on Pro with 5 seats; `?plan=free` puts every
-// workspace on Free (no subscription), `?prices=none` has the cloud return no prices, and `?billing=down`
-// makes the cloud unreachable (503 `billing_unavailable`, never Free).
-import type { PlanPrices, SeatPreview, SubscriptionSummary, Ticket } from './types';
+// signed-in person's support tickets (`support`; `?plan=free` refuses new ones: nobody pays). Main is on Pro with
+// 5 seats; `?plan=free` puts every workspace on Free (no subscription), `?prices=none` has the cloud return no
+// prices, and `?billing=down` makes the cloud unreachable (503 `billing_unavailable`, never Free). Prices come in
+// USD and IDR (`?currency=` on the API call); without one, the subscription's (USD).
+import type { Currency, PlanPrices, SeatPreview, SubscriptionSummary, Ticket } from './types';
 import { MAIN_WORKSPACE } from './types';
 import { need } from './auth';
 import { MockError, clone, find_workspace, not_found } from './mock';
@@ -13,14 +14,31 @@ const invalid = (message: string) => new MockError(422, { error: { code: 'invali
 const UNLIMITED = { seats: null, runtimes: null, byo_keys: null, agents: null, hosts: null };
 const hours_ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString();
 
-const PRICES: PlanPrices = {
-  currency: 'usd',
-  plans: [
-    { plan: 'pro', interval: 'month', amount_minor: 0, per_seat_minor: 900 },
-    { plan: 'pro', interval: 'year', amount_minor: 0, per_seat_minor: 9_000 },
-    { plan: 'business', interval: 'month', amount_minor: 0, per_seat_minor: 1_900 },
-    { plan: 'business', interval: 'year', amount_minor: 0, per_seat_minor: 19_000 },
-  ],
+const PRICES: Record<Currency, PlanPrices> = {
+  usd: {
+    currency: 'usd',
+    plans: [
+      { plan: 'pro', interval: 'month', amount_minor: 0, per_seat_minor: 900 },
+      { plan: 'pro', interval: 'year', amount_minor: 0, per_seat_minor: 9_000 },
+      { plan: 'business', interval: 'month', amount_minor: 0, per_seat_minor: 1_900 },
+      { plan: 'business', interval: 'year', amount_minor: 0, per_seat_minor: 19_000 },
+    ],
+  },
+  idr: {
+    currency: 'idr',
+    plans: [
+      { plan: 'pro', interval: 'month', amount_minor: 0, per_seat_minor: 149_000 },
+      { plan: 'pro', interval: 'year', amount_minor: 0, per_seat_minor: 1_490_000 },
+      { plan: 'business', interval: 'month', amount_minor: 0, per_seat_minor: 299_000 },
+      { plan: 'business', interval: 'year', amount_minor: 0, per_seat_minor: 2_990_000 },
+    ],
+  },
+};
+/** `usd` or `idr` (any case), else 422 as the kernel answers. */
+const currency_of = (text: unknown): Currency => {
+  const c = String(text).toLowerCase();
+  if (c !== 'usd' && c !== 'idr') throw invalid('`currency` must be `usd` or `idr`.');
+  return c;
 };
 
 const free = (): SubscriptionSummary => ({
@@ -68,13 +86,13 @@ const seats = (n: unknown, field: string) => {
 };
 /** The pro-rated price of `n` more seats on the workspace's plan this month. */
 const seat_price = (s: SubscriptionSummary, n: number) =>
-  n * (PRICES.plans.find((p) => p.plan === s.entitlement.plan && p.interval === 'month')?.per_seat_minor ?? 0);
+  n * (PRICES[currency_of(s.currency)].plans.find((p) => p.plan === s.entitlement.plan && p.interval === 'month')?.per_seat_minor ?? 0);
 
 /** Where the hosted checkout sends the browser back: the app's `#/billing/return`. */
 const return_url = (status: string, workspace: string) =>
   `${location.origin}${location.pathname}?${params}#/billing/return?status=${status}&workspace=${workspace}`;
 
-export function billing_route(method: string, parts: string[], input: Record<string, unknown>): unknown {
+export function billing_route(method: string, parts: string[], input: Record<string, unknown>, query: URLSearchParams): unknown {
   if (params.get('billing') === 'down')
     throw new MockError(503, { error: { code: 'billing_unavailable', message: 'Billing is unavailable right now: Sun Cloud didn’t answer. Try again in a few minutes.' } });
   if (parts[0] === 'support') {
@@ -105,8 +123,9 @@ export function billing_route(method: string, parts: string[], input: Record<str
   find_workspace(workspace);
   const what = parts.slice(parts[1] === 'checkout-sessions' ? 1 : 2).join('/');
   const s = summary_of(workspace);
-  if (method === 'GET' && what === 'summary') return clone(s);
-  if (method === 'GET' && what === 'prices') return params.get('prices') === 'none' ? { currency: 'usd', plans: [] } : clone(PRICES);
+  const asked = query.has('currency') ? currency_of(query.get('currency')) : currency_of(s.currency);
+  if (method === 'GET' && what === 'summary') return { ...clone(s), currency: asked };
+  if (method === 'GET' && what === 'prices') return params.get('prices') === 'none' ? { currency: asked, plans: [] } : clone(PRICES[asked]);
   if (method !== 'POST') throw not_found(`${method} /${parts.join('/')}`);
   need('edit_workspace', workspace, 'change its plan or seats');
   if (what === 'checkout-sessions') {
@@ -114,6 +133,7 @@ export function billing_route(method: string, parts: string[], input: Record<str
     if (input.interval !== 'month' && input.interval !== 'year') throw invalid('`interval` must be `month` or `year`.');
     seats(input.seats, 'seats');
     key(input);
+    if (input.currency !== undefined) currency_of(input.currency);
     return { checkout_url: return_url('success', workspace), session_id: fresh_id('cs') };
   }
   if (what === 'portal-sessions') return { url: `https://billing.example/portal/${workspace}` };

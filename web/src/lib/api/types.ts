@@ -1421,6 +1421,8 @@ export interface Secret {
 /** `GET /subscriptions/{workspace}/summary`: the workspace's subscription at Sun Cloud. */
 export type PaidPlan = 'pro' | 'business';
 export type Interval = 'month' | 'year';
+/** The currencies Sun Cloud prices in. */
+export type Currency = 'usd' | 'idr';
 export interface SubscriptionSummary {
   entitlement: {
     plan: Plan;
