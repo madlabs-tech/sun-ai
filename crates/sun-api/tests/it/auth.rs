@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sun_api::PresetUrls;
 use sun_core::WorkspaceId;
-use sun_core::model::Role;
+use sun_core::model::{Role, SignupPolicy};
 use sun_store::{LoginRepo, MemberRepo};
 
 /// Throwaway key that only signs the mock provider's ID tokens.
@@ -270,6 +270,15 @@ async fn invite(k: &common::Kernel, name: &str, domain: &str, role: Role) {
     tx.commit().await.unwrap();
 }
 
+/// `k`'s API with sign-up closed: only invited people get in.
+fn invite_only(k: &common::Kernel) -> Router {
+    let closed = SignupPolicy {
+        allow_signup: false,
+        ..SignupPolicy::default()
+    };
+    sun_api::router(k.api.clone().with_signup_policy(closed))
+}
+
 /// A request as the token holder (`auth = None`) or with this cookie.
 async fn send(
     app: &Router,
@@ -469,8 +478,8 @@ async fn auth_oidc_login_roles_and_audit() {
         (Some("alice"), Some("viewer"), Some("sso"))
     );
     assert_eq!(
-        (&me["is_owner"], &me["permissions"]),
-        (&json!(false), &json!([]))
+        (&me["is_owner"], &me["email_verified"]),
+        (&json!(false), &json!(true))
     );
 
     // Viewer: reads yes, writes and admin routes no.
@@ -492,8 +501,8 @@ async fn auth_oidc_login_roles_and_audit() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
     }
 
-    // The token holder (an owner) lists members; alice becomes an admin of
-    // Main (straight in the store: the role routes come with M2).
+    // The token holder (an owner) lists members and makes alice an admin
+    // of Main.
     let (_, _, members) = send(app, "GET", "/api/v1/members", None, None).await;
     let listed = members
         .as_array()
@@ -503,14 +512,13 @@ async fn auth_oidc_login_roles_and_audit() {
         .unwrap();
     assert_eq!(listed["email"], "alice@corp.io");
     let alice_id: sun_core::MemberId = listed["id"].as_str().unwrap().parse().unwrap();
-    {
-        use sun_store::MembershipRepo;
-        let mut tx = k.store.begin().await.unwrap();
-        tx.set_role(WorkspaceId::MAIN, alice_id, Role::Admin)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
-    }
+    let role = format!(
+        "/api/v1/workspaces/{}/members/{alice_id}",
+        WorkspaceId::MAIN
+    );
+    let (status, _, changed) =
+        send(app, "PUT", &role, None, Some(json!({ "role": "admin" }))).await;
+    assert_eq!(status, StatusCode::OK, "{changed}");
 
     // The new role applies at once: alice (an admin) approves `who: [role:member]`.
     let (status, _, workflow) = send(
@@ -571,7 +579,8 @@ async fn auth_oidc_login_roles_and_audit() {
         ),
         "{rows:?}"
     );
-    assert_eq!(rows.len(), 4, "{rows:?}");
+    assert!(has("user:me", "role_change", "viewer -> admin"), "{rows:?}");
+    assert_eq!(rows.len(), 5, "{rows:?}");
 
     // Signing out ends the session.
     let (status, headers, _) = send(app, "DELETE", "/api/v1/session", Some(&alice), None).await;
@@ -613,9 +622,53 @@ async fn auth_oidc_allowed_domains_and_no_provider() {
     let k = oidc_kernel(&idp, &["corp.io"]).await;
     let (landing, session) = sign_in(&k.app, &idp, "mallory", "gmail.com").await;
     assert_eq!((landing.as_str(), session), ("/#/login/denied", None));
-    // Invite only: an allowed domain alone doesn't let anyone in.
-    let (landing, session) = sign_in(&k.app, &idp, "carol", "corp.io").await;
+    // Sign-up closed: an allowed domain alone doesn't let anyone in, a
+    // pending invitation does.
+    let closed = invite_only(&k);
+    let (landing, session) = sign_in(&closed, &idp, "carol", "corp.io").await;
     assert_eq!((landing.as_str(), session), ("/#/login/invite", None));
+    let invitation = json!({ "email": "dora@corp.io", "role": "member" });
+    let path = format!("/api/v1/workspaces/{}/invitations", WorkspaceId::MAIN);
+    let (status, _, _) = send(&k.app, "POST", &path, None, Some(invitation)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (landing, session) = sign_in(&closed, &idp, "dora", "corp.io").await;
+    assert_eq!(landing, "/", "invited");
+    let (_, _, mine) = send(
+        &closed,
+        "GET",
+        "/api/v1/me/invitations",
+        session.as_deref(),
+        None,
+    )
+    .await;
+    assert_eq!(mine[0]["role"], "member", "{mine}");
+    // Sign-up open: the provider's verified email makes the account, in no
+    // workspace yet; the first verified person owns the deployment.
+    let (landing, session) = sign_in(&k.app, &idp, "carol", "corp.io").await;
+    assert_eq!(landing, "/");
+    let (_, _, me) = send(&k.app, "GET", "/api/v1/me", session.as_deref(), None).await;
+    assert_eq!(
+        (
+            &me["email"],
+            &me["email_verified"],
+            &me["is_owner"],
+            &me["memberships"]
+        ),
+        (
+            &json!("carol@corp.io"),
+            &json!(true),
+            &json!(false),
+            &json!([])
+        ),
+        "dora verified first: {me}"
+    );
+    let (_, _, members) = send(&k.app, "GET", "/api/v1/members", None, None).await;
+    let dora = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["email"] == "dora@corp.io");
+    assert_eq!(dora.unwrap()["is_owner"], true, "{members}");
     invite(&k, "bob", "corp.io", Role::Viewer).await;
     let (landing, session) = sign_in(&k.app, &idp, "bob", "CORP.io").await;
     assert_eq!(landing, "/");
@@ -629,7 +682,11 @@ async fn auth_oidc_allowed_domains_and_no_provider() {
     // No provider set up: none is offered and the routes are 404.
     let k = kernel_with(None).await;
     let (_, _, providers) = send(&k.app, "GET", "/api/v1/auth", Some(""), None).await;
-    assert_eq!(providers, json!({ "providers": [], "local": true }));
+    assert_eq!(
+        providers,
+        json!({ "providers": [], "local": true, "allow_signup": true,
+            "workspace_creation_disabled": false })
+    );
     let (status, _, _) = send(&k.app, "GET", "/api/v1/auth/sso/mock/login", Some(""), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -730,7 +787,8 @@ async fn identity_of(k: &common::Kernel, email: &str) -> (String, String) {
 async fn auth_sso_providers_google_github_and_settings() {
     let idp = mock_idp().await;
     let k = kernel_with(Some(idp.presets())).await;
-    let app = &k.app;
+    let closed = invite_only(&k);
+    let app = &closed;
     let put = |id: &str, body: Value| {
         let path = format!("/api/v1/settings/sso/{id}");
         async move { send(app, "PUT", &path, None, Some(body)).await }
@@ -792,7 +850,7 @@ async fn auth_sso_providers_google_github_and_settings() {
         identity_of(&k, "alice@corp.io").await,
         (idp.issuer.clone(), "g-1".into())
     );
-    // Only `manage_settings` sees or changes providers.
+    // Only deployment owners see or change providers.
     let (status, _, _) = send(app, "GET", "/api/v1/settings/sso", Some(&alice), None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _, _) = send(
@@ -1234,27 +1292,28 @@ async fn acl_permissions_are_per_capability() {
     tx.commit().await.unwrap();
     let (ada, max) = (Some("sun_token=ada"), Some("sun_token=max"));
 
-    // The token holder is an owner with every permission.
+    // The token holder is a deployment owner.
     let (_, _, me) = send(app, "GET", "/api/v1/me", None, None).await;
     assert_eq!(me["is_owner"], true);
-    assert_eq!(me["permissions"].as_array().unwrap().len(), 16, "{me}");
 
-    // Defaults: admin may manage secrets, member may not.
+    // Ecosystem secrets are the deployment's: not even an admin of Main.
     let (status, _, _) = send(app, "GET", "/api/v1/secrets", ada, None).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _, _) = send(app, "GET", "/api/v1/secrets", max, None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    // The ecosystem limit policy needs manage_runtimes; reading it doesn't.
+    // So is the ecosystem limit policy; reading it isn't.
     let on_limit = "/api/v1/settings/on_limit";
     let wait = json!({ "on_limit": "wait_until_reset" });
     let (status, _, _) = send(app, "PUT", on_limit, max, Some(wait.clone())).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _, _) = send(app, "PUT", on_limit, ada, Some(wait.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send(app, "PUT", on_limit, None, Some(wait.clone())).await;
     assert_eq!(status, StatusCode::OK);
     let (_, _, read) = send(app, "GET", on_limit, max, None).await;
     assert_eq!(read, wait);
 
-    // Only an owner grants owner.
+    // Only a deployment owner grants it.
     let owner = |id: &sun_core::MemberId| format!("/api/v1/members/{id}/owner");
     let yes = json!({ "is_owner": true });
     let (status, _, _) = send(app, "PUT", &owner(&ids[1]), ada, Some(yes.clone())).await;
@@ -3196,7 +3255,8 @@ async fn auth_rotated_token_is_no_password_and_a_restart_keeps_it() {
 async fn auth_sso_unverified_or_secondary_emails_never_link() {
     let idp = mock_idp().await;
     let k = oidc_kernel(&idp, &[]).await;
-    let app = &k.app;
+    let closed = invite_only(&k);
+    let app = &closed;
     invite(&k, "alice", "corp.io", Role::Viewer).await;
     let (landing, session) =
         sign_in_with(app, &idp, "mock", "sub-alice", "alice@corp.io", true, "").await;
