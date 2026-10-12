@@ -30,7 +30,7 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 use rmcp::{ErrorData, RoleClient, RoleServer, ServerHandler, ServiceExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sun_core::{Error, McpGrant, ModCall, ModLink, Result};
+use sun_core::{Error, McpGrant, ModCall, ModLink, Result, WorkspaceId};
 use sun_mod_sdk::{
     API_VERSION, Entry, Manifest, McpCallParams, McpToolSpec, McpTools, ModKind, Permissions,
     Provides, mcp_action,
@@ -52,6 +52,11 @@ pub struct McpServer {
     pub name: String,
     /// Where it lives.
     pub transport: McpTransport,
+    /// The workspace a custom server is registered in (`None`: Main, from
+    /// before servers were per workspace). A catalog install's file names
+    /// none: the workspaces that installed the entry have it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<WorkspaceId>,
 }
 
 /// How to reach an MCP server.

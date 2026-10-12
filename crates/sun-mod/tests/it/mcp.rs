@@ -92,6 +92,7 @@ async fn mcp_command_server_runs_sandboxed_behind_a_read_only_proxy() {
     std::fs::write(&secret_file, "kernel secret").unwrap();
     let server = McpServer {
         name: "echo".into(),
+        workspace_id: None,
         transport: McpTransport::Command {
             command: bin.join("echo-mcp").display().to_string(),
             args: Vec::new(),
@@ -210,6 +211,7 @@ async fn mcp_url_server_uses_the_bearer_secret_and_explicit_grants() {
     let url = http_server("t0k").await;
     let server = McpServer {
         name: "remote".into(),
+        workspace_id: None,
         transport: McpTransport::Url {
             url,
             bearer_secret: Some("REMOTE_TOKEN".into()),
