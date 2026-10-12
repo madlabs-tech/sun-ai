@@ -64,7 +64,7 @@ pub(crate) async fn create(
     let email = sun_core::model::normalize_email(&input.email)?;
     may_grant(&caller, workspace, input.role, Permission::InviteMembers)?;
     let seats = api.engine.workspace_members(workspace).await?.len();
-    within_plan(&api, workspace, Quota::Seats, "seats", seats).await?;
+    within_plan(&api, workspace, Quota::Seats, seats).await?;
     let token = new_token()?;
     let expires_at = chrono::Utc::now() + INVITATION_TTL;
     let invitation = api
@@ -238,17 +238,15 @@ pub(crate) async fn accept(
     let invitation: InvitationId = id(&invitation, "invitation")?;
     let me = invitee(&caller)?;
     let mine = api.engine.my_invitations(me).await?;
-    if let Some(found) = mine.iter().find(|i| i.id == invitation) {
-        let members = api.engine.workspace_members(found.workspace_id).await?;
-        // A member taking a new role keeps their seat.
-        if !members.iter().any(|m| m.member_id == me) {
-            let seats = members.len();
-            within_plan(&api, found.workspace_id, Quota::Seats, "seats", seats).await?;
-        }
-    }
+    // Not theirs: the engine answers as for any other invitation.
+    let workspace = mine
+        .iter()
+        .find(|i| i.id == invitation)
+        .map_or(WorkspaceId::MAIN, |i| i.workspace_id);
+    let plan = api.entitlements.for_workspace(workspace).await;
     let joined = api
         .engine
-        .accept_invitation(invitation, me)
+        .accept_invitation(invitation, me, &plan)
         .await
         .map_err(not_pending)?;
     Ok(Json(joined))

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
 use oauth2::reqwest;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,7 +19,7 @@ use sun_core::entitlement::{
 };
 
 use crate::Api;
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::routes::id;
 
 /// The longest a policy is trusted without asking again.
@@ -192,28 +191,21 @@ pub(crate) async fn get(
     })))
 }
 
-/// Refuses one more `what` (a [`Quota`]) in `workspace` when `current`
-/// already reach its plan's cap, with a message saying how to get unstuck.
-/// No cap: always allowed (Community has none).
+/// Refuses one more `quota` in `workspace` when `current` already reach
+/// its plan's cap (403 `plan_limit`). Only for a check ahead of a write
+/// that doesn't add one itself (a token, an invitation): a write that adds
+/// one passes the plan to the engine, which counts inside its transaction.
 pub(crate) async fn within_plan(
     api: &Api,
     workspace: WorkspaceId,
     quota: Quota,
-    what: &str,
     current: usize,
 ) -> ApiResult<()> {
-    let entitlement = api.entitlements.for_workspace(workspace).await;
-    match entitlement.limits.max(quota) {
-        Some(max) if current >= usize::try_from(max).unwrap_or(usize::MAX) => Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "plan_limit",
-            format!(
-                "Plan limit reached ({what}: {max} on the {} plan). Remove one or upgrade the plan.",
-                entitlement.plan
-            ),
-        )),
-        _ => Ok(()),
-    }
+    Ok(api
+        .entitlements
+        .for_workspace(workspace)
+        .await
+        .check(quota, current)?)
 }
 
 #[cfg(test)]
@@ -225,6 +217,7 @@ mod tests {
 
     use axum::extract::Path;
     use axum::http::HeaderMap;
+    use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
     use super::*;

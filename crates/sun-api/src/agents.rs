@@ -16,12 +16,10 @@ use sun_engine::AgentFields;
 
 use crate::Api;
 use crate::auth::Caller;
-use crate::entitlement::within_plan;
 use crate::error::ApiResult;
 use crate::hosts::{online_adapters, readiness_of};
 use crate::routes::{Body, id};
 use crate::workspace_access::{InWorkspace, listed_workspace, named_workspace};
-use sun_core::entitlement::Quota;
 
 /// `Agent` in `types.ts`: the row, whether it can run now, and its open tasks.
 #[derive(Debug, Serialize)]
@@ -113,11 +111,10 @@ pub(crate) async fn create(
     Body(fields): Body<AgentFields>,
 ) -> ApiResult<(StatusCode, Json<AgentView>)> {
     let workspace = named_workspace(&caller, query.workspace.as_deref())?;
-    let active = api.engine.agents(Some(workspace)).await?.len();
-    within_plan(&api, workspace, Quota::Agents, "agents", active).await?;
+    let plan = api.entitlements.for_workspace(workspace).await;
     let agent = api
         .engine
-        .create_agent(workspace, fields, &caller.actor())
+        .create_agent(workspace, fields, &caller.actor(), &plan)
         .await?;
     Ok((StatusCode::CREATED, Json(one(&api, &caller, agent).await?)))
 }

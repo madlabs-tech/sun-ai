@@ -33,6 +33,11 @@ pub enum Error {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    /// The workspace's plan has no room for one more of something (a seat,
+    /// an agent, a host...). The message says which cap and how to get unstuck.
+    #[error("{0}")]
+    PlanLimit(String),
+
     /// The other side (host, runtime, mod) is not reachable or not ready.
     /// The caller may retry per its policy.
     #[error("unavailable: {0}")]

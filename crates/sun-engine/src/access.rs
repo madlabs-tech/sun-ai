@@ -6,6 +6,7 @@
 //! `sha256(token)` hex; the token itself is never stored.
 
 use serde_json::json;
+use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::SecretScope;
 use sun_core::model::{AuditAction, AuditEntry, Member, Runtime, RuntimeSource};
 use sun_core::{AuditId, Error, MemberId, Result, RuntimeId, WorkspaceId};
@@ -146,28 +147,38 @@ impl Engine {
     /// [`Runtime::validate`], audited as `actor`; `false` when the workspace
     /// has the name. `update` replaces the config of the workspace's runtime
     /// of that name instead (`false`: no such runtime). `NotFound` for a
-    /// missing workspace.
+    /// missing workspace; `PlanLimit` when `plan` has no room for one more
+    /// runtime or BYO key.
+    /// Rows a chain name made (`byo_runtime`) don't count.
     pub async fn save_runtime(
         &self,
         runtime: &Runtime,
         model: Option<&str>,
         update: bool,
         actor: &str,
+        plan: &Entitlement,
     ) -> Result<bool> {
         runtime.validate()?;
         let model = credits_model(runtime, model)?;
         let mut tx = self.store.begin().await?;
         tx.get_workspace(runtime.workspace_id).await?;
-        let id = match update {
-            false => runtime.id,
-            true => match tx
-                .runtime_by_name(runtime.workspace_id, &runtime.name)
-                .await?
-            {
-                Some(stored) => stored.id,
-                None => return Ok(false),
-            },
+        let stored = tx.runtimes(Some(runtime.workspace_id)).await?;
+        let before = stored.iter().find(|r| r.name == runtime.name);
+        let id = match (update, before) {
+            (false, _) => runtime.id,
+            (true, Some(before)) => before.id,
+            (true, None) => return Ok(false),
         };
+        if !update {
+            let added = stored
+                .iter()
+                .filter(|r| r.source != RuntimeSource::ByoRuntime);
+            plan.check(Quota::Runtimes, added.count())?;
+        }
+        if !update && runtime.source == RuntimeSource::ByoKey {
+            let keys = stored.iter().filter(|r| r.source == RuntimeSource::ByoKey);
+            plan.check(Quota::ByoKeys, keys.count())?;
+        }
         let saved = if update {
             tx.update_runtime(runtime).await?
         } else {

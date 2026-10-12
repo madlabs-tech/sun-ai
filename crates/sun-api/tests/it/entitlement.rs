@@ -361,7 +361,6 @@ async fn changing_a_runtime_into_a_byo_key_counts_against_the_plan() {
 
 /// Two agents created at once when one slot is left: the plan holds.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "bug: the agent count and the insert are two transactions; both pass"]
 async fn the_last_agent_slot_goes_to_one_of_two_racing_creates() {
     let k = common::kernel().await;
     let app = &k.app;
@@ -379,4 +378,41 @@ async fn the_last_agent_slot_goes_to_one_of_two_racing_creates() {
     );
     let (_, listed) = call(app, "GET", &agents, None).await;
     assert_eq!(listed.as_array().unwrap().len(), 1, "{} / {}", a.0, b.0);
+}
+
+/// Two runtimes added at once when one slot is left: the plan holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_runtime_slot_goes_to_one_of_two_racing_creates() {
+    let k = common::kernel().await;
+    let app = &k.app;
+    let ops = workspace(app, common::TOKEN, "Ops").await;
+    let limits = Limits {
+        runtimes: Some(1),
+        ..Limits::default()
+    };
+    common::plan(&k, ops, limits);
+    let runtimes = format!("/api/v1/runtimes?workspace={ops}");
+    let byo = |name: &str| {
+        Some(json!({ "name": name, "source": "byo_key",
+            "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen" } }))
+    };
+    let (a, b) = tokio::join!(
+        call(app, "POST", &runtimes, byo("one")),
+        call(app, "POST", &runtimes, byo("two")),
+    );
+    let mut statuses = [a.0, b.0];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [StatusCode::OK, StatusCode::FORBIDDEN],
+        "{} / {}",
+        a.1,
+        b.1
+    );
+    let loser = if a.0 == StatusCode::FORBIDDEN {
+        a.1
+    } else {
+        b.1
+    };
+    assert_eq!(loser["error"]["code"], "plan_limit", "{loser}");
 }

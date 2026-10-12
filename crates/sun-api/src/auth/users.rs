@@ -27,7 +27,6 @@ use sun_engine::FirstSignIn;
 use super::members::not_yourself;
 use super::{Caller, digest};
 use crate::Api;
-use crate::entitlement::within_plan;
 use crate::error::{ApiError, ApiResult};
 use crate::routes::Body;
 
@@ -337,12 +336,10 @@ pub(crate) async fn invite_member(
             "Use a username of 1-64 letters, digits, - _ or .",
         ));
     }
-    let seats = api
-        .engine
-        .workspace_members(input.workspace_id)
-        .await?
-        .len();
-    within_plan(&api, input.workspace_id, Quota::Seats, "seats", seats).await?;
+    // Full before anything else is wrong (no mail); the engine re-counts.
+    let plan = api.entitlements.for_workspace(input.workspace_id).await;
+    let members = api.engine.workspace_members(input.workspace_id).await?;
+    plan.check(Quota::Seats, members.len())?;
     if let Some(password) = input.password {
         check_password(&password)?;
         let hash = hash_password_blocking(password).await?;
@@ -360,6 +357,7 @@ pub(crate) async fn invite_member(
                 input.role,
                 first,
                 &caller.actor(),
+                &plan,
             )
             .await?;
         return Ok((StatusCode::CREATED, Json(member)));
@@ -382,6 +380,7 @@ pub(crate) async fn invite_member(
             input.role,
             first,
             &caller.actor(),
+            &plan,
         )
         .await?;
     send(&api, &invite_mail(&api, &member, &email, &code)).await?;

@@ -315,7 +315,6 @@ async fn membership_invitations_revoked_replaced_declined_or_unverified() {
 
 /// Two people accepting at once when one seat is left: the plan holds.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "bug: the seat check and the join are two transactions; both accepts pass"]
 async fn membership_the_last_seat_goes_to_one_of_two_racing_accepts() {
     let k = kernel().await;
     let app = &k.app;
