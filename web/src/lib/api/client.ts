@@ -257,9 +257,6 @@ export const api = {
   task_quality: (id: string) => request<TaskQualityView>('GET', `/tasks/${id_path(id)}/quality`),
   check_quality: (id: string) => request<TaskQuality>('POST', `/tasks/${id_path(id)}/quality/check`, {}),
   quality_metrics: () => request<QualityMetrics>('GET', '/quality/metrics'),
-  /** Long-term memory and its proposals, newest first. */
-  memory: () => request<MemoryItem[]>('GET', '/memory'),
-  memory_metrics: () => request<MemoryMetrics>('GET', '/memory/metrics'),
   /** Approve (`active`), reject or retire (`retired`); nothing is active without this. */
   review_memory: (id: string, status: 'active' | 'retired') =>
     request<MemoryItem>('POST', `/memory/${id_path(id)}/review`, { status }),
@@ -332,11 +329,6 @@ export const api = {
     request<Workflow>('POST', id ? `/workflows/${id_path(id)}/versions` : '/workflows', id ? { source_yaml } : { source_yaml, workspace_id: workspace }),
   list_templates: () => request<WorkflowTemplate[]>('GET', '/templates'),
   install_template: (id: string, workspace?: string) => request<Workflow>('POST', `/templates/${id_path(id)}/install` + query({ workspace }), {}),
-  list_runtimes: () => request<Runtime[]>('GET', '/runtimes'),
-  /** The active agents, by name. */
-  list_agents: () => request<Agent[]>('GET', '/agents'),
-  /** `manage_runtimes`: a name and a runtime at least. */
-  create_agent: (fields: AgentFields) => request<Agent>('POST', '/agents', fields),
   /** `manage_runtimes`: a new version of its hidden workflows; running tasks keep theirs. */
   update_agent: (id: string, fields: AgentFields) => request<Agent>('PATCH', `/agents/${id_path(id)}`, fields),
   /** `manage_runtimes`: archives it; its tasks keep it, new tasks can't pick it. */
@@ -428,9 +420,6 @@ export const api = {
   list_tickets: () => request<Ticket[]>('GET', '/account/support'),
   open_ticket: (subject: string, body: string) => request<Ticket>('POST', '/account/support', { subject, body }),
   install_license: (token: string) => request<Entitlement>('PUT', '/license', { token }),
-  /** Without a scope: every scope's (names and times, never values). */
-  list_secrets: (scope?: SecretScope) =>
-    request<Secret[]>('GET', scope ? `/secrets?scope_kind=${scope.kind}&scope_id=${id_path(scope.id)}` : '/secrets'),
   /** Write-only: the value goes in, never comes back. */
   set_secret: (scope: SecretScope, name: string, value: string) =>
     request<Secret>('PUT', `/secrets/${scope.kind}/${id_path(scope.id)}/${id_path(name)}`, { value }),
@@ -452,9 +441,34 @@ export const api = {
   task_mcp: (task_id: string) => request<McpGrant[]>('GET', `/tasks/${id_path(task_id)}/mcp`),
   set_task_mcp: (task_id: string, grants: McpGrant[]) =>
     request<McpGrant[]>('PUT', `/tasks/${id_path(task_id)}/mcp`, grants),
-  /** Admin: adds a BYO key runtime (its key is an ecosystem secret set through `set_secret`), or with Sun Cloud a credits one. */
-  create_runtime: (input: CreateRuntime) => request<Runtime>('POST', '/runtimes', input),
-  runtime_readiness: (id: string) => request<Readiness>('GET', `/runtimes/${id_path(id)}/readiness`),
+
+  // --- Per workspace (M4): agents, runtimes, secrets and memory. `workspace`
+  // is required for anyone but a deployment owner, who may leave it out for
+  // every workspace's (a new agent or runtime then goes to Main).
+  /** The workspace's active agents, by name. */
+  list_agents: (workspace?: string) => request<Agent[]>('GET', '/agents' + query({ workspace })),
+  /** `manage_runtimes` in the workspace: a name and a runtime at least. */
+  create_agent: (fields: AgentFields, workspace?: string) =>
+    request<Agent>('POST', '/agents' + query({ workspace }), fields),
+  list_runtimes: (workspace?: string) => request<Runtime[]>('GET', '/runtimes' + query({ workspace })),
+  /** `manage_runtimes` in the workspace: adds a BYO key runtime (its key is the workspace's secret, set through `set_secret`), or with Sun Cloud a credits one. */
+  create_runtime: (input: CreateRuntime, workspace?: string) =>
+    request<Runtime>('POST', '/runtimes' + query({ workspace }), input),
+  runtime_readiness: (id: string, workspace?: string) =>
+    request<Readiness>('GET', `/runtimes/${id_path(id)}/readiness` + query({ workspace })),
+  /** A workspace scope lists that workspace's (`manage_secrets` there); without a scope, the deployment's (owners). Names and times, never values. */
+  list_secrets: (scope?: SecretScope) =>
+    request<Secret[]>(
+      'GET',
+      scope?.kind === 'workspace'
+        ? '/secrets' + query({ workspace: scope.id })
+        : scope ? `/secrets?scope_kind=${scope.kind}&scope_id=${id_path(scope.id)}` : '/secrets',
+    ),
+  /** The workspace's long-term memory and its proposals, newest first. */
+  memory: (workspace?: string) => request<MemoryItem[]>('GET', '/memory' + query({ workspace })),
+  memory_metrics: (workspace?: string) =>
+    request<MemoryMetrics>('GET', '/memory/metrics' + query({ workspace })),
+  // --- end per workspace (M4)
 };
 
 /** One artifact version's bytes, as a download (the session cookie authorizes it). */

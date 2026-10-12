@@ -1,6 +1,7 @@
 // In-memory agents for the mock: GET/POST /agents, PATCH/DELETE /agents/{id} (DELETE archives).
 // Ready when a runtime of the chain is known and not offline, like the kernel's "logged in on an online host".
 import type { Agent, AgentFields } from './types';
+import { MAIN_WORKSPACE } from './types';
 import { MockError, RUNTIMES, clone, not_found } from './mock';
 
 const invalid = (message: string) => new MockError(422, { error: { code: 'invalid_input', message } });
@@ -9,6 +10,7 @@ const new_id = () => `01JVAG${String(++next_id).padStart(4, '0')}`.padEnd(26, '0
 
 const agent = (name: string, description: string, instructions: string, runtime_chain: string[], skill_ids: string[], task_count: number): Agent => ({
   id: new_id(),
+  workspace_id: MAIN_WORKSPACE,
   name,
   description,
   instructions,

@@ -523,6 +523,8 @@ export type RuntimeStatus = 'ready' | 'busy' | 'cooling_down' | 'offline';
  *  with its instructions, runtime chain and skills on the task's workspace. */
 export interface Agent {
   id: Ulid;
+  /** The workspace it belongs to; its tasks are that workspace's. */
+  workspace_id: Ulid;
   name: string;
   description: string;
   instructions: string;
@@ -551,6 +553,8 @@ export interface AgentFields {
 
 export interface Runtime {
   id: string;
+  /** The workspace whose chains it serves; `null`/absent for one a host reports (every workspace's). */
+  workspace_id?: Ulid | null;
   name: string;
   adapter: string;
   source: RuntimeSource;
@@ -1022,6 +1026,8 @@ export interface ContextPreview {
 /** GET /api/v1/memory — long-term memory and its proposals. */
 export interface MemoryItem {
   id: Ulid;
+  /** The workspace it was learned in; only its runs get it. */
+  workspace_id: Ulid;
   scope: 'ecosystem' | 'repo' | 'workflow';
   /** Repo or workflow id; null for the ecosystem. */
   scope_id: string | null;
@@ -1395,7 +1401,7 @@ export interface Entitlement {
 
 /** `GET /secrets`: metadata only; a value is never sent back. */
 export interface SecretScope {
-  kind: 'ecosystem' | 'mod';
+  kind: 'ecosystem' | 'mod' | 'workspace';
   id: string;
 }
 export interface Secret {
