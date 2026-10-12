@@ -13,9 +13,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sun_api::{Api, ApiConfig, HostHub};
-use sun_core::entitlement::dev;
+use sun_core::entitlement::{Entitlement, EntitlementProvider, EntitlementStatus, Plan};
 use sun_core::model::Host;
-use sun_core::{HostId, ModCall, ModLink, Result};
+use sun_core::{HostId, ModCall, ModLink, Result, WorkspaceId};
 use sun_engine::{Engine, EngineConfig, Principal, Queue, QueueConfig, Slot, WatchdogConfig};
 use sun_store::{HostRepo, Store};
 
@@ -28,6 +28,24 @@ steps:
 ";
 
 struct NoMods;
+
+/// Every workspace on a Business plan from the cloud, so the plan badge
+/// shows a paid plan.
+struct Business;
+
+#[async_trait]
+impl EntitlementProvider for Business {
+    async fn for_workspace(&self, _: WorkspaceId) -> Entitlement {
+        Entitlement {
+            plan: Plan::Business,
+            paid: true,
+            limits: Default::default(),
+            status: EntitlementStatus::Cloud {
+                valid_until: chrono::Utc::now() + chrono::Duration::minutes(5),
+            },
+        }
+    }
+}
 
 #[async_trait]
 impl ModLink for NoMods {
@@ -89,27 +107,9 @@ async fn main() {
         public_url: format!("http://{}", addr.replace("127.0.0.1", "localhost")),
     };
     let catalog = sun_catalog::Catalog::open(dir.path().join("data")).unwrap();
-    // A dev-signed Business license, so the plan badge shows a real verified plan.
-    let seed = [7u8; 32];
-    let now = chrono::Utc::now();
-    let license = sun_core::entitlement::License {
-        license_id: "lic_ui".into(),
-        licensee: "UI Test Co".into(),
-        plan: sun_core::entitlement::Plan::Business,
-        issued_at: now,
-        expires_at: now + chrono::Duration::days(30),
-        offline_grace_days: 7,
-        limits: Default::default(),
-    };
-    let path = dir.path().join("license");
-    std::fs::write(&path, dev::sign(&license, &seed).unwrap()).unwrap();
-    let licensing = sun_api::Licensing {
-        path,
-        public_key: dev::public_key(&seed),
-    };
     let api = Api::new(engine.clone(), queue, hosts, config)
         .with_catalog(catalog)
-        .with_license(licensing);
+        .with_entitlements(Arc::new(Business));
     // First run, as `sun serve` (admin@sun.local / the token); the owner
     // then gave their real email and kept the token as their own password
     // (no rotation here), so the UI opens on the workspace.

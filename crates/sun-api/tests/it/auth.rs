@@ -744,11 +744,12 @@ async fn auth_oidc_keeps_the_deep_link_and_plan_seats() {
 
     // The plan has one seat: alice holds it, so no one else can be invited;
     // alice still gets in.
-    common::license(
+    common::plan(
         &k,
+        WorkspaceId::MAIN,
         sun_core::entitlement::Limits {
             seats: Some(1),
-            runtimes: Some(1),
+            hosts: Some(1),
             ..Default::default()
         },
     );
@@ -762,7 +763,7 @@ async fn auth_oidc_keeps_the_deep_link_and_plan_seats() {
     assert_eq!(landing, "/");
     assert!(session.is_some());
 
-    // One host (the test kernel's) fills `runtimes: 1`: no new enrolment token.
+    // One host (the test kernel's) fills `hosts: 1`: no new enrolment token.
     let (status, _, body) = send(&k.app, "POST", "/api/v1/hosts/tokens", None, None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["code"], "plan_limit");

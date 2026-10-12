@@ -7,6 +7,7 @@ mod api;
 mod auth;
 mod common;
 mod device;
+mod entitlement;
 mod features;
 mod knowledge;
 mod marketplace;
