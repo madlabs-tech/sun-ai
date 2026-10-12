@@ -51,8 +51,10 @@
   <nav class="sun-nav sidebar__pages" aria-label="Pages">
     {@render links('')}
     {#each ['Work', 'AI Team'] as const as section (section)}
-      <h2 class="sun-label sidebar__section">{section}</h2>
-      {@render links(section)}
+      {#if items(section).length}
+        <h2 class="sun-label sidebar__section">{section}</h2>
+        {@render links(section)}
+      {/if}
     {/each}
   </nav>
 

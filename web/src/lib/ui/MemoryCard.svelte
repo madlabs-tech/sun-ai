@@ -4,7 +4,7 @@
   import { Button, Card, Icon, Tag } from '@hryer/madlabs-design-system/svelte';
   import { api } from '../api/client';
   import type { MemoryItem } from '../api/types';
-  import { error_text, toast } from '../app_state.svelte';
+  import { can, error_text, toast } from '../app_state.svelte';
   import { day, safe_url } from '../format';
 
   let { item, on_change }: { item: MemoryItem; on_change: () => void } = $props();
@@ -58,7 +58,9 @@
     </p>
   {/if}
   <div class="memory__actions">
-    {#if proposed}
+    {#if !can('manage_settings', item.workspace_id)}
+      <!-- Reviews need manage_settings in the item's workspace. -->
+    {:else if proposed}
       <Button size="sm" variant="secondary" iconLeft="x" loading={busy === 'retired'} disabled={!!busy} onclick={() => review('retired')}>Reject</Button>
       <Button size="sm" variant="mint" iconLeft="check" loading={busy === 'active'} disabled={!!busy} onclick={() => review('active')}>Approve</Button>
     {:else if item.status === 'active'}

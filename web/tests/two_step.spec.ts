@@ -99,10 +99,10 @@ test('a required second step: someone without one adds it before going on', asyn
   await expect(page.getByRole('link', { name: /SUN-151/ })).toBeVisible();
 });
 
-test('an admin resets the 2-step of someone who lost their phone', async ({ page }) => {
+test('a deployment owner resets the 2-step of someone who lost their phone', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
-  await open(page, 'settings/members');
-  const people = page.getByRole('region', { name: 'People' });
+  await open(page, 'settings/users');
+  const people = page.getByRole('region', { name: 'Everyone on this deployment' });
   const cho = people.getByRole('article').filter({ hasText: 'cho@acme.io' });
   await expect(cho).toContainText('2-step');
   await people.getByRole('button', { name: 'Reset 2-step of cho' }).click();
@@ -169,7 +169,7 @@ test('360 px: the 2-step rules and sign-in providers in Settings fit', async ({ 
   await expect(edit).toBeHidden();
 });
 
-test('a viewer keeps their own 2-step but sees no ecosystem sign-in or member controls', async ({ page }) => {
+test('a viewer keeps their own 2-step but sees no deployment sign-in or account controls', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   // An admin-only page falls back to the viewer's own account.
   await open(page, 'settings/sign-in', '&mock_role=viewer');
@@ -180,14 +180,14 @@ test('a viewer keeps their own 2-step but sees no ecosystem sign-in or member co
   await expect(page.getByRole('form', { name: /Email \(SMTP\)/ })).toHaveCount(0);
   await no_overflow(page);
 
-  // Without view_members the Members page is hidden too: its deep link opens the viewer's account.
-  await open(page, 'settings/members', '&mock_role=viewer');
+  // The deployment's Users page is hidden too: its deep link opens the viewer's account.
+  await open(page, 'settings/users', '&mock_role=viewer');
   await expect(page.getByRole('heading', { name: 'Account', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Change groups of / })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Reset 2-step of / })).toHaveCount(0);
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   const nav = page.getByRole('navigation', { name: 'Settings' });
-  await expect(nav.getByRole('link', { name: 'Account' })).toBeVisible();
-  for (const name of ['Members', 'Audit log', 'Sign-in & 2-step', 'Email']) await expect(nav.getByRole('link', { name })).toHaveCount(0);
+  await expect(nav.getByRole('link', { name: 'Account', exact: true })).toBeVisible();
+  for (const name of ['Users', 'Audit log', 'Sign-in & 2-step', 'Email']) await expect(nav.getByRole('link', { name })).toHaveCount(0);
   await no_overflow(page);
 });
 

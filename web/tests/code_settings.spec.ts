@@ -177,7 +177,7 @@ test('a new workspace starts with no connection and no repositories', async ({ p
   await open(page, 'tasks');
   const sidebar = page.getByRole('complementary', { name: 'Main' });
   await sidebar.getByRole('button', { name: /^Workspace: / }).click();
-  await page.getByRole('menuitem', { name: 'Create workspace' }).click();
+  await page.getByRole('menuitem', { name: 'New workspace' }).click();
   await page.getByRole('dialog').getByLabel('Name').fill('Ops');
   await page.getByRole('dialog').getByRole('button', { name: 'Create workspace' }).click();
   await expect(page).toHaveURL(/workspace=ops$/);
@@ -232,7 +232,7 @@ test('pull request rules: each switch saves on the workspace and survives a relo
   const move = card.getByRole('switch', { name: 'Move tasks when their PRs merge' });
   await move.locator('xpath=..').click();
   await expect(move).not.toBeChecked();
-  await settings_link(page, 'Access').click();
+  await settings_link(page, 'Members').click();
   await settings_link(page, 'Code').click();
   await expect(rules(page).getByRole('switch', { name: 'Move tasks when their PRs merge' })).not.toBeChecked();
   await expect(rules(page).getByRole('switch', { name: 'Pull Request sidebar' })).toBeChecked();

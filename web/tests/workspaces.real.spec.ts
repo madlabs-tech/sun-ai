@@ -67,7 +67,7 @@ test('a new workspace: its own prefix, renumbered by a change; old ?board= links
   await sign_in(page);
   const name = `Ops ${Date.now() % 100000}`;
   await sidebar(page).getByRole('button', { name: /^Workspace: / }).click();
-  await page.getByRole('menuitem', { name: 'Create workspace' }).click();
+  await page.getByRole('menuitem', { name: 'New workspace' }).click();
   const create = page.getByRole('dialog');
   await create.getByLabel('Name').fill(name);
   await create.getByRole('button', { name: 'Create workspace' }).click();

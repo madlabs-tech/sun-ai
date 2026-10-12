@@ -1,6 +1,7 @@
-<!-- Secrets, admins only: names and update times per scope (the ecosystem, or one
-     installed mod). Values are write-only: they go in through a password field and never
-     come back from the kernel. -->
+<!-- Secrets: names and update times per scope. With `workspace`, that workspace's (`manage_secrets` there): BYO
+     keys and every token its agents and runtimes use. Without, the deployment's (owners): its own settings' secrets
+     (mail, embeddings, git apps, sign-in providers) and one tab per installed mod. Values are write-only: they go
+     in through a password field and never come back from the kernel. -->
 <script lang="ts">
   import { Button, Dialog, Icon, Input, Tabs } from '@hryer/madlabs-design-system/svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
@@ -14,11 +15,16 @@
   const ECOSYSTEM = '00000000000000000000000000';
   const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
+  let { workspace = '' }: { workspace?: string } = $props();
+
   let tab = $state('ecosystem');
   let mods = $state<string[]>([]);
-  api.list_mods().then((all) => (mods = all.filter((m) => m.installed).map((m) => m.name)), () => {});
-  const tabs = $derived([{ id: 'ecosystem', label: 'Ecosystem' }, ...mods.map((m) => ({ id: `mod:${m}`, label: m }))]);
-  const scope = $derived<SecretScope>(tab === 'ecosystem' ? { kind: 'ecosystem', id: ECOSYSTEM } : { kind: 'mod', id: tab.slice(4) });
+  // svelte-ignore state_referenced_locally
+  if (!workspace) api.list_mods().then((all) => (mods = all.filter((m) => m.installed).map((m) => m.name)), () => {});
+  const tabs = $derived([{ id: 'ecosystem', label: 'Deployment' }, ...mods.map((m) => ({ id: `mod:${m}`, label: m }))]);
+  const scope = $derived<SecretScope>(
+    workspace ? { kind: 'workspace', id: workspace } : tab === 'ecosystem' ? { kind: 'ecosystem', id: ECOSYSTEM } : { kind: 'mod', id: tab.slice(4) },
+  );
 
   let load = $state<Promise<Secret[]>>(new Promise(() => {}));
   function reload() {
@@ -71,7 +77,10 @@
   <div class="sun-row__body">
     <div class="sun-row__title" id="secrets-head">Secrets</div>
     <p class="sun-row__meta secrets__copy">
-      Sealed in the store and redacted from every log, event and context pack. Mod secrets reach only that mod.
+      Sealed in the store and redacted from every log, event and context pack.
+      {workspace
+        ? 'Only this workspace’s agents and runtimes get them.'
+        : 'Only the deployment’s own settings’ secrets live here: mail, embeddings, git apps and sign-in providers. Mod secrets reach only that mod.'}
     </p>
     {#if tabs.length > 1}<div class="secrets__tabs"><Tabs variant="underline" bind:value={tab} items={tabs} /></div>{/if}
     <div class="secrets__list">

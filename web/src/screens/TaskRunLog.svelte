@@ -9,7 +9,7 @@
   import IconButton from '../lib/ui/IconButton.svelte';
   import { api, artifact_url } from '../lib/api/client';
   import type { Correction, GateResult, KnowledgeFlag, OnLimit, OutboxItem, RunDetail, RunEvent, RunStatus, Step, StepType, TaskDetail, TaskQualityView, TaskRun, Usage } from '../lib/api/types';
-  import { act, app, error_text, toast } from '../lib/app_state.svelte';
+  import { act, app, can, error_text, toast } from '../lib/app_state.svelte';
   import { ON_LIMIT, bytes, clock, context_fill, current_step, money, runtime_name, stuck_label, tokens, uptime, usd } from '../lib/format';
   import DeviceResults from '../lib/ui/DeviceResults.svelte';
   import DeviceView from '../lib/ui/DeviceView.svelte';
@@ -446,7 +446,7 @@
                 <time class="ml-mono dim" datetime={e.at}>{clock(e.at)}</time>
                 {#if e.kind === 'note' && e.payload.kind === 'learning' && e.payload.note_id}
                   {@const note_id = String(e.payload.note_id)}
-                  <IconButton icon="star" label="Propose this learning as memory" aria-pressed={!!starred[note_id]} variant="ghost" size="sm" onclick={() => star({ id: note_id }, true)} />
+                  {#if can('manage_settings')}<IconButton icon="star" label="Propose this learning as memory" aria-pressed={!!starred[note_id]} variant="ghost" size="sm" onclick={() => star({ id: note_id }, true)} />{/if}
                 {/if}
               </div>
               {#if e.payload.detail}

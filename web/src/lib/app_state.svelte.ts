@@ -1,7 +1,8 @@
 // Shared UI state: workspace tasks, runtimes (sidebar + cards) and toasts.
 import { api, ApiFailure } from './api/client';
 import { tick } from 'svelte';
-import { auth, type Group, type Me, type Permission } from './api/auth';
+import { auth, type InvitationView, type Me, type Membership, type Permission, type Providers } from './api/auth';
+import { PERMISSIONS_OF } from './role';
 import type { Agent, Workspace, Features, Runtime, TaskSummary } from './api/types';
 import { route, show_workspace } from './router.svelte';
 
@@ -12,10 +13,12 @@ const WORKSPACE_KEY = 'sun_workspace';
 export const app = $state({
   /** Every workspace; the current one is `route.workspace` (its slug, in the URL). */
   workspaces: [] as Workspace[],
-  /** What the signed-in person may do (their groups' permissions, all of them for an owner); hides controls they can't use. */
-  permissions: [] as Permission[],
-  /** Their groups (none for the token holder). */
-  groups: [] as Group[],
+  /** The signed-in person's workspaces and role in each; with `me.is_owner`, what `can` answers. */
+  memberships: [] as Membership[],
+  /** Their pending invitations (the workspace menu's badge, onboarding). */
+  invitations: [] as InvitationView[],
+  /** How this deployment lets people in (`GET /auth`): sign-up and workspace creation; `null` until loaded. */
+  policy: null as Providers | null,
   /** The workspace whose tasks `tasks` holds. */
   workspace: '',
   /** That workspace's tasks. */
@@ -41,8 +44,27 @@ export const app = $state({
   role: local_get(ROLE_KEY),
 });
 
-/** True when the signed-in person has `permission`. */
-export const can = (permission: Permission) => app.permissions.includes(permission);
+/** True when the signed-in person may `permission` in `workspace` (the open one by default): a deployment owner
+ *  always, anyone else when their role there grants it. Hides controls they can't use; the kernel decides. */
+export function can(permission: Permission, workspace = current_workspace()): boolean {
+  if (app.me?.is_owner) return true;
+  const role = app.memberships.find((m) => m.workspace_id === workspace)?.role;
+  return !!role && PERMISSIONS_OF[role].includes(permission);
+}
+
+/** True for a deployment owner: the deployment's own pages (runtimes, hosts, mods, its settings) are theirs alone. */
+export const is_owner = () => !!app.me?.is_owner;
+
+/** Re-reads the signed-in person's workspaces, roles and invitations (after joining or leaving one). */
+export async function load_memberships() {
+  const [me, invitations] = await Promise.all([auth.me(), auth.my_invitations().catch(() => [])]);
+  app.me = me;
+  app.memberships = me.memberships ?? [];
+  app.invitations = invitations;
+}
+
+/** True when the signed-in person may create a workspace here. */
+export const can_create_workspace = () => is_owner() || !app.policy?.workspace_creation_disabled;
 
 /** Roles whose view hides repos, branches and runtimes unless a task uses them. */
 const PLAIN_ROLES = ['marketing', 'product', 'leadership'];
@@ -60,8 +82,6 @@ export function set_role(role: string): Promise<unknown> {
 /** Takes the member's role view from the kernel; a pick made only in this browser (by an older UI) is carried over. */
 async function load_view_role() {
   const me = await auth.me().catch(() => null);
-  app.permissions = me?.permissions ?? [];
-  app.groups = me?.groups ?? [];
   if (!me || me.view_role === undefined) return; // An older kernel: the browser's pick stays.
   if (me.view_role) {
     app.role = me.view_role;
@@ -136,6 +156,8 @@ export async function load_workspace() {
     if (!gate_checked) {
       const me = await auth.me();
       app.me = me;
+      app.memberships = me.memberships ?? [];
+      app.invitations = me.must_set_password || me.needs_email ? [] : await auth.my_invitations().catch(() => []);
       app.gate = me.must_set_password ? 'password' : me.needs_email ? 'email' : me.must_enroll_two_step ? 'two_step' : '';
       gate_checked = !app.gate;
       if (app.gate) {
@@ -146,13 +168,15 @@ export async function load_workspace() {
     }
     // Features change only with a kernel restart: fetched once, an older kernel without the route has them all.
     app.features ??= await api.get_features().catch(() => null);
+    app.policy ??= await auth.providers().catch(() => null);
     app.workspaces = await api.list_workspaces();
     const workspace = pick_workspace();
     // Agents are advisory here: an older kernel without them shows tasks all the same.
     [app.tasks, app.runtimes, app.agents] = await Promise.all([
       api.list_tasks(workspace || undefined),
-      api.list_runtimes(),
-      api.list_agents().catch(() => app.agents),
+      // The workspace's; with no workspace yet (onboarding) there are none.
+      workspace ? api.list_runtimes(workspace) : ([] as Runtime[]),
+      workspace ? api.list_agents(workspace).catch(() => app.agents) : ([] as Agent[]),
     ]);
     app.workspace = workspace;
     app.error = '';
@@ -174,6 +198,8 @@ export async function sign_out() {
   await auth.sign_out().catch(() => null);
   app.gate = '';
   app.me = null;
+  app.memberships = [];
+  app.invitations = [];
   view_role_loaded = false;
   app.signed_out = true;
 }

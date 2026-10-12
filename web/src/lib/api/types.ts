@@ -152,8 +152,8 @@ export interface Workspace {
   /** The workflow new tasks get by default; one of this workspace's. */
   default_workflow_id: Ulid | null;
   created_at: Timestamp;
-  /** The groups that see it; none: only admins (`access_all_workspaces`) and owners. */
-  group_ids: Ulid[];
+  /** The member who created it (its first owner); null for Main and older workspaces. */
+  created_by: Ulid | null;
   git_settings: GitSettings;
 }
 

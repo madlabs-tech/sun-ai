@@ -54,11 +54,11 @@ function apply(a: Agent, fields: AgentFields): Agent {
   return next;
 }
 
-export function agents_route(method: string, parts: string[], input: Record<string, unknown>): unknown {
+export function agents_route(method: string, parts: string[], input: Record<string, unknown>, workspace = MAIN_WORKSPACE): unknown {
   const fields = input as AgentFields;
   if (parts.length === 1 && method === 'GET') return agents.filter((a) => !a.archived_at).sort((a, b) => a.name.localeCompare(b.name)).map(view);
   if (parts.length === 1 && method === 'POST') {
-    const created = apply(agent('', '', '', [], [], 0), fields);
+    const created = { ...apply(agent('', '', '', [], [], 0), fields), workspace_id: workspace };
     agents.push(created);
     return view(created);
   }

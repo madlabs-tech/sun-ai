@@ -1,9 +1,6 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 const open = (page: Page, route = '') => page.goto(`/?mock=1#/${route}`);
-
-/** Ticks a Madlabs checkbox by clicking its label (the input itself is 0×0). */
-const tick = (scope: Locator, name: string) => scope.getByRole('checkbox', { name }).locator('xpath=..').click();
 
 const no_overflow = async (page: Page) =>
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
@@ -30,22 +27,18 @@ test('a failed provider round trip explains itself', async ({ page }) => {
   await expect(page.getByRole('alert')).toContainText('email domain isn’t allowed');
 });
 
-test('members page moves a person into a group and the audit log records it', async ({ page }) => {
+test('members page changes a role in the workspace and the audit log records it', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await open(page, 'settings/members');
   await expect(page.getByRole('heading', { name: 'Members', exact: true })).toBeVisible();
-  const people = page.getByRole('region', { name: 'People' });
-  await expect(people.getByRole('article')).toHaveCount(3);
-  await expect(people.getByLabel('Groups of cho', { exact: true })).toHaveText('Viewer');
-  await people.getByRole('button', { name: 'Change groups of cho' }).click();
-  const dialog = page.getByRole('dialog').filter({ hasText: 'Save groups' });
-  await expect(dialog.getByRole('checkbox', { name: 'Owner' })).toBeAttached();
-  await tick(dialog, 'User');
-  await dialog.getByRole('button', { name: 'Save groups' }).click();
-  await expect(page.getByText('cho’s groups saved')).toBeVisible();
-  await expect(people.getByLabel('Groups of cho', { exact: true })).toHaveText(/Viewer\s*User/);
+  const people = page.getByRole('region', { name: 'People in Main' });
+  await expect(people.getByRole('article')).toHaveCount(4);
+  await expect(people.getByRole('combobox', { name: 'Role of cho' })).toHaveValue('viewer');
+  await people.getByRole('combobox', { name: 'Role of cho' }).selectOption('member');
+  await expect(page.getByText('cho is member now')).toBeVisible();
+  await expect(people.getByRole('combobox', { name: 'Role of cho' })).toHaveValue('member');
   await page.getByRole('navigation', { name: 'Settings' }).getByRole('link', { name: 'Audit log' }).click();
-  await expect(page.getByRole('article').first()).toContainText('Viewer -> Viewer, User');
+  await expect(page.getByRole('article').first()).toContainText('Main: member');
 });
 
 test('360 px: members page fits and is reachable from More, then Settings', async ({ page }) => {
@@ -55,10 +48,8 @@ test('360 px: members page fits and is reachable from More, then Settings', asyn
   await page.getByRole('navigation', { name: 'More' }).getByRole('link', { name: 'Settings' }).click();
   await page.getByRole('navigation', { name: 'Settings' }).getByRole('link', { name: 'Members' }).click();
   await expect(page.getByRole('heading', { name: 'Members', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Change groups of ana' })).toBeVisible();
-  await page.getByRole('tab', { name: 'Groups' }).click();
-  await expect(page.getByRole('article', { name: 'Admin' })).toBeVisible();
-  await no_overflow(page);
+  await expect(page.getByRole('combobox', { name: 'Role of ana' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Invite people' })).toBeVisible();
   await no_overflow(page);
 });
 
@@ -111,13 +102,13 @@ test('first run asks the owner for their email before anything else', async ({ p
   await expect(page.getByRole('link', { name: /SUN-151/ })).toBeVisible();
 });
 
-test('without email set-up an admin adds a user with a password; email invites point to Settings', async ({ page }) => {
+test('without email set-up an owner adds a user with a password; email codes point to Settings', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
-  await open(page, 'settings/members');
-  const people = page.getByRole('region', { name: 'People' });
-  await people.getByRole('button', { name: 'Invite user' }).click();
-  const dialog = page.getByRole('dialog').filter({ hasText: 'Invite user' });
-  // No SMTP: "Set password" is picked, and the email-code option can't send.
+  await open(page, 'settings/users');
+  const people = page.getByRole('region', { name: 'Everyone on this deployment' });
+  await people.getByRole('button', { name: 'Add user' }).click();
+  const dialog = page.getByRole('dialog').filter({ hasText: 'Add user' });
+  // No SMTP: "Set password" is picked, and the email-code option can't send. They join the open workspace.
   await expect(dialog.getByRole('tab', { name: 'Set password' })).toHaveAttribute('aria-selected', 'true');
   await dialog.getByLabel('Email').fill('eve@acme.io');
   await dialog.getByLabel('Username').fill('eve');
@@ -126,6 +117,8 @@ test('without email set-up an admin adds a user with a password; email invites p
   await expect(dialog.getByText('Use at least 12 characters.')).toBeVisible();
   await dialog.getByLabel('Password', { exact: true }).fill('a long first password');
   await expect(dialog.getByRole('checkbox', { name: 'Ask them to change it at first sign-in' })).toBeChecked();
+  await expect(dialog.getByRole('combobox', { name: 'Workspace' })).toHaveValue('00000000000000000000000001');
+  await dialog.getByRole('combobox', { name: 'Role there' }).selectOption('viewer');
   await dialog.getByRole('button', { name: 'Add user' }).click();
   await expect(page.getByText('eve added')).toBeVisible();
   await expect(people.getByRole('article').filter({ hasText: 'eve@acme.io' })).toContainText('Active');
@@ -142,10 +135,10 @@ test('without email set-up an admin adds a user with a password; email invites p
 
 test('email invites wait for email set-up, which Settings saves and tests', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
-  await open(page, 'settings/members');
-  await page.getByRole('button', { name: 'Invite user' }).click();
-  const dialog = page.getByRole('dialog').filter({ hasText: 'Invite user' });
-  await dialog.getByRole('tab', { name: 'Email invite code' }).click();
+  await open(page, 'settings/users');
+  await page.getByRole('button', { name: 'Add user' }).click();
+  const dialog = page.getByRole('dialog').filter({ hasText: 'Add user' });
+  await dialog.getByRole('tab', { name: 'Email a code' }).click();
   await expect(dialog.getByRole('button', { name: 'Send invite' })).toBeDisabled();
   await dialog.getByRole('link', { name: 'Set up email in Settings' }).click();
   const email = page.getByRole('form', { name: /Email \(SMTP\)/ });
@@ -163,24 +156,23 @@ test('email invites wait for email set-up, which Settings saves and tests', asyn
   await no_overflow(page);
 });
 
-test('an admin invites, emails a reset code, sets a password, deactivates and reactivates a member', async ({ page }) => {
+test('an owner adds a user by code, emails a reset code, sets a password, deactivates and reactivates them', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
-  await page.goto('/?mock=1&smtp=1#/settings/members');
-  const people = page.getByRole('region', { name: 'People' });
-  await people.getByRole('button', { name: 'Invite user' }).click();
+  await page.goto('/?mock=1&smtp=1#/settings/users');
+  const people = page.getByRole('region', { name: 'Everyone on this deployment' });
+  await people.getByRole('button', { name: 'Add user' }).click();
   const dialog = page.getByRole('dialog').filter({ hasText: 'Send invite' });
   await dialog.getByRole('button', { name: 'Send invite' }).click();
   await expect(dialog.getByText('Enter an email such as ana@company.com.')).toBeVisible();
   await dialog.getByLabel('Email').fill('Dee@Acme.io');
   await dialog.getByLabel('Username').fill('dee');
-  // Viewer and User are ticked already, like the old default role; add Admin.
-  await expect(dialog.getByRole('checkbox', { name: 'User' })).toBeChecked();
-  await tick(dialog, 'Admin');
+  // Member of the open workspace by default; make them an admin.
+  await expect(dialog.getByRole('combobox', { name: 'Role there' })).toHaveValue('member');
+  await dialog.getByRole('combobox', { name: 'Role there' }).selectOption('admin');
   await dialog.getByRole('button', { name: 'Send invite' }).click();
   await expect(page.getByText('Invite sent to Dee@Acme.io')).toBeVisible();
   const dee = people.getByRole('article').filter({ hasText: 'dee@acme.io' });
   await expect(dee).toContainText('Invited');
-  await expect(dee.getByLabel('Groups of dee', { exact: true })).toHaveText(/Viewer\s*User\s*Admin/);
   await dee.getByRole('button', { name: 'Email a reset code to dee' }).click();
   await expect(page.getByText('Reset code sent to dee@acme.io')).toBeVisible();
 
@@ -195,25 +187,12 @@ test('an admin invites, emails a reset code, sets a password, deactivates and re
   await page.getByRole('dialog').filter({ hasText: 'Deactivate dee?' }).getByRole('button', { name: 'Deactivate' }).click();
   await expect(page.getByText('dee deactivated', { exact: true })).toBeVisible();
   await expect(dee).toContainText('Deactivated');
-  await expect(people.getByRole('article')).toHaveCount(4);
+  await expect(people.getByRole('article')).toHaveCount(5);
   await page.evaluate(() => (location.hash = '#/settings/audit'));
   await expect(page.getByRole('article').first()).toContainText('deactivated');
-  await page.evaluate(() => (location.hash = '#/settings/members'));
+  await page.evaluate(() => (location.hash = '#/settings/users'));
   await dee.getByRole('button', { name: 'Reactivate dee' }).click();
   await expect(page.getByText('dee reactivated', { exact: true })).toBeVisible();
   await expect(dee).toContainText('Active');
   await no_overflow(page);
-});
-
-test('without manage_groups, actions on stronger members are disabled and equal ones stay open', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
-  // Signed in as a Viewer whose group may see, edit and deactivate members: ana (Admin) and ben (User) can do
-  // more, cho (Viewer) the same.
-  await page.goto('/?mock=1&mock_role=viewer&viewer_edits_members=1#/settings/members');
-  const people = page.getByRole('region', { name: 'People' });
-  for (const name of ['ana', 'ben'])
-    for (const action of ['Change groups of', 'Set password of', 'Deactivate'])
-      await expect(people.getByRole('button', { name: `${action} ${name}` })).toBeDisabled();
-  for (const action of ['Reset 2-step of', 'Set password of', 'Deactivate'])
-    await expect(people.getByRole('button', { name: `${action} cho` })).toBeEnabled();
 });

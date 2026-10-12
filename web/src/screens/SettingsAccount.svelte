@@ -1,16 +1,20 @@
-<!-- Your account, for everyone: who you are signed in as (owner or groups) with Log out, and changing your
+<!-- Your account, for everyone: who you are signed in as (deployment owner, or your role in the open workspace) with Log out, and changing your
      own password (PUT /me/password). The current password is needed when you have one, and your second step
      when the ecosystem asks for it. Below it, your 2-step methods. -->
 <script lang="ts">
   import { Button, Dialog, Icon, Input } from '@hryer/madlabs-design-system/svelte';
   import { auth, type TwoStepAnswer, type TwoStepChallenge } from '../lib/api/auth';
   import { ApiFailure } from '../lib/api/client';
-  import { error_text, sign_out, toast } from '../lib/app_state.svelte';
+  import { app, current_workspace, error_text, sign_out, toast, workspace_of } from '../lib/app_state.svelte';
+  import { ROLE_LABEL } from '../lib/role';
   import SignInTwoStep from './SignInTwoStep.svelte';
   import TwoStepMethods from './TwoStepMethods.svelte';
 
   const MIN_PASSWORD = 12;
-  const me = auth.me().catch(() => null);
+  const role = $derived(app.memberships.find((m) => m.workspace_id === current_workspace())?.role);
+  const standing = $derived(
+    app.me?.is_owner ? 'deployment owner' : role ? `${ROLE_LABEL[role]} in ${workspace_of(current_workspace())?.name ?? 'this workspace'}` : 'in no workspace',
+  );
   let form = $state({ current: '', password: '', confirm: '' });
   let errors = $state<{ current?: string; password?: string; confirm?: string }>({});
   let saving = $state(false);
@@ -49,11 +53,7 @@
     <div class="sun-row__title" id="account-head">Account</div>
     <div class="account__who">
       <p class="sun-row__meta account__copy">
-        {#await me then m}
-          {#if m}
-            Signed in as <b>{m.email ?? m.user}</b> ({m.is_owner ? 'owner' : m.groups.map((g) => g.name).join(', ') || 'no groups'}).
-          {/if}
-        {/await}
+        {#if app.me}Signed in as <b>{app.me.email ?? app.me.user}</b> ({standing}).{/if}
         Change the password you sign in with.
       </p>
       <Button type="button" variant="secondary" size="sm" iconLeft="log-out" onclick={sign_out}>Log out</Button>

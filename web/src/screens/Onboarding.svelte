@@ -20,7 +20,7 @@
   if (!local_get(DONE_KEY)) {
     // Advisory: an older kernel without the route, or a failed call, just skips set-up.
     Promise.all([api.get_on_limit(), auth.me().catch(() => null)]).then(([ecosystem, me]) => {
-      can_set = !!me?.permissions.includes('manage_runtimes');
+      can_set = !!me?.is_owner;
       open = ecosystem.on_limit === null;
     }, () => {});
   }

@@ -1,8 +1,9 @@
-<!-- Picks an ecosystem secret by name (values never come back), or adds one write-only.
-     Shared by the BYO-key runtime form, the MCP server form and catalog installs. -->
+<!-- Picks a secret of `scope` by name (values never come back), or adds one write-only: the open workspace's for
+     a BYO-key runtime, the ecosystem's (the default) for the MCP server form and catalog installs. -->
 <script lang="ts">
   import { Button, Input, Select } from '@hryer/madlabs-design-system/svelte';
   import { ECOSYSTEM_SCOPE, api } from '../api/client';
+  import type { SecretScope } from '../api/types';
   import { error_text } from '../app_state.svelte';
 
   const ADD = '__add';
@@ -13,6 +14,7 @@
     hint = 'Stored sealed; Sun only keeps its name here.',
     none_label = '',
     error = '',
+    scope = ECOSYSTEM_SCOPE,
   }: {
     value?: string;
     label?: string;
@@ -20,6 +22,7 @@
     /** When set, offers "no secret" under this label (value ''). */
     none_label?: string;
     error?: string;
+    scope?: SecretScope;
   } = $props();
 
   let names = $state<string[]>([]);
@@ -31,7 +34,7 @@
 
   async function load() {
     try {
-      names = (await api.list_secrets(ECOSYSTEM_SCOPE)).map((s) => s.name);
+      names = (await api.list_secrets(scope)).map((s) => s.name);
     } catch {
       names = []; // members without admin can't list; adding still shows the error
     }
@@ -53,7 +56,7 @@
     add_error = '';
     try {
       const name = new_name.trim();
-      await api.set_secret(ECOSYSTEM_SCOPE, name, new_value);
+      await api.set_secret(scope, name, new_value);
       await load();
       choice = name;
       new_name = new_value = '';

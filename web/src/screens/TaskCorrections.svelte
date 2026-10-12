@@ -5,6 +5,7 @@
   import IconButton from '../lib/ui/IconButton.svelte';
   import type { Correction } from '../lib/api/types';
   import { CAUSE_BADGE, clock } from '../lib/format';
+  import { can } from '../lib/app_state.svelte';
 
   let { corrections, starred, star }: { corrections: Correction[]; starred: Record<string, boolean>; star: (c: { id: string }) => void } = $props();
 
@@ -35,7 +36,7 @@
             <span class="correction__kind">{kind}</span>
             <Badge {tone}>{cause}</Badge>
             <time class="ml-mono dim correction__time" datetime={c.created_at}>{clock(c.created_at)}</time>
-            <IconButton icon="star" label="Propose as memory" aria-pressed={!!starred[c.id]} variant="ghost" size="sm" onclick={() => star(c)} />
+            {#if can('manage_settings')}<IconButton icon="star" label="Propose as memory" aria-pressed={!!starred[c.id]} variant="ghost" size="sm" onclick={() => star(c)} />{/if}
           </div>
           <p class="flag__message correction__body">{head}</p>
           {#if rest.length}

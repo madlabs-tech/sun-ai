@@ -73,6 +73,18 @@ test('a member sees agents but no write controls', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Archive Ada' })).toHaveCount(0);
 });
 
+test('a new workspace starts with no agents of Main’s', async ({ page }) => {
+  await open(page);
+  await expect(row(page, 'Ada')).toBeVisible();
+  const sidebar = page.getByRole('complementary', { name: 'Main' });
+  await sidebar.getByRole('button', { name: /^Workspace: / }).click();
+  await page.getByRole('menuitem', { name: 'New workspace' }).click();
+  await page.getByRole('dialog').getByLabel('Name').fill('Lab');
+  await page.getByRole('dialog').getByRole('button', { name: 'Create workspace' }).click();
+  await expect(page).toHaveURL(/workspace=lab$/);
+  await expect(row(page, 'Ada')).toHaveCount(0);
+});
+
 test('360 px: agent rows fit', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   await open(page);
