@@ -9,6 +9,7 @@ mod common;
 mod device;
 mod entitlement;
 mod features;
+mod isolation;
 mod knowledge;
 mod marketplace;
 mod mcp_servers;
