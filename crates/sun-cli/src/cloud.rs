@@ -265,13 +265,21 @@ impl CreditsLink {
 /// its gateway model (OpenCode needs one) where runtimes added from the UI
 /// keep theirs. An existing row keeps its source (rows are never rewritten
 /// here).
+// ponytail: sun.yaml is the deployment's, so its credits runtimes are
+// Main's; other workspaces add their own (`POST /runtimes`).
 pub async fn seed_credits_runtimes(store: &Store, config: &crate::config::Config) -> Result<()> {
     let mut tx = store.begin().await?;
     for (name, credits) in &config.runtimes.credits {
-        tx.upsert_runtime(name, &credits.adapter, RuntimeSource::Credits)
+        let runtime = tx
+            .upsert_runtime(
+                sun_core::WorkspaceId::MAIN,
+                name,
+                &credits.adapter,
+                RuntimeSource::Credits,
+            )
             .await?;
         if let Some(model) = &credits.model {
-            tx.put_setting(&sun_engine::credits_model_key(name), &json!(model))
+            tx.put_setting(&sun_engine::credits_model_key(runtime.id), &json!(model))
                 .await?;
         }
     }
@@ -320,7 +328,7 @@ impl HostLink for CreditsLink {
             .store
             .read()
             .await?
-            .setting(&sun_engine::credits_model_key(&runtime.name))
+            .setting(&sun_engine::credits_model_key(runtime.id))
             .await?;
         let model = model.as_ref().and_then(Value::as_str);
         let env = |key: &str| {

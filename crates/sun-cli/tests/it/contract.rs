@@ -155,12 +155,16 @@ fn kernel_contract_license_secrets_and_ecosystem_moves() {
     assert_eq!(code, 422, "{body}");
     assert!(body.contains("license"), "{body}");
 
-    // Secrets: set, listed without the value, audited, deleted.
-    let path = "/secrets/ecosystem/00000000000000000000000000/API_TOKEN";
+    // Secrets: set, listed without the value, audited, deleted. A person's
+    // secret is a workspace's; the ecosystem keeps the deployment's own.
+    let ecosystem = "/secrets/ecosystem/00000000000000000000000000/API_TOKEN";
+    let (code, body) = call("PUT", ecosystem, Some(json!({"value": SECRET})));
+    assert_eq!(code, 422, "{body}");
+    let path = "/secrets/workspace/00000000000000000000000001/API_TOKEN";
     let (code, body) = call("PUT", path, Some(json!({"value": SECRET})));
     assert_eq!(code, 200, "{body}");
     assert!(!body.contains(SECRET));
-    let (_, body) = call("GET", "/secrets", None);
+    let (_, body) = call("GET", "/secrets?workspace=00000000000000000000000001", None);
     assert!(
         body.contains("API_TOKEN") && !body.contains(SECRET),
         "{body}"
@@ -190,7 +194,7 @@ fn kernel_contract_license_secrets_and_ecosystem_moves() {
     ));
     assert!(installed.contains("individual"), "{installed}");
 
-    // CLI secrets: the ecosystem by default, or a mod's.
+    // CLI secrets: Main's by default, or a mod's.
     ok(&run(&data, &["secret", "set", "WS_KEY"], SECRET));
     ok(&run(
         &data,
