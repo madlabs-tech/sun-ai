@@ -104,6 +104,7 @@ async fn start(
         capabilities: json!({ "devices": {
             "ios_simulator": { "ready": true }, "android_emulator": { "ready": true },
             "maestro": { "ready": true } } }),
+        enrolled_by: None,
     })
     .await
     .unwrap();

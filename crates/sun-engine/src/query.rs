@@ -11,12 +11,12 @@ use sun_core::model::{
     Artifact, EventRecord, Host, Repo, Run, SecretScope, Step, Task, Workflow, WorkflowVersion,
 };
 use sun_core::{
-    ArtifactId, BlobHash, Error, HostId, Result, RunId, StepKey, TaskId, Timestamp, WorkflowId,
-    WorkspaceId,
+    ArtifactId, BlobHash, Error, HostId, MemberId, Result, RunId, StepKey, TaskId, Timestamp,
+    WorkflowId, WorkspaceId,
 };
 use sun_store::{
     AgentRepo, ArtifactRepo, EventLog, EventQuery, HostRepo, ModInstallRepo, RepoRepo, RunRepo,
-    SecretRepo, SettingRepo, TaskRepo, Usage, WorkflowRepo, WorkspaceRepo,
+    SecretRepo, SettingRepo, TaskRepo, Usage, WorkflowRepo, WorkspaceItem, WorkspaceRepo,
 };
 use sun_workflow::{StepKind, WorkflowError};
 use tokio::sync::broadcast;
@@ -144,13 +144,17 @@ impl Engine {
         Ok(out)
     }
 
-    /// Skill and MCP server names the saved workflows use (agent steps'
-    /// `skills:` and every `mcp:` grant), sorted: catalog ranking.
+    /// Skill and MCP server names the saved workflows of `workspace` (`None`:
+    /// every workspace's) use (agent steps' `skills:` and every `mcp:`
+    /// grant), sorted: catalog ranking.
     // ponytail: one read and parse per workflow; cache by version if lists grow.
-    pub async fn catalog_names_in_use(&self) -> Result<Vec<String>> {
+    pub async fn catalog_names_in_use(
+        &self,
+        workspace: Option<WorkspaceId>,
+    ) -> Result<Vec<String>> {
         let mut names = std::collections::BTreeSet::new();
         for (workflow, version) in self.workflows().await? {
-            if version == 0 {
+            if version == 0 || workspace.is_some_and(|w| w != workflow.workspace_id) {
                 continue;
             }
             let (_, saved) = self.workflow(workflow.id).await?;
@@ -274,15 +278,25 @@ impl Engine {
             .await?)
     }
 
-    /// Enrols a new host named `name`.
-    pub async fn add_host(&self, name: String) -> Result<Host> {
+    /// Enrols a new host named `name`, attached to `workspace` (`None`: to
+    /// none, a leased seller host), with who minted its token.
+    pub async fn add_host(
+        &self,
+        name: String,
+        workspace: Option<WorkspaceId>,
+        enrolled_by: Option<MemberId>,
+    ) -> Result<Host> {
         let host = Host {
             id: HostId::generate(),
             name,
             capabilities: Value::Object(Default::default()),
+            enrolled_by,
         };
         let mut tx = self.store.begin().await?;
         tx.insert_host(&host).await?;
+        if let Some(workspace) = workspace {
+            tx.link(workspace, WorkspaceItem::Host(host.id)).await?;
+        }
         tx.commit().await?;
         Ok(host)
     }
@@ -292,9 +306,23 @@ impl Engine {
         Ok(self.store.read().await?.get_host(id).await?)
     }
 
-    /// Every enrolled host.
-    pub async fn hosts(&self) -> Result<Vec<Host>> {
-        Ok(self.store.read().await?.hosts().await?)
+    /// The hosts attached to `workspace` (`None`: every enrolled host).
+    pub async fn hosts(&self, workspace: Option<WorkspaceId>) -> Result<Vec<Host>> {
+        let mut read = self.store.read().await?;
+        Ok(match workspace {
+            Some(workspace) => read.hosts_in(workspace).await?,
+            None => read.hosts().await?,
+        })
+    }
+
+    /// The workspaces `item` is linked to (a host's, a catalog entry's).
+    pub async fn workspaces_of(&self, item: WorkspaceItem<'_>) -> Result<Vec<WorkspaceId>> {
+        Ok(self.store.read().await?.workspaces_of(item).await?)
+    }
+
+    /// The catalog ids `workspace` installed, sorted.
+    pub async fn catalog_installs(&self, workspace: WorkspaceId) -> Result<Vec<String>> {
+        Ok(self.store.read().await?.catalog_installs(workspace).await?)
     }
 
     /// Stores what a host reported in its `hello`.

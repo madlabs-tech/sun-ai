@@ -455,8 +455,15 @@ impl Harness {
                 id: config.host,
                 name: "mac-mini".into(),
                 capabilities,
+                enrolled_by: None,
             };
             tx.insert_host(&host).await.unwrap();
+            tx.link(
+                sun_core::WorkspaceId::MAIN,
+                sun_store::WorkspaceItem::Host(host.id),
+            )
+            .await
+            .unwrap();
             tx.commit().await.unwrap();
         }
         let seller = setup

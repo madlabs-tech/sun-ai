@@ -10,7 +10,8 @@
 //! - The pump admits queued runs by **priority, then FIFO** (enqueue order =
 //!   the `seq` of the run's first event) while the caps per runtime, per host
 //!   and per ecosystem allow, and hands each one to [`Engine::start_run`].
-//! - **Placement:** each admitted run goes to the least busy host that is
+//! - **Placement:** each admitted run goes to the least busy host attached
+//!   to its task's workspace (`workspace_host`) that is
 //!   online with the runtime installed and logged in, within the per-host cap
 //!   (journaled as `run_placed {host, runtime, memory_mb, cpus}`). Its
 //!   worktree and every later session stay there. A host joining wakes the
@@ -39,7 +40,7 @@ use serde_json::json;
 use sun_core::model::{ActivityKind, EventRecord, Run};
 use sun_core::{
     Error, ExecEnvSpec, HostId, Result, RunId, RunStatus, StateMachine, TaskId, TaskStatus,
-    Timestamp,
+    Timestamp, WorkspaceId,
 };
 use sun_store::{
     EventLog, HostRepo, NewEvent, RunRepo, RuntimeRepo, SettingRepo, Store, TaskRepo, Tx,
@@ -294,6 +295,8 @@ struct Waiting {
     run: Run,
     /// [`sun_core::model::Priority::rank`] of its task.
     priority: u8,
+    /// Its task's workspace: the run goes only to that workspace's hosts.
+    workspace: WorkspaceId,
     /// `seq` of the run's first event: enqueue order.
     seq: i64,
 }
@@ -354,13 +357,19 @@ async fn load(store: &Store, fallback: HostId) -> Result<(Vec<Waiting>, Vec<Acti
             active.push((run.id, placed.unwrap_or_else(|| Placement::on(fallback))));
             continue;
         }
-        let priority = tx.get_task(run.task_id).await?.priority.rank();
+        let task = tx.get_task(run.task_id).await?;
+        let (priority, workspace) = (task.priority.rank(), task.workspace_id);
         let seq = tx
             .events_after(Some(run.id), 0, 1)
             .await?
             .first()
             .map_or(i64::MAX, |e| e.seq);
-        waiting.push(Waiting { run, priority, seq });
+        waiting.push(Waiting {
+            run,
+            priority,
+            workspace,
+            seq,
+        });
     }
     Ok((waiting, active))
 }
@@ -369,6 +378,8 @@ async fn load(store: &Store, fallback: HostId) -> Result<(Vec<Waiting>, Vec<Acti
 #[derive(Debug, Clone)]
 struct Want {
     run_id: RunId,
+    /// Its task's workspace.
+    workspace: WorkspaceId,
     /// The runtime it would start on.
     runtime: String,
     /// The exec env kind it needs (`bare`, `container`, `vm`).
@@ -382,7 +393,8 @@ type Candidate = (HostId, Vec<String>, HostCap);
 /// Which of the (sorted) `waiting` runs to start now, and where: the least
 /// busy of `hosts` (in preference order) that can run the run's exec env and
 /// has room for it (a run slot, and its VM's RAM and CPUs) and whose CLI for
-/// the run's runtime is ready (`runs_on`). `active` holds the slot and load
+/// the run's runtime is ready and that may take the run (`runs_on`: attached
+/// to its workspace). `active` holds the slot and load
 /// of every active run. Runs are skipped, not blocked on: a full or cooling
 /// slot doesn't hold back other work.
 fn admit(
@@ -391,7 +403,7 @@ fn admit(
     active: &[(Slot, Load)],
     caps: &Caps,
     cooling: impl Fn(&str) -> bool,
-    runs_on: impl Fn(&HostId, &str) -> bool,
+    runs_on: impl Fn(&HostId, &Want) -> bool,
 ) -> Vec<(RunId, HostId)> {
     let mut runtimes: HashMap<&str, usize> = HashMap::new();
     let mut per_host: HashMap<HostId, (usize, Load)> = HashMap::new();
@@ -417,7 +429,7 @@ fn admit(
         let fits = |(host, envs, cap): &&Candidate| {
             let (runs, load) = used(host);
             envs.contains(&want.env)
-                && runs_on(host, runtime)
+                && runs_on(host, want)
                 && !full(cap.runs.as_ref(), runs)
                 && cap
                     .memory_mb
@@ -450,6 +462,9 @@ struct Scheduler {
     clock: fn() -> Timestamp,
     /// `cooling_down` runtimes → end of the cooldown (a cache of
     /// `runtime_state`, which failover writes).
+    // ponytail: keyed by chain name across the deployment, so one workspace's
+    // limit hit cools that name for every workspace; key by (workspace, name)
+    // or runtime id when workspaces bring their own accounts.
     cooling: HashMap<String, Timestamp>,
     /// The spend cap holds runs until this month start.
     held_until: Option<Timestamp>,
@@ -601,6 +616,7 @@ impl Scheduler {
             };
             runs.push(Want {
                 run_id: w.run.id,
+                workspace: w.workspace,
                 runtime: runtime.clone(),
                 env: env.kind().to_owned(),
                 load: Load::of(&env),
@@ -651,6 +667,16 @@ impl Scheduler {
             .into_iter()
             .map(|h| (h.id, h.name))
             .collect();
+        // The hosts each waiting run's workspace has. The fallback host takes
+        // any run only while it is no enrolled host (tests, before any joined).
+        let mut attached: HashMap<WorkspaceId, HashSet<HostId>> = HashMap::new();
+        for w in &waiting {
+            if let std::collections::hash_map::Entry::Vacant(entry) = attached.entry(w.workspace) {
+                let hosts = tx.hosts_in(w.workspace).await?;
+                entry.insert(hosts.into_iter().map(|h| h.id).collect());
+            }
+        }
+        let unenrolled_fallback = !names.contains_key(&slot.host);
         let mut hosts: Vec<Candidate> = Vec::with_capacity(ready.len());
         for (id, envs) in &ready {
             if !crate::market::is_market_host(&mut tx, *id).await? {
@@ -672,7 +698,13 @@ impl Scheduler {
             &active,
             &self.config.caps,
             |runtime| self.cooling.contains_key(runtime),
-            |host, runtime| runs_on.contains(&(*host, runtime.to_owned())),
+            |host, want| {
+                runs_on.contains(&(*host, want.runtime.clone()))
+                    && (attached
+                        .get(&want.workspace)
+                        .is_some_and(|a| a.contains(host))
+                        || (unenrolled_fallback && *host == slot.host))
+            },
         )
         .into_iter()
         .map(|(run_id, host)| {
@@ -735,6 +767,7 @@ mod tests {
     fn want(run_id: RunId, runtime: &str, env: &str) -> Want {
         Want {
             run_id,
+            workspace: WorkspaceId::MAIN,
             runtime: runtime.into(),
             env: env.into(),
             load: Load::default(),
@@ -742,7 +775,7 @@ mod tests {
     }
 
     /// Every host is ready for every runtime.
-    fn any(_: &HostId, _: &str) -> bool {
+    fn any(_: &HostId, _: &Want) -> bool {
         true
     }
 
@@ -766,6 +799,7 @@ mod tests {
                 repo_ids: Vec::new(),
             },
             priority,
+            workspace: WorkspaceId::MAIN,
             seq,
         }
     }
@@ -825,8 +859,9 @@ mod tests {
         let bare = |h: HostId| (h, vec!["bare".to_owned()], HostCap::default());
         let hosts = [bare(h1), bare(h2)];
         // h1 has only claude ready, h2 only codex.
-        let runs_on =
-            |h: &HostId, r: &str| (*h == h1 && r == "claude") || (*h == h2 && r == "codex");
+        let runs_on = |h: &HostId, w: &Want| {
+            (*h == h1 && w.runtime == "claude") || (*h == h2 && w.runtime == "codex")
+        };
         let start = admit(&waiting, &hosts, &[], &Caps::default(), |_| false, runs_on);
         assert_eq!(start, [(runs[0], h2), (runs[1], h1)]);
     }

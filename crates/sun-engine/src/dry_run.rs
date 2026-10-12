@@ -104,6 +104,7 @@ impl Engine {
             id: self.host,
             name: "dry-run".into(),
             capabilities: json!({}),
+            enrolled_by: None,
         })
         .await?;
         tx.insert_task(&task).await?;

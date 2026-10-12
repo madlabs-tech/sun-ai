@@ -20,9 +20,9 @@ use sun_core::{
     OutboxId, ProjectId, RepoId, Result, RunId, TaskId, VcsConnectionId, WorkflowId, WorkspaceId,
 };
 use sun_store::{
-    AgentRepo, ArtifactRepo, AuditRepo, CorrectionRepo, EvalRepo, KnowledgeRepo, MemberRepo,
-    MembershipRepo, MemoryRepo, NoteRepo, OutboxRepo, ProjectRepo, RepoRepo, RunRepo, TaskRepo, Tx,
-    VcsRepo, WorkflowRepo, WorkspaceItem, WorkspaceRepo,
+    AgentRepo, ArtifactRepo, AuditRepo, CorrectionRepo, EvalRepo, HostRepo, KnowledgeRepo,
+    MemberRepo, MembershipRepo, MemoryRepo, NoteRepo, OutboxRepo, ProjectRepo, RepoRepo, RunRepo,
+    TaskRepo, Tx, VcsRepo, WorkflowRepo, WorkspaceItem, WorkspaceRepo,
 };
 
 use crate::{Engine, Pick};
@@ -494,8 +494,9 @@ impl Engine {
         Ok(out)
     }
 
-    /// Links an existing knowledge source to `workspace` too (admin import):
-    /// the same row, so one index. A no-op when it is already there.
+    /// Links an existing knowledge source, host or catalog install to
+    /// `workspace` too (a knowledge source: the same row, so one index).
+    /// A no-op when it is already there. Audited.
     pub async fn import_to_workspace(
         &self,
         workspace: WorkspaceId,
@@ -516,14 +517,15 @@ impl Engine {
         Ok(tx.commit().await?)
     }
 
-    /// Removes a knowledge source from `workspace` (`NotFound` when it isn't
-    /// there). One on no workspace left is deleted with its docs.
+    /// Removes an item from `workspace` (`NotFound` when it isn't there);
+    /// true when no workspace has it any more. A knowledge source on no
+    /// workspace left is deleted with its docs.
     pub async fn detach_from_workspace(
         &self,
         workspace: WorkspaceId,
         item: WorkspaceItem<'_>,
         actor: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut tx = self.store.begin().await?;
         let workspace_name = tx.get_workspace(workspace).await?.name;
         let what = describe(&mut tx, item).await?;
@@ -547,11 +549,13 @@ impl Engine {
             &detail,
         )
         .await?;
-        Ok(tx.commit().await?)
+        tx.commit().await?;
+        Ok(orphan)
     }
 }
 
-/// `knowledge source <name>`; `NotFound` when it is missing.
+/// `knowledge source <name>`, `host <name>` or `catalog entry <id>`;
+/// `NotFound` when a source or host is missing.
 async fn describe(tx: &mut Tx, item: WorkspaceItem<'_>) -> Result<String> {
     Ok(match item {
         WorkspaceItem::KnowledgeSource(id) => {
@@ -560,5 +564,7 @@ async fn describe(tx: &mut Tx, item: WorkspaceItem<'_>) -> Result<String> {
                 tx.get_knowledge_source(id).await?.name
             )
         }
+        WorkspaceItem::Host(id) => format!("host {}", tx.get_host(id).await?.name),
+        WorkspaceItem::CatalogInstall(id) => format!("catalog entry {id}"),
     })
 }

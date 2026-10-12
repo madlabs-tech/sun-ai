@@ -204,6 +204,10 @@ pub(super) struct Handoff {
 /// written there in the same transaction, loaded at engine start.
 #[derive(Debug, Default)]
 pub(super) struct Failover {
+    // ponytail: keyed by chain name across the deployment (and loaded from
+    // every workspace's `runtime_state` by name), so one workspace's limit hit
+    // cools that name for all; key by (workspace, name) or runtime id when
+    // workspaces bring their own accounts.
     cooling: HashMap<String, Timestamp>,
 }
 
