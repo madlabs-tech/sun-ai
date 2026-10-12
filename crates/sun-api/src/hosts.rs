@@ -986,6 +986,11 @@ pub(crate) struct RuntimeInput {
     model: Option<String>,
 }
 
+/// The deployment sells Sun credits. Off for the MVP: no new `credits`
+/// runtime is accepted, even with Sun Cloud connected.
+// ponytail: a constant until credits are sold; then the `sun_cloud` gate alone.
+const CREDITS_ON_SALE: bool = false;
+
 /// A configured runtime of `caller`'s for `workspace` from `input`, checked
 /// by [`Runtime::validate`]. The 422 message starts with the field to fix
 /// (`name: `, `endpoint: `, ...).
@@ -998,7 +1003,7 @@ fn runtime_of(
 ) -> ApiResult<Runtime> {
     match input.source {
         RuntimeSource::ByoKey => {}
-        RuntimeSource::Credits if api.sun_cloud => {}
+        RuntimeSource::Credits if CREDITS_ON_SALE && api.sun_cloud => {}
         RuntimeSource::Credits => {
             return Err(ApiError::invalid(
                 "source: Sun credits are not available on this deployment yet; bring your own \
