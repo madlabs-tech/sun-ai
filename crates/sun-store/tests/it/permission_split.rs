@@ -1,8 +1,6 @@
 //! The permission-matrix upgrade fixture for the migration test in `acl.rs`.
 #![allow(clippy::unwrap_used)]
 
-use sun_core::model::{Group, Permission};
-
 /// The first migration after the groups it rewrites.
 pub const VERSION: i64 = 20261016090000;
 
@@ -27,38 +25,50 @@ pub const OLD_GROUPS: [(&str, &str, &str); 4] = [
     ),
 ];
 
-/// The groups after the permission-matrix upgrade: the seeded three, then [`OLD_GROUPS`].
-pub fn assert_split(groups: &[Group]) {
-    use Permission::*;
+/// The groups after the permission-matrix upgrade (key, permissions as
+/// stored, read before groups became roles): the seeded three, then
+/// [`OLD_GROUPS`]. Order and duplicates are ignored, as reads normalised
+/// them then.
+pub fn assert_split(groups: &[(String, Vec<String>)]) {
     let by_key = |key: &str| {
-        groups
-            .iter()
-            .find(|g| g.key == key)
-            .unwrap()
-            .permissions
-            .clone()
+        let mut permissions = groups.iter().find(|g| g.0 == key).unwrap().1.clone();
+        permissions.sort();
+        permissions.dedup();
+        permissions
+    };
+    let sorted = |list: &[&str]| {
+        let mut list: Vec<String> = list.iter().map(|p| (*p).to_owned()).collect();
+        list.sort();
+        list
     };
     let members = [
-        ManageSettings,
-        InviteMembers,
-        CreateMembers,
-        ViewMembers,
-        EditMembers,
-        DeactivateMembers,
-        ManageGroups,
+        "manage_settings",
+        "invite_members",
+        "create_members",
+        "view_members",
+        "edit_members",
+        "deactivate_members",
+        "manage_groups",
     ];
-    assert_eq!(by_key("admin"), Permission::ALL, "Admin keeps everything");
-    assert_eq!(by_key("keepers"), members);
+    assert_eq!(by_key("keepers"), sorted(&members));
     assert_eq!(
         by_key("builders"),
-        [Run, CreateWorkspace, EditWorkspace, DeleteWorkspace]
+        sorted(&[
+            "run",
+            "create_workspace",
+            "edit_workspace",
+            "delete_workspace"
+        ])
     );
-    assert_eq!(by_key("runners"), [Run]);
-    let mixed: Vec<Permission> = Permission::ALL
-        .iter()
-        .copied()
-        .filter(|p| members.contains(p) || [Approve, EditWorkspace, DeleteWorkspace].contains(p))
-        .collect();
-    assert_eq!(by_key("mixed"), mixed);
+    assert_eq!(by_key("runners"), ["run"]);
+    let mut mixed = members.to_vec();
+    mixed.extend(["approve", "edit_workspace", "delete_workspace"]);
+    assert_eq!(by_key("mixed"), sorted(&mixed));
     assert!(by_key("viewer").is_empty());
+    for permission in ["access_all_workspaces", "manage_groups", "delete_workspace"] {
+        assert!(
+            by_key("admin").iter().any(|p| p == permission),
+            "{permission}"
+        );
+    }
 }

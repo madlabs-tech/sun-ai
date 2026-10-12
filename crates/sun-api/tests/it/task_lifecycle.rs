@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use sun_core::GroupId;
+use sun_core::model::Role;
 
 use crate::common::kernel;
 use crate::workspaces::{FLOW, call, call_as, member_token};
@@ -375,7 +375,7 @@ async fn any_run_of_a_task_shows_its_steps_and_gates() {
         .as_str()
         .unwrap()
         .to_owned();
-    let bob = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let bob = member_token(&k.store, "bob", Role::Member).await;
     let (status, _) = call_as(
         app,
         &bob,
@@ -404,7 +404,7 @@ async fn another_workspaces_task_answers_404() {
     let hidden = create(app, json!({ "title": "secret", "workspace_id": ops })).await;
     assert_eq!(hidden["key"], "OPS-1");
     let seen = create(app, json!({ "title": "open", "workspace_id": MAIN })).await;
-    let bob = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let bob = member_token(&k.store, "bob", Role::Member).await;
     for task in [hidden["id"].as_str().unwrap(), "OPS-1", "ops-1"] {
         let path = format!("/api/v1/tasks/{task}");
         let (status, _) = call_as(app, &bob, "PATCH", &path, Some(json!({ "title": "x" }))).await;

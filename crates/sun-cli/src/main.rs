@@ -114,18 +114,10 @@ enum Command {
     /// losing it loses every secret.
     #[command(subcommand)]
     Secret(SecretCommand),
-    /// Invite-only members: invite, re-invite, remove (through the running kernel).
+    /// Members: invite, re-invite, remove (through the running kernel).
     User {
         #[command(subcommand)]
         command: sun_cli::users::UserCommand,
-        #[command(flatten)]
-        remote: Remote,
-    },
-    /// Groups: renamable roles with their own permissions (through the
-    /// running kernel).
-    Group {
-        #[command(subcommand)]
-        command: sun_cli::users::GroupCommand,
         #[command(flatten)]
         remote: Remote,
     },
@@ -328,19 +320,6 @@ enum WorkspaceCommand {
     Create {
         /// Name, 1–64 characters, unique ignoring case.
         name: String,
-        /// A group that sees it (id, key or name), repeatable. None: only
-        /// admins (`access_all_workspaces`) see it.
-        #[arg(long = "group")]
-        groups: Vec<String>,
-        #[command(flatten)]
-        remote: Remote,
-    },
-    /// Set exactly which groups see a workspace (none: only admins).
-    SetGroups {
-        /// Workspace id or name.
-        workspace: String,
-        /// Groups (id, key or name).
-        groups: Vec<String>,
         #[command(flatten)]
         remote: Remote,
     },
@@ -838,9 +817,6 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::User { command, remote } => {
             sun_cli::users::run_user(&client(&data_dir, remote)?, command)
-        }
-        Command::Group { command, remote } => {
-            sun_cli::users::run_group(&client(&data_dir, remote)?, command)
         }
         Command::Smtp { command, remote } => {
             sun_cli::users::run_smtp(&client(&data_dir, remote)?, command)
@@ -1600,13 +1576,8 @@ fn workflow(data_dir: &Path, command: WorkflowCommand) -> Result<()> {
 
 fn workspace(data_dir: &Path, command: WorkspaceCommand) -> Result<()> {
     let print = |workspace: &Value| {
-        let groups = workspace["group_ids"].as_array().map_or(0, Vec::len);
-        let access = match groups {
-            0 => "admins only".to_owned(),
-            n => format!("{n} group(s)"),
-        };
         println!(
-            "{}  {}  ({access})",
+            "{}  {}",
             workspace["id"].as_str().unwrap_or("?"),
             workspace["name"].as_str().unwrap_or("")
         );
@@ -1622,26 +1593,9 @@ fn workspace(data_dir: &Path, command: WorkspaceCommand) -> Result<()> {
                 print(workspace);
             }
         }
-        WorkspaceCommand::Create {
-            name,
-            groups,
-            remote,
-        } => {
-            let client = client(data_dir, remote)?;
-            let group_ids = sun_cli::users::group_ids(&client, &groups)?;
-            let body = json!({ "name": name, "group_ids": group_ids });
-            print(&client.post("/workspaces", &body)?);
-        }
-        WorkspaceCommand::SetGroups {
-            workspace,
-            groups,
-            remote,
-        } => {
-            let client = client(data_dir, remote)?;
-            let id = client.workspace_id(&workspace)?;
-            let group_ids = sun_cli::users::group_ids(&client, &groups)?;
-            let body = json!({ "group_ids": group_ids });
-            print(&client.put(&format!("/workspaces/{id}/groups"), &body)?);
+        WorkspaceCommand::Create { name, remote } => {
+            let body = json!({ "name": name });
+            print(&client(data_dir, remote)?.post("/workspaces", &body)?);
         }
         WorkspaceCommand::Rename {
             workspace,

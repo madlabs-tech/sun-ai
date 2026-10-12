@@ -4,7 +4,7 @@
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use sun_core::GroupId;
+use sun_core::model::Role;
 
 use crate::common::kernel;
 use crate::workspaces::{FLOW, call, call_as, member_token};
@@ -60,7 +60,7 @@ async fn agents_crud_needs_manage_runtimes_and_reads_are_open() {
     );
 
     // Bob (no manage_runtimes) reads but can't write.
-    let bob = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let bob = member_token(&k.store, "bob", Role::Member).await;
     let (status, listed) = call_as(app, &bob, "GET", "/api/v1/agents", None).await;
     assert_eq!(
         (status, listed.as_array().unwrap().len()),
@@ -230,7 +230,7 @@ async fn a_hidden_workspaces_workflow_is_no_assignee() {
     .await;
     let body = json!({ "source_yaml": FLOW, "workspace_id": ops["id"] });
     let (_, on_ops) = call(app, "POST", "/api/v1/workflows", Some(body)).await;
-    let bob = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let bob = member_token(&k.store, "bob", Role::Member).await;
     let sneak = json!({
         "title": "x",
         "workspace_id": MAIN,

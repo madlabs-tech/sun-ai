@@ -1,4 +1,4 @@
-//! Sign-in, sessions and groups.
+//! Sign-in, sessions and workspace roles.
 //!
 //! - **Kernel token** (the CLI): `Authorization: Bearer <token>`. The holder
 //!   is an owner acting as [`crate::ApiConfig::principal`]. Browsers never
@@ -25,15 +25,15 @@
 //!   starts skip Sun's 2-step (the identity provider owns that).
 //! - A sign-in puts a random session token in the `sun_token` cookie
 //!   (`EventSource` cannot send headers); the session maps it to a
-//!   [`Member`], whose groups are read on every request so a change applies
+//!   [`Member`], whose workspace roles are read on every request so a change applies
 //!   at once. Sessions are stored (as `sha256(token)` only), so a restart
 //!   signs nobody out; they last [`SESSION_TTL`]. Sign-out deletes the row.
-//! - Every authenticated request carries a [`Caller`] with the union of its
-//!   groups' [`Permission`]s (every one for an owner), read per request.
+//! - Every authenticated request carries a [`Caller`] with its role's
+//!   [`Permission`]s in Main (every one for an owner), read per request.
 //!   [`require_by_method`] lets anyone read (`GET`) and writing needs `run`;
-//!   [`require`] guards routes by permission (members, groups and
+//!   [`require`] guards routes by permission (members and
 //!   settings each have their own); [`require_owner`] guards the owner flag.
-//!   Approvals pass the caller's [`Principal`] (username and group keys)
+//!   Approvals pass the caller's [`Principal`] (username and role keys)
 //!   to the engine.
 
 mod members;
@@ -56,7 +56,7 @@ use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sun_core::model::{FIRST_ADMIN_EMAIL, Group, Permission};
+use sun_core::model::{FIRST_ADMIN_EMAIL, Permission, Role, WorkspaceMember, permissions_of};
 use sun_core::{Error, MemberId, WorkspaceId};
 use sun_engine::{Access, Principal};
 
@@ -64,10 +64,7 @@ use crate::Api;
 use crate::error::{ApiError, ApiResult};
 use crate::hosts::random_hex;
 
-pub(crate) use members::{
-    audit_log, create_group, delete_group, list_groups, list_members, set_group_members,
-    set_member_groups, set_owner, update_group,
-};
+pub(crate) use members::{audit_log, list_members, set_owner};
 pub(crate) use passkey::{confirm as confirm_my_passkey, start as start_my_passkey};
 pub use sso::PresetUrls;
 pub(crate) use sso::{
@@ -97,12 +94,13 @@ pub(crate) struct Caller {
     pub(crate) principal: Principal,
     /// Owners have every permission and alone grant or touch owners.
     pub(crate) is_owner: bool,
-    /// The member's groups (none for the token holder).
-    pub(crate) groups: Vec<Group>,
-    /// The union of the groups' permissions; all of them for an owner.
+    /// The member's workspaces and role in each (none for the token holder).
+    pub(crate) memberships: Vec<WorkspaceMember>,
+    /// Their role's permissions in Main (see [`Caller::member`]); all of
+    /// them for an owner.
     pub(crate) permissions: Vec<Permission>,
-    /// The workspaces they see; `None` for every workspace (owners and
-    /// `access_all_workspaces`). Enforced by [`crate::workspace_access::guard`].
+    /// The workspaces they see (their memberships); `None` for every
+    /// workspace (deployment owners). Enforced by [`crate::workspace_access::guard`].
     pub(crate) workspaces: Option<Vec<WorkspaceId>>,
     /// How the session started: `token` (the CLI), `sso` (an SSO sign-in,
     /// any provider) or `local` (a password or code).
@@ -150,7 +148,15 @@ impl Caller {
         self.workspaces.is_none() || workspace.parse().is_ok_and(|b| self.sees(b))
     }
 
-    /// True when one of the caller's groups grants `permission`.
+    /// Their role in `workspace`, if they are a member.
+    pub(crate) fn role_in(&self, workspace: WorkspaceId) -> Option<Role> {
+        self.memberships
+            .iter()
+            .find(|m| m.workspace_id == workspace)
+            .map(|m| m.role)
+    }
+
+    /// True when the caller's role in Main grants `permission` (see [`Caller::member`]).
     pub(crate) fn can(&self, permission: Permission) -> bool {
         self.permissions.contains(&permission)
     }
@@ -173,16 +179,13 @@ impl Caller {
             Permission::ViewMembers => "see members",
             Permission::EditMembers => "edit members",
             Permission::DeactivateMembers => "deactivate members",
-            Permission::ManageGroups => "manage groups",
-            Permission::CreateWorkspace => "create workspaces",
             Permission::EditWorkspace => "edit workspaces",
             Permission::DeleteWorkspace => "delete workspaces",
             Permission::CreateWorkflow => "create workflows",
             Permission::EditWorkflow => "edit workflows",
-            Permission::AccessAllWorkspaces => "see every workspace",
         };
         Err(forbidden(format!(
-            "None of your groups can {what}. Ask an admin for a group with the \
+            "Your role can't {what}. Ask a workspace admin for a role with the \
              `{permission}` permission."
         )))
     }
@@ -195,15 +198,20 @@ impl Caller {
         }
     }
 
-    /// A signed-in member, with their groups' permissions; `sso` when an SSO
-    /// sign-in started the session.
+    /// A signed-in member, with their role's permissions in Main; `sso`
+    /// when an SSO sign-in started the session.
+    // ponytail: the role in Main stands for every workspace (permissions
+    // and approval roles) until M2 checks the role in the workspace a route
+    // names; a union would let owning a new workspace grant admin in Main.
     fn member(access: Access, sso: bool) -> Self {
-        let principal = access.principal();
+        let principal = access.principal_in(WorkspaceId::MAIN);
+        let main: Vec<Role> = access.role_in(WorkspaceId::MAIN).into_iter().collect();
+        let permissions = permissions_of(access.member.is_owner, &main);
         let Access {
             member,
-            groups,
-            permissions,
+            memberships,
             workspaces,
+            ..
         } = access;
         let via = if sso { "sso" } else { "local" };
         Self {
@@ -211,7 +219,7 @@ impl Caller {
             permissions,
             workspaces,
             is_owner: member.is_owner,
-            groups,
+            memberships,
             via,
             needs_email: needs_email(member.email.as_deref()),
             email: member.email,
@@ -323,7 +331,7 @@ async fn resolve(api: &Api, headers: &HeaderMap) -> ApiResult<Option<Caller>> {
     let owner = Caller {
         principal: api.config.principal.clone(),
         is_owner: true,
-        groups: Vec::new(),
+        memberships: Vec::new(),
         permissions: Permission::ALL.to_vec(),
         workspaces: None,
         via: "token",
@@ -523,7 +531,7 @@ pub(crate) async fn sign_out(State(api): State<Api>, headers: HeaderMap) -> ApiR
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, cookie)]).into_response())
 }
 
-/// `GET /api/v1/me`: who the caller is, their groups and effective
+/// `GET /api/v1/me`: who the caller is, their workspace roles and effective
 /// permissions, whether they are an owner, the role view they picked, and
 /// what they must do first (`needs_email`, `must_set_password`,
 /// `must_enroll_two_step`). For the
@@ -537,7 +545,7 @@ pub(crate) async fn me(
     Ok(Json(json!({
         "user": caller.principal.user,
         "is_owner": caller.is_owner,
-        "groups": caller.groups,
+        "memberships": caller.memberships,
         "permissions": caller.permissions,
         "via": caller.via,
         "needs_email": needs_email(email.as_deref()),

@@ -9,7 +9,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use serde_json::{Value, json};
-use sun_core::GroupId;
+use sun_core::model::Role;
 use sun_mod_sdk::http::mock;
 
 use http_body_util::BodyExt;
@@ -187,8 +187,8 @@ pub(crate) struct Side {
     pub repo: String,
 }
 
-/// Main (seen by the seeded groups) and Ops (no groups: hidden from all but
-/// admins), each with a logo, a project, tasks, a run, a GitLab connection
+/// Main (the test members' workspace) and Ops (no members: hidden from all
+/// but deployment owners), each with a logo, a project, tasks, a run, a GitLab connection
 /// and a repo.
 pub(crate) async fn side(k: &Kernel, gitlab: &str, id: &str, name: &str) -> Side {
     let app = &k.app;
@@ -440,29 +440,12 @@ async fn hit(
 async fn every_new_route_hides_other_workspaces_and_checks_its_permission() {
     let w = world().await;
     let app = &w.k.app;
-    // An editor: sees Main (its group is attached) and may edit it, but has
-    // no `manage_secrets`.
-    let editors = ok(
-        app,
-        "POST",
-        "/api/v1/groups",
-        Some(json!({ "name": "Editors", "permissions": ["edit_workspace", "run"] })),
-    )
-    .await;
-    let editors: GroupId = editors["id"].as_str().unwrap().parse().unwrap();
-    let all = json!({ "group_ids": [GroupId::VIEWER, GroupId::MEMBER, GroupId::ADMIN, editors] });
-    ok(
-        app,
-        "PUT",
-        &format!("/api/v1/workspaces/{MAIN}/groups"),
-        Some(all),
-    )
-    .await;
-    let viewer = member_token(&w.k.store, "vic", &[GroupId::VIEWER]).await;
-    let member = member_token(&w.k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
-    let editor = member_token(&w.k.store, "eve", &[GroupId::VIEWER, editors]).await;
+    // An editor: an admin of Main (roles have no edit-but-not-secrets step).
+    let viewer = member_token(&w.k.store, "vic", Role::Viewer).await;
+    let member = member_token(&w.k.store, "bob", Role::Member).await;
+    let editor = member_token(&w.k.store, "eve", Role::Admin).await;
 
-    // Ops is hidden from everyone but admins: 404 for every route, whatever
+    // Ops is hidden from everyone but its members: 404 for every route, whatever
     // the permission, even the reads.
     for token in [&viewer, &member, &editor] {
         for (method, path, body, _) in routes(&w.ops, &w.agent) {
@@ -488,13 +471,6 @@ async fn every_new_route_hides_other_workspaces_and_checks_its_permission() {
             assert_eq!(status, StatusCode::FORBIDDEN, "member: {method} {path}");
         }
     }
-    // The editor lacks only `manage_secrets`.
-    for (method, path, body, need) in routes(&w.main, &w.agent) {
-        if need == Need::EditSecrets {
-            let status = hit(app, &editor, method, &path, body).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "editor: {method} {path}");
-        }
-    }
     // Agents: reads are open, writes need `manage_runtimes`.
     let agent = format!("/api/v1/agents/{}", w.agent);
     assert_eq!(
@@ -510,7 +486,7 @@ async fn every_new_route_hides_other_workspaces_and_checks_its_permission() {
         ("PATCH", agent.clone(), Some(json!({ "description": "x" }))),
         ("DELETE", agent.clone(), None),
     ];
-    for token in [&viewer, &member, &editor] {
+    for token in [&viewer, &member] {
         for (method, path, body) in writes.clone() {
             let status = call_as(app, token, method, &path, body).await.0;
             assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
@@ -553,7 +529,7 @@ async fn filters_and_bodies_never_reach_into_a_hidden_workspace() {
         )
         .await;
     }
-    let member = member_token(&w.k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let member = member_token(&w.k.store, "bob", Role::Member).await;
     let (status, listed) = call_as(
         app,
         &member,

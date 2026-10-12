@@ -5,21 +5,22 @@
 //! same row ([`Engine::import_to_workspace`]). Each change commits with its
 //! audit row.
 //!
-//! Access: a workspace is visible to the groups attached to it
-//! ([`Engine::set_workspace_groups`]), to owners and to `access_all_workspaces`
+//! Access: a workspace is visible to its members (`workspace_member`, its
+//! creator is its first owner) and to deployment owners
 //! ([`crate::Access::workspaces`]). [`Engine::reach`] says which workspaces anything
 //! workspace-scoped lives on, for the API's one access guard.
 
 use sun_core::model::{
-    AuditAction, GitSettings, GitSettingsPatch, OutboxStatus, Task, Workflow, Workspace,
+    AuditAction, GitSettings, GitSettingsPatch, OutboxStatus, Role, SignupPolicy, Task, Workflow,
+    Workspace,
 };
 use sun_core::{
-    ArtifactId, Error, EvalRunId, EvalSetId, GroupId, OutboxId, ProjectId, RepoId, Result, RunId,
+    ArtifactId, Error, EvalRunId, EvalSetId, MemberId, OutboxId, ProjectId, RepoId, Result, RunId,
     TaskId, VcsConnectionId, WorkflowId, WorkspaceId,
 };
 use sun_store::{
-    AgentRepo, ArtifactRepo, AuditRepo, EvalRepo, GroupRepo, KnowledgeRepo, OutboxRepo,
-    ProjectRepo, RepoRepo, RunRepo, TaskRepo, Tx, VcsRepo, WorkflowRepo, WorkspaceItem,
+    AgentRepo, ArtifactRepo, AuditRepo, EvalRepo, KnowledgeRepo, MemberRepo, MembershipRepo,
+    OutboxRepo, ProjectRepo, RepoRepo, RunRepo, TaskRepo, Tx, VcsRepo, WorkflowRepo, WorkspaceItem,
     WorkspaceRepo,
 };
 
@@ -153,20 +154,32 @@ impl Engine {
     }
 
     /// Creates a workspace named `name` (trimmed, 1–64 chars, unique ignoring
-    /// case), visible to `groups` (none: admins only). `slug` defaults from
-    /// the name (made unique with `-2`, …); a given one must be free. The
-    /// issue prefix comes from the slug, made unique in the ecosystem with a
-    /// digit (`MAIN` → `MAIN2`), as the task migration does.
+    /// case) and makes `creator` its owner, in one transaction (`None`: the
+    /// token holder, a deployment owner who sees every workspace anyway).
+    /// `slug` defaults from the name (made unique with `-2`, …); a given one
+    /// must be free. The issue prefix comes from the slug, made unique in
+    /// the ecosystem with a digit (`MAIN` → `MAIN2`), as the task migration
+    /// does. With `policy.disable_workspace_creation`, only deployment
+    /// owners may (`Forbidden`).
     pub async fn create_workspace(
         &self,
         name: &str,
         slug: Option<&str>,
-        groups: &[GroupId],
+        creator: Option<MemberId>,
+        policy: &SignupPolicy,
         actor: &str,
     ) -> Result<Workspace> {
         let name = Workspace::clean_name(name)?;
         let slug = slug.map(Workspace::clean_slug).transpose()?;
         let mut tx = self.store.begin().await?;
+        if let Some(creator) = creator
+            && policy.disable_workspace_creation
+            && !tx.get_member(creator).await?.is_owner
+        {
+            return Err(Error::Forbidden(
+                "Only the deployment's owners can create workspaces here.".into(),
+            ));
+        }
         let slug = match slug {
             Some(slug) => slug,
             None => tx.free_slug(&Workspace::slug_from_name(&name)).await?,
@@ -183,9 +196,13 @@ impl Engine {
             issue_counter: 0,
             default_workflow_id: None,
             git_settings: GitSettings::default(),
+            created_by: creator,
             created_at: chrono::Utc::now(),
         };
         tx.insert_workspace(&workspace).await?;
+        if let Some(creator) = creator {
+            tx.add_member(workspace.id, creator, Role::Owner).await?;
+        }
         tx.append_audit(
             actor,
             AuditAction::WorkspaceChange,
@@ -193,50 +210,8 @@ impl Engine {
             "created",
         )
         .await?;
-        if !groups.is_empty() {
-            tx.set_workspace_groups(workspace.id, groups).await?;
-            let detail = format!("access: {}", group_names(&mut tx, groups).await?);
-            tx.append_audit(
-                actor,
-                AuditAction::WorkspaceChange,
-                &workspace.name,
-                &detail,
-            )
-            .await?;
-        }
         tx.commit().await?;
         Ok(workspace)
-    }
-
-    /// Every `(workspace, group)` access link.
-    pub async fn workspace_groups(&self) -> Result<Vec<(WorkspaceId, GroupId)>> {
-        Ok(self.store.read().await?.workspace_groups().await?)
-    }
-
-    /// The groups that see `workspace`.
-    pub async fn groups_of_workspace(&self, workspace: WorkspaceId) -> Result<Vec<GroupId>> {
-        groups_of_workspace(&mut self.store.read().await?, workspace).await
-    }
-
-    /// Makes `groups` exactly the groups that see `workspace`.
-    pub async fn set_workspace_groups(
-        &self,
-        workspace: WorkspaceId,
-        groups: &[GroupId],
-        actor: &str,
-    ) -> Result<()> {
-        let mut tx = self.store.begin().await?;
-        let name = tx.get_workspace(workspace).await?.name;
-        let before = groups_of_workspace(&mut tx, workspace).await?;
-        tx.set_workspace_groups(workspace, groups).await?;
-        let detail = format!(
-            "access: {} -> {}",
-            group_names(&mut tx, &before).await?,
-            group_names(&mut tx, groups).await?
-        );
-        tx.append_audit(actor, AuditAction::WorkspaceChange, &name, &detail)
-            .await?;
-        Ok(tx.commit().await?)
     }
 
     /// The workspaces `thing` lives on. `NotFound` when it doesn't exist.
@@ -555,29 +530,6 @@ impl Engine {
         .await?;
         Ok(tx.commit().await?)
     }
-}
-
-async fn groups_of_workspace(tx: &mut Tx, workspace: WorkspaceId) -> Result<Vec<GroupId>> {
-    Ok(tx
-        .workspace_groups()
-        .await?
-        .into_iter()
-        .filter(|(b, _)| *b == workspace)
-        .map(|(_, g)| g)
-        .collect())
-}
-
-/// `Admin, Builders`, or `admins only` for no groups.
-async fn group_names(tx: &mut Tx, groups: &[GroupId]) -> Result<String> {
-    let mut names = Vec::new();
-    for id in groups {
-        names.push(tx.get_group(*id).await?.name);
-    }
-    names.sort();
-    Ok(match names.is_empty() {
-        true => "admins only".into(),
-        false => names.join(", "),
-    })
 }
 
 /// `knowledge source <name>`; `NotFound` when it is missing.

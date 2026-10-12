@@ -5,6 +5,7 @@ mod chat;
 mod crash;
 mod eval;
 mod failover;
+mod members;
 mod queue;
 mod support;
 mod watchdog;

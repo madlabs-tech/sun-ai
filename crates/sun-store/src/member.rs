@@ -1,6 +1,6 @@
 //! `member`, `login_token` and `audit`: who may sign in,
-//! whether they are an owner, their groups (`member_group`), password
-//! hash and whether they are deactivated, whether they set up a second
+//! whether they are a deployment owner, whether they verified their email,
+//! password hash and whether they are deactivated, whether they set up a second
 //! step, their sign-in sessions, invite codes and 2-step challenges, and the append-only log of security-relevant actions.
 //! Emails are stored lowercase; '' means a member from before invites that has not
 //! given one yet (read back as `None`).
@@ -10,7 +10,7 @@ use chrono::SubsecRound;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use sun_core::model::{AuditAction, AuditEntry, LOCAL_ISSUER, Member};
-use sun_core::{AuditId, GroupId, MemberId, Timestamp};
+use sun_core::{AuditId, MemberId, Timestamp};
 
 use crate::repo::{parse, parse_ts, ts};
 use crate::{Result, StoreError, Tx};
@@ -18,9 +18,10 @@ use crate::{Result, StoreError, Tx};
 /// **Repository** for `member` rows.
 #[async_trait]
 pub trait MemberRepo {
-    /// The member signed in as `(issuer, subject)`, created in no group
-    /// (an owner when `is_owner`) when new. An existing member keeps its
-    /// groups and owner flag; its username and email are refreshed.
+    /// The member signed in as `(issuer, subject)`, created in no workspace
+    /// (a deployment owner when `is_owner`) when new. An existing member
+    /// keeps its memberships and owner flag; its username and email are
+    /// refreshed.
     async fn upsert_member(
         &mut self,
         issuer: &str,
@@ -35,16 +36,22 @@ pub trait MemberRepo {
     async fn members(&mut self) -> Result<Vec<Member>>;
     /// Makes the member an owner or not, or `NotFound`.
     async fn set_member_owner(&mut self, id: MemberId, is_owner: bool) -> Result<()>;
-    /// A new invited member (`issuer = local`, `subject` = the email) in
-    /// `groups`, without a password. `email` must be normalized; a taken one
-    /// is `InvalidInput`, an unknown group `NotFound`.
+    /// A new invited member (`issuer = local`, `subject` = the email) in no
+    /// workspace, without a password. `email` must be normalized; a taken
+    /// one is `InvalidInput`.
     async fn invite_member(
         &mut self,
         email: &str,
         username: &str,
         is_owner: bool,
-        groups: &[GroupId],
     ) -> Result<Member>;
+    /// A new member who signed up with `email` (normalized; also the
+    /// username): `issuer = local`, no password, email not verified yet, in
+    /// no workspace. A taken email is `InvalidInput`.
+    async fn create_unverified(&mut self, email: &str) -> Result<Member>;
+    /// Records that the member proved they own their email (now), unless
+    /// already verified; `NotFound` for an unknown member.
+    async fn verify_email(&mut self, id: MemberId) -> Result<()>;
     /// The member with this (normalized) email, if any.
     async fn member_by_email(&mut self, email: &str) -> Result<Option<Member>>;
     /// The member signed in as `(issuer, subject)`, if any.
@@ -338,26 +345,14 @@ impl LoginRepo for Tx {
 const MEMBER_COLUMNS: &str = "id, issuer, subject, username, email, is_owner";
 /// [`MEMBER_COLUMNS`] plus what [`member_from`] derives the flags from.
 const MEMBER_SELECT: &str = "id, issuer, subject, username, email, is_owner, password_hash, \
-                             must_set_password, deactivated_at";
+                             must_set_password, deactivated_at, email_verified_at";
 
-/// `members` with their group ids filled in (one query for all of them).
-async fn with_groups(tx: &mut Tx, mut members: Vec<Member>) -> Result<Vec<Member>> {
+/// `members` with their 2-step flag filled in (one query for all of them).
+async fn with_two_step(tx: &mut Tx, mut members: Vec<Member>) -> Result<Vec<Member>> {
     if members.is_empty() {
         return Ok(members);
     }
     let one = (members.len() == 1).then(|| members[0].id.to_string());
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT member_id, group_id FROM member_group
-         WHERE $1 IS NULL OR member_id = $1 ORDER BY group_id",
-    )
-    .bind(one.clone())
-    .fetch_all(tx.conn())
-    .await?;
-    for (member, group) in rows {
-        if let Some(m) = members.iter_mut().find(|m| m.id.to_string() == member) {
-            m.groups.push(parse(group)?);
-        }
-    }
     let with_two_step: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT DISTINCT member_id FROM member_factor
          WHERE ($1 IS NULL OR member_id = $1) AND {}",
@@ -372,13 +367,13 @@ async fn with_groups(tx: &mut Tx, mut members: Vec<Member>) -> Result<Vec<Member
     Ok(members)
 }
 
-/// One row as a [`Member`] with its groups.
+/// One row as a [`Member`] with its 2-step flag.
 async fn one(tx: &mut Tx, row: Option<SqliteRow>) -> Result<Option<Member>> {
     let Some(row) = row else {
         return Ok(None);
     };
     let member = member_from(&row)?;
-    Ok(with_groups(tx, vec![member]).await?.pop())
+    Ok(with_two_step(tx, vec![member]).await?.pop())
 }
 
 /// `InvalidInput` unless no member other than `except` has `email`.
@@ -439,7 +434,7 @@ impl MemberRepo for Tx {
             .iter()
             .map(member_from)
             .collect::<Result<Vec<_>>>()?;
-        with_groups(self, members).await
+        with_two_step(self, members).await
     }
 
     async fn set_member_owner(&mut self, id: MemberId, is_owner: bool) -> Result<()> {
@@ -459,9 +454,7 @@ impl MemberRepo for Tx {
         email: &str,
         username: &str,
         is_owner: bool,
-        groups: &[GroupId],
     ) -> Result<Member> {
-        use crate::GroupRepo;
         email_free(self, email, None).await?;
         let row = sqlx::query(&format!(
             "INSERT INTO member ({MEMBER_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6)
@@ -475,9 +468,26 @@ impl MemberRepo for Tx {
         .bind(i64::from(is_owner))
         .fetch_one(self.conn())
         .await?;
-        let id = member_from(&row)?.id;
-        self.set_member_groups(id, groups).await?;
-        self.get_member(id).await
+        let member = one(self, Some(row)).await?;
+        member.ok_or_else(|| StoreError::not_found("member", email))
+    }
+
+    async fn create_unverified(&mut self, email: &str) -> Result<Member> {
+        self.invite_member(email, email, false).await
+    }
+
+    async fn verify_email(&mut self, id: MemberId) -> Result<()> {
+        let done = sqlx::query(
+            "UPDATE member SET email_verified_at = coalesce(email_verified_at, $1) WHERE id = $2",
+        )
+        .bind(ts(&chrono::Utc::now()))
+        .bind(id.to_string())
+        .execute(self.conn())
+        .await?;
+        match done.rows_affected() {
+            0 => Err(StoreError::not_found("member", id)),
+            _ => Ok(()),
+        }
     }
 
     async fn member_by_email(&mut self, email: &str) -> Result<Option<Member>> {
@@ -637,7 +647,10 @@ fn member_from(row: &SqliteRow) -> Result<Member> {
         username: row.try_get("username")?,
         email: (!email.is_empty()).then_some(email),
         is_owner: row.try_get::<i64, _>("is_owner")? != 0,
-        groups: Vec::new(),
+        email_verified_at: row
+            .try_get::<Option<String>, _>("email_verified_at")?
+            .map(parse_ts)
+            .transpose()?,
         has_password: hash.is_some(),
         must_set_password: row.try_get::<i64, _>("must_set_password")? != 0,
         deactivated_at: row
@@ -656,9 +669,7 @@ mod tests {
     use crate::Store;
 
     #[tokio::test]
-    async fn acl_members_keep_groups_and_owner_and_audit_is_append_only() {
-        use crate::GroupRepo;
-        use sun_core::model::Permission;
+    async fn members_keep_owner_flag_verify_once_and_audit_is_append_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let mut tx = store.begin().await.unwrap();
@@ -666,12 +677,13 @@ mod tests {
             .upsert_member("https://idp", "a1", "alice", None, false)
             .await
             .unwrap();
-        assert!(alice.groups.is_empty() && !alice.is_owner);
-        tx.set_member_groups(alice.id, &[GroupId::ADMIN, GroupId::VIEWER])
-            .await
-            .unwrap();
+        assert!(!alice.is_owner && alice.email_verified_at.is_none());
         tx.set_member_owner(alice.id, true).await.unwrap();
-        // Signing in again refreshes the profile, not the groups.
+        tx.verify_email(alice.id).await.unwrap();
+        let verified = tx.get_member(alice.id).await.unwrap().email_verified_at;
+        assert!(verified.is_some());
+        // Signing in again refreshes the profile, not the owner flag; a
+        // second verify keeps the first time.
         let again = tx
             .upsert_member("https://idp", "a1", "al", Some("a@x.io"), false)
             .await
@@ -680,55 +692,22 @@ mod tests {
             (again.id, again.is_owner, again.username.as_str()),
             (alice.id, true, "al")
         );
-        assert_eq!(again.groups, [GroupId::VIEWER, GroupId::ADMIN]);
-        assert!(
-            tx.set_member_groups(alice.id, &[GroupId::generate()])
-                .await
-                .is_err()
-        );
+        tx.verify_email(alice.id).await.unwrap();
+        assert_eq!(again.email_verified_at, verified);
+        assert!(tx.verify_email(MemberId::generate()).await.is_err());
 
-        // Groups: seeded three, unique names, stable keys, delete drops
-        // memberships.
-        let seeded: Vec<_> = tx.groups().await.unwrap();
-        let keys: Vec<&str> = seeded.iter().map(|g| g.key.as_str()).collect();
-        assert_eq!(keys, ["viewer", "member", "admin"]);
-        assert!(seeded[0].permissions.is_empty());
+        // Signing up: local, no password, unverified, the email as username.
+        let bob = tx.create_unverified("bob@x.io").await.unwrap();
         assert_eq!(
-            seeded[1].permissions,
-            [
-                Permission::Run,
-                Permission::Approve,
-                Permission::CreateWorkflow,
-                Permission::EditWorkflow
-            ]
+            (
+                bob.issuer.as_str(),
+                bob.subject.as_str(),
+                bob.username.as_str()
+            ),
+            (LOCAL_ISSUER, "bob@x.io", "bob@x.io")
         );
-        assert!(!seeded[1].permissions.contains(&Permission::CreateWorkspace));
-        assert_eq!(seeded[2].permissions.len(), Permission::ALL.len());
-        assert!(tx.insert_group("ADMIN", &[]).await.is_err());
-        let owner = tx.insert_group("Owner", &[]).await.unwrap();
-        assert_eq!(owner.key, "owner_2", "`owner` is reserved");
-        let b = tx
-            .insert_group("Group B", &[Permission::EditWorkflow])
-            .await
-            .unwrap();
-        let b2 = tx.insert_group("group-b", &[]).await.unwrap();
-        assert_eq!((b.key.as_str(), b2.key.as_str()), ("group_b", "group_b_2"));
-        tx.rename_group(b.id, "Builders").await.unwrap();
-        assert!(tx.rename_group(b2.id, "builders").await.is_err());
-        tx.set_group_permissions(b.id, &[Permission::CreateWorkspace])
-            .await
-            .unwrap();
-        let b = tx.get_group(b.id).await.unwrap();
-        assert_eq!(
-            (b.key.as_str(), b.name.as_str(), b.permissions.as_slice()),
-            ("group_b", "Builders", &[Permission::CreateWorkspace][..])
-        );
-        tx.set_group_members(b.id, &[alice.id]).await.unwrap();
-        let mine: Vec<_> = tx.groups_of_member(alice.id).await.unwrap();
-        assert_eq!(mine.len(), 3);
-        tx.delete_group(b.id).await.unwrap();
-        assert_eq!(tx.get_member(alice.id).await.unwrap().groups.len(), 2);
-        assert!(tx.delete_group(b.id).await.is_err());
+        assert!(!bob.has_password && bob.email_verified_at.is_none() && !bob.is_owner);
+        assert!(tx.create_unverified("a@x.io").await.is_err(), "email taken");
         let entry = tx
             .append_audit("user:al", AuditAction::Login, "al", "oidc")
             .await
@@ -736,7 +715,7 @@ mod tests {
         tx.commit().await.unwrap();
 
         let mut tx = store.begin().await.unwrap();
-        assert_eq!(tx.members().await.unwrap().len(), 1);
+        assert_eq!(tx.members().await.unwrap().len(), 2);
         assert_eq!(tx.audit_log(None, 10).await.unwrap(), vec![entry.clone()]);
         assert!(tx.audit_log(Some(entry.id), 10).await.unwrap().is_empty());
         for sql in ["UPDATE audit SET actor = 'x'", "DELETE FROM audit"] {
@@ -783,22 +762,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let mut tx = store.begin().await.unwrap();
-        let ann = tx
-            .invite_member("ann@x.io", "ann", false, &[GroupId::MEMBER])
-            .await
-            .unwrap();
+        let ann = tx.invite_member("ann@x.io", "ann", false).await.unwrap();
         assert_eq!(
             (ann.issuer.as_str(), ann.subject.as_str()),
             ("local", "ann@x.io")
         );
         assert!(!ann.has_password && !ann.must_set_password);
-        assert_eq!(ann.groups, [GroupId::MEMBER]);
         // Email is unique ignoring case, for invites and for later changes.
-        assert!(
-            tx.invite_member("ann@x.io", "a2", false, &[])
-                .await
-                .is_err()
-        );
+        assert!(tx.invite_member("ann@x.io", "a2", false).await.is_err());
         let old = tx
             .upsert_member("https://idp", "o1", "old", None, false)
             .await
@@ -855,7 +826,7 @@ mod tests {
         tx.insert_otp(ann.id, "h5", past).await.unwrap();
         assert!(!tx.consume_otp(ann.id, "h5").await.unwrap());
 
-        // Deactivating ends their sessions and keeps their groups;
+        // Deactivating ends their sessions;
         // reactivating clears the mark.
         tx.insert_login_session("s-ann", ann.id, later)
             .await
@@ -863,7 +834,6 @@ mod tests {
         assert!(tx.set_member_active(ann.id, false).await.unwrap());
         let ann = tx.get_member(ann.id).await.unwrap();
         assert!(ann.deactivated_at.is_some());
-        assert_eq!(ann.groups, [GroupId::MEMBER]);
         assert_eq!(tx.login_session("s-ann").await.unwrap(), None);
         assert!(tx.set_member_active(ann.id, true).await.unwrap());
         assert!(

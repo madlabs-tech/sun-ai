@@ -14,3 +14,4 @@ mod straight_upgrade;
 mod task;
 mod upgrade;
 mod workspace;
+mod workspace_member;

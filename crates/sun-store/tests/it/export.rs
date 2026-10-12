@@ -5,13 +5,14 @@ use serde_json::json;
 use sun_core::model::{Budget, Run, SecretScope, Step, Task, Workflow};
 use sun_core::{EcosystemId, RunId, RunStatus, StepKey, StepStatus, TaskStatus, WorkflowId};
 use sun_store::{
-    ArchiveSecrets, EventLog, MASTER_KEY_FILE, NewEvent, RunRepo, SecretRepo, Store, StoreError,
-    TaskRepo, WorkflowRepo,
+    ArchiveSecrets, EventLog, InvitationRepo, MASTER_KEY_FILE, MemberRepo, MembershipRepo,
+    NewEvent, RunRepo, SecretRepo, Store, StoreError, TaskRepo, WorkflowRepo,
 };
 
 const SECRET: &str = "sk-live-export-secret-value";
 
-/// A store with a workflow (v1), task, run, two steps, events, blobs and a secret.
+/// A store with a workflow (v1), task, run, two steps, events, blobs, a
+/// secret, a workspace member and an invitation.
 async fn seeded() -> (tempfile::TempDir, Store, RunId) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
@@ -64,6 +65,29 @@ async fn seeded() -> (tempfile::TempDir, Store, RunId) {
     }
     let scope = SecretScope::Ecosystem(EcosystemId::generate());
     tx.set_secret(&scope, "API_KEY", SECRET).await.unwrap();
+    let ann = tx.create_unverified("ann@x.io").await.unwrap();
+    tx.add_member(
+        sun_core::WorkspaceId::MAIN,
+        ann.id,
+        sun_core::model::Role::Owner,
+    )
+    .await
+    .unwrap();
+    let now = chrono::Utc::now();
+    let invitation = sun_core::model::WorkspaceInvitation {
+        id: sun_core::InvitationId::generate(),
+        workspace_id: sun_core::WorkspaceId::MAIN,
+        email: "bob@x.io".into(),
+        role: sun_core::model::Role::Member,
+        inviter_id: Some(ann.id),
+        created_at: now,
+        expires_at: now + chrono::Duration::hours(1),
+        accepted_at: None,
+        declined_at: None,
+    };
+    tx.insert_invitation(&invitation, "token-hash")
+        .await
+        .unwrap();
     for n in 0..3 {
         tx.append_event(NewEvent::new(
             run.id,
@@ -142,7 +166,19 @@ async fn export_import_round_trips_runs_events_blobs() {
     // The key came along, so secrets open; the stores stay independent.
     let mut tx = imported.read().await.unwrap();
     assert_eq!(tx.known_secrets().await.unwrap(), vec![SECRET.to_owned()]);
-    drop(tx);
+    // Memberships and invitations came across.
+    let main = sun_core::WorkspaceId::MAIN;
+    let mut source = store.read().await.unwrap();
+    assert_eq!(
+        tx.members_of(main).await.unwrap(),
+        source.members_of(main).await.unwrap()
+    );
+    assert_eq!(tx.invitations(main).await.unwrap().len(), 1);
+    assert_eq!(
+        tx.invitations(main).await.unwrap(),
+        source.invitations(main).await.unwrap()
+    );
+    drop((tx, source));
 
     // A second import into a used data dir is refused.
     let again = Store::import(&archive, fresh.path()).await;

@@ -14,7 +14,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sun_core::{Error, GroupId, ModCall, ModLink, Result, StateMachine, TaskStatus};
+use sun_core::model::Role;
+use sun_core::{Error, ModCall, ModLink, Result, StateMachine, TaskStatus};
 use sun_mod_sdk::http::mock;
 use sun_store::SecretRepo;
 
@@ -245,7 +246,7 @@ async fn task_keys_and_projects_never_cross_workspaces() {
     let (status, view) = call(app, "GET", &format!("/api/v1/tasks/{old_key}"), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(view["workspace_id"], w.ops.id.as_str());
-    let bob = member_token(&w.k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let bob = member_token(&w.k.store, "bob", Role::Member).await;
     for (method, tail, body) in [
         ("GET", "", None),
         ("PATCH", "", Some(json!({ "title": "x" }))),
@@ -676,7 +677,7 @@ async fn an_agents_task_count_counts_only_visible_tasks() {
         let path = format!("/api/v1/tasks/{}", side.plain);
         ok(app, "PATCH", &path, Some(assign.clone())).await;
     }
-    let bob = member_token(&w.k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let bob = member_token(&w.k.store, "bob", Role::Member).await;
     let (_, agents) = call_as(app, &bob, "GET", "/api/v1/agents", None).await;
     assert_eq!(agents[0]["task_count"], 1, "{agents}");
 }

@@ -1,6 +1,6 @@
 //! Workspace access: the one guard that keeps a caller off workspaces they
-//! can't see. A workspace is visible to the groups attached to it, to owners and
-//! to `access_all_workspaces` ([`sun_engine::Access::workspaces`]).
+//! can't see. A workspace is visible to its members and to deployment owners
+//! ([`sun_engine::Access::workspaces`]).
 //!
 //! [`guard`] (a **Chain of Responsibility** link after `authenticate`) finds
 //! every workspace-scoped thing a request names, resolves where it lives with

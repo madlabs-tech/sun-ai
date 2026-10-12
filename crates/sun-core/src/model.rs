@@ -329,6 +329,10 @@ pub struct Workspace {
     /// Its git rules (PR mirroring, auto-link, move on merge).
     #[serde(default)]
     pub git_settings: GitSettings,
+    /// The member who created it (`None`: Main, or from before workspaces
+    /// had members, or a removed member).
+    #[serde(default)]
+    pub created_by: Option<MemberId>,
     /// When it was created.
     pub created_at: Timestamp,
 }
@@ -1696,8 +1700,8 @@ impl Secret {
 }
 
 string_enum! {
-    /// One capability a [`Group`] may grant. A member has the
-    /// union of their groups' permissions; an owner has every one.
+    /// One capability a [`Role`] grants in a workspace. A workspace member
+    /// has their role's permissions there; a deployment owner has every one.
     pub enum Permission {
         /// Create, steer, pause, retry and cancel tasks.
         Run => "run",
@@ -1719,21 +1723,14 @@ string_enum! {
         InviteMembers => "invite_members",
         /// Add members with a password (no mail).
         CreateMembers => "create_members",
-        /// List members and groups, and the chat links.
+        /// List members, and the chat links.
         ViewMembers => "view_members",
-        /// Change a member's groups and password, send a reset code, and
+        /// Change a member's role and password, send a reset code, and
         /// link chat accounts.
         EditMembers => "edit_members",
         /// Deactivate and reactivate members.
         DeactivateMembers => "deactivate_members",
-        /// Create, rename and delete groups, set their permissions and
-        /// members, and give any group access to a workspace. The full ACL
-        /// admin: it can grant any permission. Without it, putting people
-        /// in groups is limited to groups whose permissions you hold.
-        ManageGroups => "manage_groups",
-        /// Create workspaces.
-        CreateWorkspace => "create_workspace",
-        /// Rename workspaces and change who sees them.
+        /// Rename workspaces and change their settings.
         EditWorkspace => "edit_workspace",
         /// Delete workspaces.
         DeleteWorkspace => "delete_workspace",
@@ -1741,86 +1738,214 @@ string_enum! {
         CreateWorkflow => "create_workflow",
         /// Save new versions of existing workflows.
         EditWorkflow => "edit_workflow",
-        /// See every workspace, whichever groups it is shared with.
-        AccessAllWorkspaces => "access_all_workspaces",
     }
 }
 
-/// `user_group` — a role the admins can rename and customize.
-/// Approval `who: role:<key>` matches [`Group::key`], which never changes,
-/// so renaming a group never breaks a workflow.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Group {
-    /// Id.
-    pub id: crate::GroupId,
-    /// Stable slug (`a-z 0-9 _`), made from the first name.
-    pub key: String,
-    /// Display name, unique ignoring case.
-    pub name: String,
-    /// What members of the group may do.
-    pub permissions: Vec<Permission>,
+string_enum! {
+    /// A member's role in one workspace (`workspace_member.role`). Approval
+    /// `who: role:<key>` matches the key. Each role grants a fixed set of
+    /// permissions ([`Role::permissions`]); the creator of a workspace is its
+    /// owner, and a workspace always keeps at least one owner.
+    pub enum Role {
+        /// Every permission in the workspace; manages its members and roles.
+        Owner => "owner",
+        /// Runs work and manages the workspace's members, secrets,
+        /// runtimes, plugins and settings.
+        Admin => "admin",
+        /// Runs tasks, approves and edits workflows.
+        Member => "member",
+        /// Reads only.
+        Viewer => "viewer",
+    }
 }
 
-impl Group {
-    /// Longest group name, in characters.
-    pub const MAX_NAME: usize = 64;
+/// What [`Role::Member`] may do (the seeded Member matrix).
+const MEMBER_PERMISSIONS: &[Permission] = &[
+    Permission::Run,
+    Permission::Approve,
+    Permission::CreateWorkflow,
+    Permission::EditWorkflow,
+];
 
-    /// The trimmed name, or `InvalidInput` unless it has 1–64 characters.
-    pub fn clean_name(name: &str) -> crate::Result<String> {
-        let name = name.trim();
-        if (1..=Self::MAX_NAME).contains(&name.chars().count()) {
-            Ok(name.to_owned())
-        } else {
-            Err(crate::Error::InvalidInput(format!(
-                "Give the group a name of 1 to {} characters.",
-                Self::MAX_NAME
-            )))
+/// What [`Role::Admin`] may do (the seeded Admin matrix, without the
+/// permissions roles replaced), in [`Permission::ALL`] order.
+const ADMIN_PERMISSIONS: &[Permission] = &[
+    Permission::Run,
+    Permission::Approve,
+    Permission::ManagePlugins,
+    Permission::ManageExtensions,
+    Permission::ManageSecrets,
+    Permission::ManageRuntimes,
+    Permission::ManageSettings,
+    Permission::InviteMembers,
+    Permission::CreateMembers,
+    Permission::ViewMembers,
+    Permission::EditMembers,
+    Permission::DeactivateMembers,
+    Permission::EditWorkspace,
+    Permission::DeleteWorkspace,
+    Permission::CreateWorkflow,
+    Permission::EditWorkflow,
+];
+
+impl Role {
+    /// The permissions the role grants in its workspace, in
+    /// [`Permission::ALL`] order; an owner has every one.
+    pub const fn permissions(self) -> &'static [Permission] {
+        match self {
+            Role::Owner => Permission::ALL,
+            Role::Admin => ADMIN_PERMISSIONS,
+            Role::Member => MEMBER_PERMISSIONS,
+            Role::Viewer => &[],
         }
     }
 
-    /// The key a new group named `name` starts from: lowercase ASCII
-    /// letters and digits, anything else `_`, trimmed; `group` when nothing
-    /// is left. The store makes it unique.
-    pub fn key_from_name(name: &str) -> String {
-        let slug: String = name
-            .trim()
-            .to_ascii_lowercase()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        let slug = slug.trim_matches('_');
-        if slug.is_empty() {
-            "group".into()
-        } else {
-            slug.chars().take(Self::MAX_NAME).collect()
-        }
+    /// True when this role is `other` or above it (owner, then admin,
+    /// member, viewer): who may grant `other` (an admin grants admin,
+    /// member or viewer; only an owner grants owner).
+    pub fn covers(self, other: Role) -> bool {
+        let rank = |role: Role| match role {
+            Role::Owner => 3,
+            Role::Admin => 2,
+            Role::Member => 1,
+            Role::Viewer => 0,
+        };
+        rank(self) >= rank(other)
     }
 }
 
-/// What someone in `groups` may do: every permission for an owner, else
-/// the union of the groups' permissions, in [`Permission::ALL`] order.
-pub fn permissions_of(is_owner: bool, groups: &[Group]) -> Vec<Permission> {
+/// What someone with `roles` may do: every permission for a deployment
+/// owner, else the union of the roles' permissions, in [`Permission::ALL`] order.
+pub fn permissions_of(is_owner: bool, roles: &[Role]) -> Vec<Permission> {
     Permission::ALL
         .iter()
         .copied()
-        .filter(|p| is_owner || groups.iter().any(|g| g.permissions.contains(p)))
+        .filter(|p| is_owner || roles.iter().any(|r| r.permissions().contains(p)))
         .collect()
 }
 
-/// The role names approval `who: role:<name>` matches for someone in
-/// `groups`: the group keys, plus `owner` for an owner.
-pub fn roles_of(is_owner: bool, groups: &[Group]) -> Vec<String> {
-    let mut roles: Vec<String> = groups.iter().map(|g| g.key.clone()).collect();
-    if is_owner {
-        roles.push("owner".into());
-    }
-    roles
+/// The role names approval `who: role:<name>` matches for someone with
+/// `roles`: each role's key and the keys of the roles below it (an admin
+/// also passes `role:member` and `role:viewer`, as when admins were in
+/// every lower group), every key for a deployment owner; in ladder order
+/// (viewer, member, admin, owner), once each.
+pub fn roles_of(is_owner: bool, roles: &[Role]) -> Vec<String> {
+    [Role::Viewer, Role::Member, Role::Admin, Role::Owner]
+        .into_iter()
+        .filter(|key| is_owner || roles.iter().any(|r| r.covers(*key)))
+        .map(|key| key.as_str().to_owned())
+        .collect()
 }
 
-/// `member` — a person an admin invited, linked to an OIDC identity on
-/// their first provider sign-in, or the local owner (the token holder, issuer
-/// [`OWNER_ISSUER`]). What they may do comes from their [`Group`]s, or
-/// everything for an owner. The password hash never leaves the store.
+/// `workspace_member` — a member's role in one workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceMember {
+    /// The workspace.
+    pub workspace_id: WorkspaceId,
+    /// The member.
+    pub member_id: MemberId,
+    /// Their role there.
+    pub role: Role,
+    /// When they joined it.
+    pub created_at: Timestamp,
+}
+
+/// `workspace_invitation` — an emailed invitation into one workspace with a
+/// role. The link token is stored as `sha256(token)` only (never here).
+/// Pending until accepted, declined or past `expires_at`; at most one
+/// pending per workspace and email.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceInvitation {
+    /// Id.
+    pub id: crate::InvitationId,
+    /// The workspace.
+    pub workspace_id: WorkspaceId,
+    /// Who is invited, lowercase.
+    pub email: String,
+    /// The role they get on accepting.
+    pub role: Role,
+    /// Who invited them (`None`: the token holder, or a removed member).
+    pub inviter_id: Option<MemberId>,
+    /// When it was sent.
+    pub created_at: Timestamp,
+    /// When it stops working.
+    pub expires_at: Timestamp,
+    /// When they accepted it.
+    pub accepted_at: Option<Timestamp>,
+    /// When they declined it.
+    pub declined_at: Option<Timestamp>,
+}
+
+impl WorkspaceInvitation {
+    /// Neither accepted nor declined, and not expired at `now`.
+    pub fn is_pending(&self, now: Timestamp) -> bool {
+        self.accepted_at.is_none() && self.declined_at.is_none() && self.expires_at > now
+    }
+}
+
+/// Who may sign up and create workspaces on this deployment
+/// (`SUN_ALLOW_SIGNUP`, `SUN_ALLOWED_EMAIL_DOMAINS`,
+/// `SUN_DISABLE_WORKSPACE_CREATION`). A pending invitation admits an email
+/// whatever this says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignupPolicy {
+    /// Anyone may sign up (default on).
+    pub allow_signup: bool,
+    /// When not empty, only emails in these domains (lowercase) may sign up.
+    pub allowed_email_domains: Vec<String>,
+    /// Only deployment owners may create workspaces.
+    pub disable_workspace_creation: bool,
+}
+
+impl Default for SignupPolicy {
+    fn default() -> Self {
+        Self {
+            allow_signup: true,
+            allowed_email_domains: Vec::new(),
+            disable_workspace_creation: false,
+        }
+    }
+}
+
+impl SignupPolicy {
+    /// Reads the policy through `var` (e.g. `|n| std::env::var(n).ok()`):
+    /// signup is on unless `SUN_ALLOW_SIGNUP` is `false`/`0`/`no`/`off`;
+    /// `SUN_ALLOWED_EMAIL_DOMAINS` is a comma-separated list;
+    /// `SUN_DISABLE_WORKSPACE_CREATION` is on for `true`/`1`/`yes`/`on`.
+    pub fn from_env(var: impl Fn(&str) -> Option<String>) -> Self {
+        let flag = |name: &str| var(name).map(|v| v.trim().to_ascii_lowercase());
+        let off = flag("SUN_ALLOW_SIGNUP")
+            .is_some_and(|v| matches!(v.as_str(), "false" | "0" | "no" | "off"));
+        let on = flag("SUN_DISABLE_WORKSPACE_CREATION")
+            .is_some_and(|v| matches!(v.as_str(), "true" | "1" | "yes" | "on"));
+        let allowed_email_domains = var("SUN_ALLOWED_EMAIL_DOMAINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|d| d.trim().trim_start_matches('@').to_ascii_lowercase())
+            .filter(|d| !d.is_empty())
+            .collect();
+        Self {
+            allow_signup: !off,
+            allowed_email_domains,
+            disable_workspace_creation: on,
+        }
+    }
+
+    /// True when `email` (normalized) may sign up without an invitation.
+    pub fn admits(&self, email: &str) -> bool {
+        let domain = email.rsplit_once('@').map_or("", |(_, d)| d);
+        self.allow_signup
+            && (self.allowed_email_domains.is_empty()
+                || self.allowed_email_domains.iter().any(|d| d == domain))
+    }
+}
+
+/// `member` — a person's identity on the deployment: someone who signed up
+/// or was invited, linked to an OIDC identity on their first provider
+/// sign-in, or the local owner (the token holder, issuer [`OWNER_ISSUER`]).
+/// What they may do comes from their [`Role`] in each workspace
+/// ([`WorkspaceMember`]), or everything for a deployment owner. The password
+/// hash never leaves the store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Member {
     /// Id.
@@ -1835,12 +1960,14 @@ pub struct Member {
     /// Email, lowercase. `None` only for a member from before invites that has
     /// not given one yet: they are asked on their next sign-in.
     pub email: Option<String>,
-    /// An owner has every permission, always (the token holder is one).
+    /// A deployment owner (super-admin) has every permission in every
+    /// workspace, always (the token holder is one).
     #[serde(default)]
     pub is_owner: bool,
-    /// The groups they are in.
+    /// When they proved they own their email (a code, or an SSO sign-in);
+    /// `None`: signed up or invited, not verified yet.
     #[serde(default)]
-    pub groups: Vec<crate::GroupId>,
+    pub email_verified_at: Option<Timestamp>,
     /// They set a password (an invite still pending has none).
     #[serde(default)]
     pub has_password: bool,
@@ -1995,10 +2122,10 @@ string_enum! {
     pub enum AuditAction {
         /// Someone signed in (local token or OIDC).
         Login => "login",
-        /// A member's groups or owner flag changed.
+        /// A member's workspace role or deployment owner flag changed.
         RoleChange => "role_change",
-        /// A group was created, renamed, deleted, or its permissions or
-        /// members changed.
+        /// Before roles: a group was created, renamed, deleted, or its
+        /// permissions or members changed (kept to read old audit rows).
         GroupChange => "group_change",
         /// A member was invited, re-invited or removed, or set their email or password.
         MemberChange => "member_change",
@@ -2239,31 +2366,75 @@ mod member_tests {
     }
 
     #[test]
-    fn groups_union_permissions_and_keys_are_slugs() {
-        let group = |key: &str, permissions: Vec<Permission>| Group {
-            id: crate::GroupId::generate(),
-            key: key.into(),
-            name: key.into(),
-            permissions,
-        };
-        let groups = [
-            group("a", vec![Permission::Approve]),
-            group("b", vec![Permission::EditWorkflow, Permission::Run]),
-        ];
+    fn roles_grant_the_seeded_matrices_and_owners_have_all() {
+        assert!(Role::Viewer.permissions().is_empty());
         assert_eq!(
-            permissions_of(false, &groups),
+            Role::Member.permissions(),
             [
                 Permission::Run,
                 Permission::Approve,
+                Permission::CreateWorkflow,
                 Permission::EditWorkflow
             ]
         );
+        assert_eq!(Role::Owner.permissions(), Permission::ALL);
+        // Admin: every permission left once groups went (an owner differs
+        // in what the engine lets them do: owners, the last-owner guard).
+        let admin = Role::Admin.permissions();
+        assert_eq!(admin, Permission::ALL);
+        assert_eq!(permissions_of(false, &[Role::Admin]), admin);
+        assert_eq!(Role::Admin.as_str(), "admin");
+        assert_eq!("viewer".parse::<Role>().unwrap(), Role::Viewer);
+        // Every role's permissions sit inside the next one up.
+        let ladder = [Role::Viewer, Role::Member, Role::Admin, Role::Owner];
+        for pair in ladder.windows(2) {
+            assert!(pair[1].covers(pair[0]) && !pair[0].covers(pair[1]));
+        }
+        assert!(Role::Admin.covers(Role::Admin) && !Role::Admin.covers(Role::Owner));
+        // A deployment owner has every permission with no role at all.
         assert!(permissions_of(false, &[]).is_empty());
         assert_eq!(permissions_of(true, &[]), Permission::ALL);
-        assert_eq!(roles_of(true, &groups), ["a", "b", "owner"]);
-        assert_eq!(Group::key_from_name(" Release Team! "), "release_team");
-        assert_eq!(Group::key_from_name("éé"), "group");
-        assert!(Group::clean_name("  ").is_err());
+        assert_eq!(
+            permissions_of(false, &[Role::Viewer, Role::Member]),
+            Role::Member.permissions()
+        );
+        assert_eq!(
+            roles_of(false, &[Role::Member, Role::Viewer]),
+            ["viewer", "member"]
+        );
+        assert_eq!(
+            roles_of(false, &[Role::Admin]),
+            ["viewer", "member", "admin"]
+        );
+        assert_eq!(roles_of(true, &[]), ["viewer", "member", "admin", "owner"]);
+        assert!(roles_of(false, &[]).is_empty());
+    }
+
+    #[test]
+    fn signup_policy_reads_env_and_checks_domains() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| (*v).to_owned())
+            }
+        };
+        let open = SignupPolicy::from_env(env(&[]));
+        assert_eq!(open, SignupPolicy::default());
+        assert!(open.admits("a@x.io"));
+        let closed = SignupPolicy::from_env(env(&[
+            ("SUN_ALLOW_SIGNUP", " False "),
+            ("SUN_DISABLE_WORKSPACE_CREATION", "1"),
+        ]));
+        assert!(!closed.admits("a@x.io") && closed.disable_workspace_creation);
+        let domains = SignupPolicy::from_env(env(&[(
+            "SUN_ALLOWED_EMAIL_DOMAINS",
+            " @Acme.io, ,beta.dev",
+        )]));
+        assert_eq!(domains.allowed_email_domains, ["acme.io", "beta.dev"]);
+        assert!(domains.admits("a@acme.io") && domains.admits("b@beta.dev"));
+        assert!(!domains.admits("a@evil.io") && !domains.admits("a@sub.acme.io"));
     }
 }
 

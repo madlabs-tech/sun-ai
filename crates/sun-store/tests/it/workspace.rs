@@ -24,6 +24,7 @@ fn workspace(name: &str) -> Workspace {
         issue_counter: 0,
         default_workflow_id: None,
         git_settings: GitSettings::default(),
+        created_by: None,
         created_at: chrono::Utc::now(),
     }
 }

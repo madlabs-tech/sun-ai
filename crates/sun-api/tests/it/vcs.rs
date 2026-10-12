@@ -16,12 +16,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sun_core::{GroupId, ModCall, ModLink, Result};
+use sun_core::model::Role;
+use sun_core::{ModCall, ModLink, Result};
 use sun_mod_sdk::http::mock;
-use sun_store::{GroupRepo, LoginRepo, MemberRepo, SecretRepo, Store};
+use sun_store::{SecretRepo, Store};
 
 use crate::common::{self, SECRET, TOKEN};
 use crate::route_matrix::{GITLAB_TOKEN, connect_gitlab, oauth_grant};
+use crate::workspaces::{member_token, member_token_in};
 
 const MINTED: &str = "ghs_minted_installation_token_1";
 const APP_WEBHOOK_SECRET: &str = "app-webhook-secret-1";
@@ -132,32 +134,6 @@ fn query_param(url: &str, name: &str) -> String {
     raw.replace("%2E", ".")
 }
 
-async fn member_token(store: &Store, name: &str, groups: &[GroupId]) -> String {
-    let token = format!("session-{name}");
-    let hash: String = Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let mut tx = store.begin().await.unwrap();
-    let member = tx
-        .upsert_member(
-            "https://idp",
-            name,
-            name,
-            Some(&format!("{name}@corp.io")),
-            false,
-        )
-        .await
-        .unwrap();
-    tx.set_member_groups(member.id, groups).await.unwrap();
-    let expires = chrono::Utc::now() + chrono::Duration::hours(1);
-    tx.insert_login_session(&hash, member.id, expires)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
-    token
-}
-
 /// Waits up to 10 s for `done` (the outbox delivers in the background).
 async fn eventually(what: &str, done: impl Fn() -> bool) {
     for _ in 0..200 {
@@ -234,15 +210,9 @@ async fn vcs_list_says_which_git_apps_are_set_up_and_never_their_values() {
     assert_eq!(api(app, "GET", &list, None).await.body["apps"], all);
 
     // Anyone who sees the workspace reads the flags (no manage_secrets), and no value.
-    let groups = json!({ "group_ids": [GroupId::VIEWER] });
-    let put = format!("/api/v1/workspaces/{main}/groups");
-    assert_eq!(
-        api(app, "PUT", &put, Some(groups)).await.status,
-        StatusCode::OK
-    );
     let viewer = format!(
         "Bearer {}",
-        member_token(&k.store, "vic", &[GroupId::VIEWER]).await
+        member_token(&k.store, "vic", Role::Viewer).await
     );
     let reply = send(app, "GET", &list, &[("authorization", &viewer)], None).await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.text);
@@ -495,19 +465,8 @@ async fn vcs_github_app_connects_with_a_signed_state_and_adds_repos() {
         api(app, "GET", &across, None).await.status,
         StatusCode::NOT_FOUND
     );
-    let put = format!("/api/v1/workspaces/{x}/groups");
-    let groups = json!({ "group_ids": [GroupId::MEMBER] });
-    assert_eq!(
-        api(app, "PUT", &put, Some(groups)).await.status,
-        StatusCode::OK
-    );
-    let put = format!("/api/v1/workspaces/{main}/groups");
-    let groups = json!({ "group_ids": [GroupId::ADMIN] });
-    assert_eq!(
-        api(app, "PUT", &put, Some(groups)).await.status,
-        StatusCode::OK
-    );
-    let bob = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let x_id: sun_core::WorkspaceId = x.parse().unwrap();
+    let bob = member_token_in(&k.store, "bob", &[(x_id, Role::Member)]).await;
     let auth = format!("Bearer {bob}");
     let delete = format!("/api/v1/vcs/connections/{id}");
     for (method, path) in [

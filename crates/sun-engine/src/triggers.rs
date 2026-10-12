@@ -840,8 +840,13 @@ impl Engine {
             ),
             Some(m) => {
                 let access = self.access_of(m.clone()).await?;
-                if access.can(permission) {
-                    let mut principal = access.principal();
+                let workspace = {
+                    let mut tx = self.store.read().await?;
+                    let task = tx.get_run(run_id).await?.task_id;
+                    tx.get_task(task).await?.workspace_id
+                };
+                if access.can_in(workspace, permission) {
+                    let mut principal = access.principal_in(workspace);
                     principal.roles.push(event.mod_name.clone());
                     return Ok(Some(principal));
                 }
@@ -850,8 +855,8 @@ impl Engine {
                     _ => "steer runs",
                 };
                 format!(
-                    "None of your Sun groups can {what}, so nothing changed. Ask an admin for \
-                     a group with the `{permission}` permission."
+                    "Your Sun role in this workspace can't {what}, so nothing changed. Ask a \
+                     workspace admin for a role with the `{permission}` permission."
                 )
             }
         };
@@ -1163,23 +1168,21 @@ mod tests {
         }
 
         // ana (member) and vic (viewer) sign in with the email Slack reports.
-        use sun_store::{GroupRepo, MemberRepo};
+        use sun_core::model::Role;
+        use sun_store::{MemberRepo, MembershipRepo};
         let mut tx = store.begin().await.unwrap();
         let ana = tx
             .upsert_member("https://idp", "a", "ana", Some("ana@acme.io"), false)
             .await
             .unwrap();
-        tx.set_member_groups(
-            ana.id,
-            &[sun_core::GroupId::VIEWER, sun_core::GroupId::MEMBER],
-        )
-        .await
-        .unwrap();
+        tx.add_member(sun_core::WorkspaceId::MAIN, ana.id, Role::Member)
+            .await
+            .unwrap();
         let vic = tx
             .upsert_member("https://idp", "v", "vic", Some("vic@acme.io"), false)
             .await
             .unwrap();
-        tx.set_member_groups(vic.id, &[sun_core::GroupId::VIEWER])
+        tx.add_member(sun_core::WorkspaceId::MAIN, vic.id, Role::Viewer)
             .await
             .unwrap();
         tx.commit().await.unwrap();
@@ -1217,7 +1220,7 @@ mod tests {
         let texts = refusals().await;
         assert_eq!(texts.len(), 2, "{texts:?}");
         assert!(texts[0].contains("U9") && texts[0].contains("doesn’t know who you are"));
-        assert!(texts[1].contains("U7") && texts[1].contains("groups can approve"));
+        assert!(texts[1].contains("U7") && texts[1].contains("can't approve"));
         // Matched through jira, but not in `who:` (role jira): forbidden.
         assert!(matches!(
             engine

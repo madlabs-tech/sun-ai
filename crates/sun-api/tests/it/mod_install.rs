@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use serde_json::json;
+use sun_core::model::Role;
 use sun_core::model::{ModInstall, ModKind};
-use sun_core::{AvailableMod, Error, GroupId, ModInstaller, Result};
+use sun_core::{AvailableMod, Error, ModInstaller, Result};
 
 use crate::common::kernel;
 use crate::workspaces::{call, call_as, member_token};
@@ -66,11 +67,8 @@ async fn mod_install_refuses_non_admins_and_a_changed_permission_set() {
     let path = "/api/v1/mods/github/install";
     let right = json!({ "permissions": [ASKS] });
 
-    for (name, groups) in [
-        ("mia", vec![GroupId::MEMBER]),
-        ("vic", vec![GroupId::VIEWER]),
-    ] {
-        let token = member_token(&k.store, name, &groups).await;
+    for (name, groups) in [("mia", Role::Member), ("vic", Role::Viewer)] {
+        let token = member_token(&k.store, name, groups).await;
         let (status, body) = call_as(&app, &token, "POST", path, Some(right.clone())).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{name}: {body}");
     }

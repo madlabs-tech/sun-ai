@@ -8,11 +8,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use sun_core::model::Role;
 use sun_core::model::{Budget, Run, Task, Workflow};
-use sun_core::{GroupId, HostId, ModEvent, RunId, RunStatus, StepStatus, TaskStatus, WorkflowId};
+use sun_core::{HostId, ModEvent, RunId, RunStatus, StepStatus, TaskStatus, WorkflowId};
 use sun_engine::{Engine, EngineConfig, WatchdogConfig};
 use sun_store::{
-    EventLog, GroupRepo, MemberRepo, RunRepo, SettingRepo, Store, TaskRepo, WorkflowRepo,
+    EventLog, MemberRepo, MembershipRepo, RunRepo, SettingRepo, Store, TaskRepo, WorkflowRepo,
 };
 
 use crate::queue::{NoHost, NoMods};
@@ -115,7 +116,7 @@ async fn chat_user_resolves_by_matching_email_only() {
         .await
         .unwrap();
     for id in [ana.id, nomail.id] {
-        tx.set_member_groups(id, &[GroupId::VIEWER, GroupId::MEMBER])
+        tx.add_member(sun_core::WorkspaceId::MAIN, id, Role::Member)
             .await
             .unwrap();
     }
@@ -194,7 +195,7 @@ async fn deactivated_member_is_refused_from_chat() {
         .upsert_member("https://idp", "d", "dee", Some("dee@acme.io"), false)
         .await
         .unwrap();
-    tx.set_member_groups(dee.id, &[GroupId::VIEWER, GroupId::MEMBER])
+    tx.add_member(sun_core::WorkspaceId::MAIN, dee.id, Role::Member)
         .await
         .unwrap();
     tx.commit().await.unwrap();
