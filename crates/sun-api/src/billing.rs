@@ -113,7 +113,7 @@ impl CloudBilling {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             return Ok((status, Json(answer)).into_response());
         }
-        if !matches!(status, 402 | 409 | 429 | 400 | 422) {
+        if !matches!(status, 402 | 403 | 409 | 429 | 400 | 422) {
             tracing::warn!("Sun Cloud {path}: answered {status}");
         }
         let mut refused = refusal(status, &answer).into_response();
@@ -135,43 +135,63 @@ fn unavailable() -> ApiError {
     )
 }
 
-/// A cloud error the person can act on, with the cloud's message when it
-/// sent one; anything else is [`unavailable`].
+/// A cloud error (`{error, code}`) as the person can act on it: known codes
+/// get Sun's own copy; a 403 or 422 keeps the cloud's message (it says why);
+/// anything else (404, the cloud refusing our token, 5xx) is [`unavailable`].
 fn refusal(status: u16, answer: &Value) -> ApiError {
     let code = answer["code"].as_str().or(answer["error"]["code"].as_str());
     let message = answer["message"]
         .as_str()
         .or(answer["error"]["message"].as_str())
         .or(answer["error"].as_str());
-    let (status, code, fallback) = match (status, code) {
+    let (status, code, copy) = match (status, code) {
+        (_, Some("idempotency_conflict")) => (
+            StatusCode::CONFLICT,
+            "idempotency_conflict",
+            "This was already sent with other details. Start again.",
+        ),
+        (_, Some("seat_capacity_overcommitted")) => (
+            StatusCode::CONFLICT,
+            "seat_capacity_overcommitted",
+            "The workspace has more people than seats. Buy seats or remove someone first.",
+        ),
+        (_, Some("stale_seat_preview")) => (
+            StatusCode::CONFLICT,
+            "stale_seat_preview",
+            "The seats or their price changed since the preview. Preview again.",
+        ),
+        (_, Some("provider_unavailable")) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "provider_unavailable",
+            "The payment provider isn't answering. Try again in a few minutes.",
+        ),
+        (_, Some("kernel_unavailable")) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "kernel_unavailable",
+            "Sun Cloud couldn't count this workspace's members. Try again in a few minutes.",
+        ),
         (402, _) => (
             StatusCode::PAYMENT_REQUIRED,
             "insufficient_balance",
             "Payment is required first. Check the plan's payment method, then try again.",
-        ),
-        (409, Some("seat_capacity_overcommitted")) => (
-            StatusCode::CONFLICT,
-            "seat_capacity_overcommitted",
-            "The workspace has more members than seats. Buy seats or remove members first.",
-        ),
-        (409, _) => (
-            StatusCode::CONFLICT,
-            "idempotency_conflict",
-            "This was already sent with other details. Start again.",
         ),
         (429, _) => (
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
             "Too many billing requests. Wait a moment, then try again.",
         ),
-        (400 | 422, _) => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_input",
-            "Sun Cloud refused the request.",
-        ),
+        // `user_required` would be our bug (no X-User-ID): unavailable, below.
+        (403, c) if c != Some("user_required") => {
+            let copy = message.unwrap_or("Sun Cloud refused this.");
+            return ApiError::new(StatusCode::FORBIDDEN, "forbidden", copy);
+        }
+        (400 | 422, c) if c != Some("user_required") => {
+            let copy = message.unwrap_or("Sun Cloud refused the request.");
+            return ApiError::invalid(copy);
+        }
         _ => return unavailable(),
     };
-    ApiError::new(status, code, message.unwrap_or(fallback))
+    ApiError::new(status, code, copy)
 }
 
 fn cloud(api: &Api) -> ApiResult<&CloudBilling> {
@@ -267,6 +287,7 @@ pub(crate) fn routes() -> Router<Api> {
         )
         .route("/subscriptions/{id}/seats/purchases", post(seat_purchase))
         .route("/subscriptions/{id}/seats/reconcile", post(reconcile))
+        .route("/subscriptions/{id}/cancel", post(cancel))
 }
 
 /// A read of workspace `text`'s subscription by a member there.
@@ -461,6 +482,16 @@ async fn reconcile(
     write_workspace(&api, &caller, &text, "seats/reconcile", None, None).await
 }
 
+/// `POST /subscriptions/{id}/cancel`: `{status, period_end}`; the plan runs
+/// to the end of the period it was paid for.
+async fn cancel(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path(text): Path<String>,
+) -> ApiResult<Response> {
+    write_workspace(&api, &caller, &text, "cancel", None, None).await
+}
+
 /// A call for the signed-in person, not about one workspace.
 async fn as_person(
     api: &Api,
@@ -523,7 +554,7 @@ pub(crate) async fn open_ticket(
 }
 
 /// `GET /internal/workspaces/{id}/seat_count` (Sun Cloud, with its token;
-/// no session): `{count}`, the workspace's members.
+/// no session): `{seat_count}`, the workspace's members.
 pub(crate) async fn seat_count(
     State(api): State<Api>,
     headers: HeaderMap,
@@ -546,7 +577,7 @@ pub(crate) async fn seat_count(
     }
     let workspace = workspace(&api, &text).await?;
     let count = api.engine.workspace_members(workspace).await?.len();
-    Ok(Json(json!({ "count": count })))
+    Ok(Json(json!({ "seat_count": count })))
 }
 
 #[cfg(test)]
@@ -579,7 +610,22 @@ mod tests {
             status(402, json!({ "code": "insufficient_balance" })),
             StatusCode::PAYMENT_REQUIRED
         );
-        assert_eq!(status(409, json!({})), StatusCode::CONFLICT);
+        assert_eq!(
+            status(409, json!({ "error": "x", "code": "stale_seat_preview" })),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            status(503, json!({ "code": "provider_unavailable" })),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(403, json!({ "error": "Pro only" })),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status(403, json!({ "code": "user_required" })),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
         assert_eq!(status(429, json!({})), StatusCode::TOO_MANY_REQUESTS);
     }
 }

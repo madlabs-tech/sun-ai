@@ -327,6 +327,14 @@ async fn workspace_writes_are_for_owners_and_admins_with_allowlisted_bodies() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "seat_capacity_overcommitted");
 
+    // Canceling is the owners' and admins' too; members can't.
+    let cancel = format!("/api/v1/subscriptions/{MAIN}/cancel");
+    let (status, _) = call_as(&app, &member, "POST", &cancel, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call_as(&app, &admin, "POST", &cancel, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cloud.last().path, cancel);
+
     // An owner of the workspace pays too.
     let own = member_token(&k.store, "oz", Role::Owner).await;
     let portal = format!("/api/v1/subscriptions/{MAIN}/portal-sessions");
@@ -429,7 +437,8 @@ async fn seat_count_answers_only_sun_cloud() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["count"], main_members(&k).await);
+    assert_eq!(body["seat_count"], main_members(&k).await);
+    assert_eq!(body.as_object().unwrap().len(), 1);
 
     // Not connected to Sun Cloud: nobody may ask.
     let request = axum::http::Request::get(&path)
