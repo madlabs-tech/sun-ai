@@ -543,20 +543,20 @@ impl Engine {
     }
 
     /// Saves the task's sources (each must exist on the task's workspace) and
-    /// budget cap.
+    /// budget cap. A source of another workspace reads like a missing one:
+    /// `NotFound`, without its name.
     pub async fn set_task_context(&self, task_id: TaskId, context: &TaskContext) -> Result<()> {
         let mut tx = self.store.begin().await?;
         let task = tx.get_task(task_id).await?;
         let workspace = task.workspace_id;
         let on_workspace = tx.source_ids_of_workspace(workspace).await?;
-        for id in context.sources.iter().flatten() {
-            let source = tx.get_knowledge_source(id).await?;
-            if !on_workspace.contains(id) {
-                return Err(invalid(format!(
-                    "Knowledge source `{}` isn't on this task's workspace.",
-                    source.name
-                )));
-            }
+        if let Some(id) = context
+            .sources
+            .iter()
+            .flatten()
+            .find(|id| !on_workspace.contains(*id))
+        {
+            return Err(Error::NotFound(format!("knowledge source {id}")));
         }
         tx.put_task_context(task_id, context).await?;
         tx.commit().await?;
