@@ -39,17 +39,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ env.TARGET }}
-      # registry-url makes setup-node write the token from NODE_AUTH_TOKEN to
-      # ~/.npmrc; npm itself ignores that env var.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://npm.pkg.github.com
-          scope: '@hryer'
       # sun-api embeds web/dist at compile time (see .github/build-setup.yml).
       - name: Build the web UI
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
         run: cd web && npm ci && npm run build
       - name: Build the kernel
         env:

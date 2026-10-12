@@ -31,15 +31,10 @@ jobs:
     defaults: { run: { working-directory: web } }
     steps:
       - uses: actions/checkout@v4
-      # registry-url makes setup-node write the token from NODE_AUTH_TOKEN to
-      # ~/.npmrc; npm itself ignores that env var.
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          registry-url: https://npm.pkg.github.com
-          scope: '@hryer'
       - run: npm ci
-        env: { NODE_AUTH_TOKEN: '${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}' }
       - run: npm run check
       - run: npm run build
       - run: npx playwright install --with-deps chromium

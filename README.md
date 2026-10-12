@@ -98,7 +98,7 @@ curl -fsSL https://get-sun.madlabs.tech | sh        # macOS: writes a launchd ag
 
 The script detects your OS and architecture and verifies the release signature. It starts `sun serve --with-host` and prints the UI URL and a one-time sign-in link. If anything fails, it undoes every step.
 
-**From source** (Rust is pinned in `rust-toolchain.toml`; the UI needs Node and read access to the private `@hryer/madlabs-design-system` package on GitHub Packages):
+**From source** (Rust is pinned in `rust-toolchain.toml`; the UI needs Node; its design system `@hryer/madlabs-design-system` comes from the public npm registry):
 
 ```sh
 (cd web && npm ci && npm run build)          # the UI the binary embeds

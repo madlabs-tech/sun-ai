@@ -2,19 +2,11 @@
 # every release build job, before `cargo build --release`: sun-api embeds
 # web/dist at compile time, so without this the release binary answers 404 on /.
 # (dist drops `working-directory`, hence the `cd`.)
-# registry-url makes setup-node write the token from NODE_AUTH_TOKEN to
-# ~/.npmrc; npm itself ignores that env var.
 - name: Install Node
   uses: actions/setup-node@v4
   with:
     node-version: 24
-    registry-url: https://npm.pkg.github.com
-    scope: '@hryer'
 - name: Build the web UI
-  env:
-    # The build jobs only get `contents: write`; a PAT with read:packages
-    # (secret GH_PACKAGES_TOKEN) reads @hryer/madlabs-design-system.
-    NODE_AUTH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
   run: cd web && npm ci && npm run build
 # sqlite-vec.c needs the BSD u_intN_t names; musl only has them in sys/types.h,
 # which it never includes (glibc's stdlib.h pulls it in). macOS ignores this.

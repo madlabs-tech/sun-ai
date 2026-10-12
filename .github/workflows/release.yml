@@ -131,12 +131,8 @@ jobs:
         uses: "actions/setup-node@v4"
         with:
           "node-version": 24
-          "registry-url": "https://npm.pkg.github.com"
-          "scope": "@hryer"
       - name: "Build the web UI"
         run: "cd web && npm ci && npm run build"
-        env:
-          "NODE_AUTH_TOKEN": "${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}"
       - name: "C flags for the musl targets"
         run: "echo \"TARGET_CFLAGS=-Du_int8_t=uint8_t -Du_int16_t=uint16_t -Du_int64_t=uint64_t\" >> \"$GITHUB_ENV\""
       - name: Install dist
