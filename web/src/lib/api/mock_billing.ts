@@ -127,7 +127,7 @@ export function billing_route(method: string, parts: string[], input: Record<str
     const n = seats(input.additional_seats, 'additional_seats');
     key(input);
     if (input.expected_current_seats !== s.seat_capacity.purchased || input.expected_purchase_version !== s.seat_capacity.version)
-      throw new MockError(409, { error: { code: 'idempotency_conflict', message: 'The seats changed since the preview. Preview again.' } });
+      throw new MockError(409, { error: { code: 'stale_seat_preview', message: 'The seats or their price changed since the preview. Preview again.' } });
     s.seat_capacity.purchased += n;
     s.seat_capacity.available = (s.seat_capacity.available ?? 0) + n;
     s.seat_capacity.version += 1;
@@ -135,5 +135,11 @@ export function billing_route(method: string, parts: string[], input: Record<str
     return clone(s.seat_capacity);
   }
   if (what === 'seats/reconcile') return clone(s.seat_capacity);
+  if (what === 'cancel') {
+    if (s.entitlement.status === 'none') throw new MockError(409, { error: { code: 'conflict', message: 'This workspace has no plan to cancel.' } });
+    s.entitlement.status = 'canceled';
+    s.available_actions.purchase_seats = false;
+    return { status: 'canceled', period_end: '2026-11-13T00:00:00Z' };
+  }
   throw not_found(`${method} /${parts.join('/')}`);
 }

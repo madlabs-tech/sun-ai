@@ -61,6 +61,23 @@ test('owner: buy seats after a price preview; Manage billing opens the portal', 
   await expect(page).toHaveURL(/^https:\/\/billing\.example\/portal\//);
 });
 
+test('owner: cancel the plan after confirming; it stays on until the period ends', async ({ page }) => {
+  await open(page, 'settings/plan');
+  const billing = billing_of(page);
+  await billing.getByRole('button', { name: 'Cancel plan' }).click();
+  const dialog = page.getByRole('dialog').filter({ hasText: 'Cancel the plan?' });
+  await expect(dialog).toContainText('stays on until the end of the period already paid');
+  await dialog.getByRole('button', { name: 'Keep the plan' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(billing.getByText('Active')).toBeVisible();
+  await billing.getByRole('button', { name: 'Cancel plan' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel plan' }).click();
+  await expect(page.getByText('It stays on until 2026-11-13.')).toBeVisible();
+  await expect(billing.getByText('Canceled')).toBeVisible();
+  await expect(billing.getByRole('button', { name: 'Cancel plan' })).toHaveCount(0);
+  expect(await overflow(page)).toBeLessThanOrEqual(0);
+});
+
 test('member: reads the plan and seats, no actions', async ({ page }) => {
   await open(page, 'settings/plan', '&mock_role=member');
   const billing = billing_of(page);

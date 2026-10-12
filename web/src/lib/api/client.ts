@@ -407,6 +407,9 @@ export const api = {
     request<CheckoutSession>('POST', '/subscriptions/checkout-sessions', order),
   /** Owner or admin: the provider's billing portal. */
   billing_portal: (workspace: string) => request<{ url: string }>('POST', `/subscriptions/${id_path(workspace)}/portal-sessions`),
+  /** Owner or admin: the plan stops renewing and runs until `period_end`. */
+  cancel_plan: (workspace: string) =>
+    request<{ status: string; period_end: string | null }>('POST', `/subscriptions/${id_path(workspace)}/cancel`),
   preview_seats: (workspace: string, additional_seats: number) =>
     request<SeatPreview>('POST', `/subscriptions/${id_path(workspace)}/seats/purchase-preview`, { additional_seats }),
   /** Buys the previewed seats at the previewed amount. */

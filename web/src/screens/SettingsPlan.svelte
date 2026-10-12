@@ -1,13 +1,14 @@
 <!-- Plan & billing of the open workspace. The plan badge: which plan it runs on, where it comes from, and its
      limits. With Sun Cloud billing (`features.billing`), its subscription too: status, seats purchased / used /
      available, and for its owners and admins Upgrade (plan + interval + seats, then the hosted checkout),
-     Manage billing (the provider's portal) and Buy seats (a price preview first). Members read only. -->
+     Manage billing (the provider's portal), Buy seats (a price preview first) and Cancel plan (confirmed first).
+     Members read only. -->
 <script lang="ts">
-  import { Badge, Button, Icon, Input, Select } from '@hryer/madlabs-design-system/svelte';
-  import { api } from '../lib/api/client';
+  import { Badge, Button, Dialog, Icon, Input, Select } from '@hryer/madlabs-design-system/svelte';
+  import { ApiFailure, api } from '../lib/api/client';
   import type { Entitlement, Interval, PaidPlan, PlanPrices, SeatPreview, SubscriptionSummary } from '../lib/api/types';
   import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
-  import { clock, price, whole } from '../lib/format';
+  import { clock, day, price, whole } from '../lib/format';
 
   const PLAN = { community: 'Self-hosted', free: 'Free', pro: 'Pro', business: 'Business' };
   const STATUS = {
@@ -88,7 +89,21 @@
   const can_upgrade = $derived(may_pay && !!summary?.available_actions.checkout && offered.length > 0);
   let upgrading = $state<{ plan: PaidPlan; interval: Interval; seats: string; nonce: string } | null>(null);
   let seats_error = $state('');
-  let busy = $state<'' | 'checkout' | 'portal' | 'preview' | 'buy'>('');
+  let busy = $state<'' | 'checkout' | 'portal' | 'preview' | 'buy' | 'cancel'>('');
+  let confirming_cancel = $state(false);
+
+  async function cancel_plan() {
+    busy = 'cancel';
+    try {
+      const { period_end } = await api.cancel_plan(workspace);
+      toast('success', 'Plan canceled', period_end ? `It stays on until ${day(period_end)}.` : undefined);
+      confirming_cancel = false;
+      await load_billing();
+    } catch (err) {
+      toast('danger', 'Plan not canceled', error_text(err));
+    }
+    busy = '';
+  }
 
   function open_upgrade() {
     const used = summary?.seat_capacity.used ?? 1;
@@ -162,6 +177,8 @@
       await load_billing();
     } catch (err) {
       toast('danger', 'Seats not bought', error_text(err));
+      // The seats or price moved on: the old preview can't be bought.
+      if (err instanceof ApiFailure && err.code === 'stale_seat_preview') preview = null;
     }
     busy = '';
   }
@@ -229,6 +246,9 @@
             {#if summary.available_actions.purchase_seats}
               <Button variant="secondary" iconLeft="plus" onclick={() => ((buying = { seats: '1', nonce: nonce() }), (preview = null))}>Buy seats</Button>
             {/if}
+            {#if summary.entitlement.status === 'active' || summary.entitlement.status === 'past_due'}
+              <Button variant="ghost" onclick={() => (confirming_cancel = true)}>Cancel plan</Button>
+            {/if}
           </div>
         {:else}
           <p class="sun-row__meta plan__copy">Only the workspace’s owners and admins change its plan and seats.</p>
@@ -271,6 +291,17 @@
     </div>
   </section>
 {/if}
+
+<Dialog open={confirming_cancel} onclose={() => (confirming_cancel = false)} title="Cancel the plan?">
+  <p class="plan__copy">
+    The plan stops renewing and stays on until the end of the period already paid. Then the workspace is on Free: no
+    limits, bring your own runtime and API keys.
+  </p>
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (confirming_cancel = false)}>Keep the plan</Button>
+    <Button variant="danger" loading={busy === 'cancel'} onclick={cancel_plan}>Cancel plan</Button>
+  {/snippet}
+</Dialog>
 
 <style>
   .plan__copy {
