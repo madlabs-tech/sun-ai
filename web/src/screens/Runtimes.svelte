@@ -41,12 +41,6 @@
   const workspace = current_workspace();
   const list = () => api.list_runtimes(workspace);
   let load = $state(list());
-  /** Sun Cloud is connected (the account answers as a cloud ecosystem): credits runtimes can be added. */
-  let cloud = $state(false);
-  api.get_account().then(
-    (a) => (cloud = a.cloud),
-    () => {},
-  );
   /** Tokens and cost per runtime, and for subscriptions within their quota window. Advisory. */
   let usage = $state<Record<string, RuntimeUsage>>({});
   api.usage_by_runtime().then(
@@ -267,8 +261,8 @@
         name="source"
         value="credits"
         label="Sun credits"
-        description={cloud ? 'Pay per step from your Sun credits through the Sun gateway.' : 'Needs Sun Cloud. A self-hosted install uses your subscription or API key.'}
-        disabled={!cloud}
+        description="Sun credits are not available on this deployment yet; bring your own key or runtime."
+        disabled
       />
     </fieldset>
     {#if form.source === 'byo_key'}
@@ -299,6 +293,7 @@
       />
       <Input label="Model" mono placeholder={MODEL_EXAMPLE[form.kind]} autocomplete="off" bind:value={form.model} error={errors.model} />
       <SecretPicker scope={{ kind: 'workspace', id: workspace }} bind:value={form.key_secret} none_label="None (local endpoint)" error={errors.key_secret} />
+    <!-- ponytail: Sun credits are off until the deployment sells them; the form stays for when they return. -->
     {:else if form.source === 'credits'}
       <Input label="Name" mono placeholder="claude-credits" hint="Workflows pick it in runtime.chain." autocomplete="off" bind:value={form.name} error={errors.name} />
       <Select

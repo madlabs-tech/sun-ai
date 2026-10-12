@@ -308,7 +308,7 @@ pub(crate) fn router(api: Api) -> Router {
     // sign-in, security, audit, the kernel's own resources and sessions,
     // mods, ecosystem and mod secrets, the permission mode of each runtime
     // adapter (every workspace's sessions of it), limits, dismissed catalog
-    // suggestions, usage, its account at Sun and marketplace.
+    // suggestions, usage, its support tickets at Sun and marketplace.
     let deployment = Router::new()
         .route(
             "/members",
@@ -374,14 +374,10 @@ pub(crate) fn router(api: Api) -> Router {
             "/settings/embeddings",
             get(crate::knowledge::get_embeddings).put(crate::knowledge::put_embeddings),
         )
-        .route("/account", get(crate::account::get))
-        .route("/account/invoices", get(crate::account::invoices))
         .route(
-            "/account/support",
-            get(crate::account::tickets).post(crate::account::open_ticket),
+            "/support",
+            get(crate::billing::tickets).post(crate::billing::open_ticket),
         )
-        .route("/account/subscription", post(crate::account::subscribe))
-        .route("/account/top-ups", post(crate::account::top_up))
         .route(
             "/runtimes/{id}/policy",
             put(crate::hosts::set_runtime_policy),
@@ -459,6 +455,8 @@ pub(crate) fn router(api: Api) -> Router {
         )
         .route("/me/two_step/challenge", post(auth::my_two_step_challenge))
         .route("/me/two_step/{id}", delete(auth::remove_my_two_step))
+        // Plans and wallets: each handler checks the person and their role.
+        .merge(crate::billing::routes())
         // Runs after `authenticate`: 404 for anything on a hidden workspace.
         .route_layer(middleware::from_fn_with_state(
             api.clone(),
@@ -469,6 +467,11 @@ pub(crate) fn router(api: Api) -> Router {
             auth::authenticate,
         ));
     let open = Router::new()
+        // Sun Cloud asks with its own token (no session).
+        .route(
+            "/internal/workspaces/{id}/seat_count",
+            get(crate::billing::seat_count),
+        )
         .route("/session", post(auth::sign_in).delete(auth::sign_out))
         .route("/session/two_step", post(auth::sign_in_two_step))
         .route("/session/two_step/email", post(auth::mail_two_step_code))

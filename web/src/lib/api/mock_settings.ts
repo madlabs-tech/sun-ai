@@ -7,7 +7,7 @@ const invalid = (message: string) => new MockError(422, { error: { code: 'invali
 const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
 const UNLIMITED = { seats: null, runtimes: null, byo_keys: null, agents: null, hosts: null };
-// Main is on Pro from Sun Cloud; every other workspace is Community.
+// Main is on Pro from Sun Cloud (`?plan=free`: Free, no limits); every other workspace is Community.
 const pro: Entitlement = {
   plan: 'pro',
   paid: true,
@@ -15,6 +15,8 @@ const pro: Entitlement = {
   status: 'cloud',
   valid_until: new Date(Date.now() + 5 * 60_000).toISOString(),
 };
+const free: Entitlement = { ...pro, plan: 'free', paid: false, limits: UNLIMITED };
+const main_plan = new URLSearchParams(location.search).get('plan') === 'free' ? free : pro;
 const community: Entitlement = { plan: 'community', paid: false, limits: UNLIMITED, status: 'community', valid_until: null };
 const secrets: (Secret & { value: string })[] = [
   { id: 'sec_1', scope: { kind: 'mod', id: 'github' }, name: 'GITHUB_TOKEN', updated_at: '2026-10-01T09:00:00Z', value: 'ghp_sample' },
@@ -70,7 +72,7 @@ const view = ({ value: _, ...meta }: Secret & { value: string }): Secret => clon
 
 export function settings_route(method: string, parts: string[], params: URLSearchParams, input: Record<string, unknown>): unknown {
   const [head, kind, id, name] = parts;
-  if (head === 'entitlement' && method === 'GET') return clone((params.get('workspace') ?? MAIN_WORKSPACE) === MAIN_WORKSPACE ? pro : community);
+  if (head === 'entitlement' && method === 'GET') return clone((params.get('workspace') ?? MAIN_WORKSPACE) === MAIN_WORKSPACE ? main_plan : community);
   if (head !== 'secrets') throw not_found(`${method} /${parts.join('/')}`);
   if (method === 'GET') {
     const workspace = params.get('workspace');

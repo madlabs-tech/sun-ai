@@ -920,7 +920,7 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
             "/runtimes/claude-code/policy",
             Some(json!({ "permission_mode": "default" })),
         ),
-        ("GET", "/account/invoices", None),
+        ("GET", "/support", None),
     ];
     for (method, path, body) in &routes {
         // Naming their own workspace (query and body) opens nothing.

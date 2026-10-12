@@ -860,6 +860,8 @@ export interface Features {
   evals: boolean;
   market: boolean;
   catalog: boolean;
+  /** Plans per workspace through Sun Cloud: off without it. */
+  billing: boolean;
 }
 
 /** POST /api/v1/workspaces/{id}/hosts/tokens — single-use enrolment token for `sun host join` */
@@ -1416,57 +1418,41 @@ export interface Secret {
   updated_at: string;
 }
 
-/** `GET /account`: the ecosystem's account at Sun. */
-export type Currency = 'idr' | 'usd';
-export type PayMethod = 'qris' | 'bank_transfer' | 'card';
+/** `GET /subscriptions/{workspace}/summary`: the workspace's subscription at Sun Cloud. */
 export type PaidPlan = 'pro' | 'business';
-export interface PlanPrice {
-  plan: PaidPlan;
-  currency: Currency;
-  period_months: number;
-  /** Minor units: whole rupiah, US cents. */
-  base: number;
-  per_seat: number;
+export type Interval = 'month' | 'year';
+export interface SubscriptionSummary {
+  entitlement: {
+    plan: Plan;
+    status: 'active' | 'past_due' | 'canceled' | 'none';
+    /** Seats the plan includes; null without a subscription. */
+    seats: number | null;
+    limits: Entitlement['limits'];
+    version: number;
+  };
+  seat_capacity: { purchased: number; used: number; reserved: number; available: number | null; overcommitted: boolean; version: number };
+  /** What the cloud lets the workspace do now. */
+  available_actions: { checkout: boolean; portal: boolean; purchase_seats: boolean };
+  currency: string;
 }
-export interface CreditPack {
-  points: number;
-  currency: Currency;
-  amount: number;
+/** `GET /subscriptions/{workspace}/prices`; amounts in the currency's minor units (whole rupiah, cents). */
+export interface PlanPrices {
+  currency: string;
+  plans: { plan: PaidPlan; interval: Interval; amount_minor: number; per_seat_minor: number }[];
 }
-export interface Subscription {
-  plan: PaidPlan;
-  seats: number;
-  currency: Currency;
-  method: PayMethod;
-  status: 'pending' | 'active' | 'canceled';
-  period_end: string | null;
+/** A hosted payment page to send the browser to. */
+export interface CheckoutSession {
+  checkout_url: string;
+  session_id: string;
 }
-export interface Account {
-  /** `true` under Sun Cloud. */
-  cloud: boolean;
-  plan: Plan;
-  subscription: Subscription | null;
-  /** Sun credit points; null off Sun Cloud. */
-  balance: number | null;
-  catalog: { plans: PlanPrice[]; packs: CreditPack[] };
-  premium_models: boolean;
-  /** Points ≈ provider cost (USD) × per_usd × (1 + margin %). */
-  points: { per_usd: number; max_margin_percent: number };
-  support: { target_hours: number | null };
+/** `POST /subscriptions/{workspace}/seats/purchase-preview`: what the extra seats cost now. */
+export interface SeatPreview {
+  amount_minor: number;
+  currency: string;
+  expected_current_seats: number;
+  expected_purchase_version: number | string;
 }
-export interface Invoice {
-  id: string;
-  kind: 'subscription' | 'top_up';
-  currency: Currency;
-  amount: number;
-  method: PayMethod;
-  checkout_url: string | null;
-  period_months: number;
-  points: number;
-  status: 'open' | 'paid' | 'void';
-  created_at: string;
-  paid_at: string | null;
-}
+/** `GET /support`: a deployment owner's questions to Sun. */
 export interface Ticket {
   id: string;
   plan: Plan;

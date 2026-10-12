@@ -7,8 +7,8 @@
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import Chips from '../lib/ui/Chips.svelte';
   import { api } from '../lib/api/client';
-  import type { Account, DryRun, WorkflowIssue } from '../lib/api/types';
-  import { ON_LIMIT, money, points, points_for } from '../lib/format';
+  import type { DryRun, WorkflowIssue } from '../lib/api/types';
+  import { ON_LIMIT, money } from '../lib/format';
   import { can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
   import { go, href } from '../lib/router.svelte';
   import {
@@ -220,13 +220,10 @@
   /** The text `dry` belongs to; a later edit marks it out of date. */
   let dry_for = $state('');
   let dry_running = $state(false);
-  /** Sun Cloud's points rate, for the estimate in points; null off Sun Cloud. */
-  let rate = $state<Account['points'] | null>(null);
   async function dry_run() {
     dry_running = true;
     const source = text;
     try {
-      if (!rate) rate = await api.get_account().then((a) => (a.cloud ? a.points : null), () => null);
       dry = await api.dry_run(source);
       dry_for = source;
       focus('dry-title');
@@ -360,7 +357,6 @@
           <dd>
             {#if d.estimated_cost_usd !== null}
               About {money(d.estimated_cost_usd)} for {plural(d.agent_steps, 'agent step')}, from past sessions
-              {#if rate}<span class="dry__cap">On Sun credits: up to {points(points_for(d.estimated_cost_usd, rate))}</span>{/if}
             {:else if d.agent_steps}
               No estimate yet: no agent session has reported its cost
             {:else}

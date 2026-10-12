@@ -321,55 +321,32 @@ async fn buyer_leases_a_task_its_seller_host_joins_and_accepts_or_disputes() {
     assert_eq!(calls, ["accept lea_1", "dispute lea_1: no PR was opened"]);
 }
 
-/// A `credits` runtime is added from the API only with Sun Cloud
-/// connected; OpenCode needs a gateway model, the others take none.
+/// No `credits` runtime is added from the API for now, with or without Sun
+/// Cloud: the deployment sells no credits yet.
 #[tokio::test]
-async fn credits_runtime_needs_sun_cloud() {
+async fn credits_runtimes_are_refused_until_credits_are_sold() {
     let credits =
         json!({ "name": "claude-credits", "adapter": "claude-code", "source": "credits" });
     let plain = common::kernel().await;
-    let (status, body) = call(
-        &plain.app,
-        "POST",
-        "/api/v1/runtimes",
-        Some(credits.clone()),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(body.to_string().contains("Sun Cloud"), "{body}");
-
-    let k = common::kernel_with_market(Arc::new(FakeCloud::default())).await;
-    let app = &k.app;
-    let (status, body) = call(app, "POST", "/api/v1/runtimes", Some(credits)).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["source"], "credits");
-
-    let open = |model: Value| json!({ "name": "qwen-credits", "adapter": "opencode", "source": "credits", "model": model });
-    let (status, body) = call(app, "POST", "/api/v1/runtimes", Some(open(Value::Null))).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body.to_string().contains("model: "), "{body}");
-    let (status, _) = call(
-        app,
-        "POST",
-        "/api/v1/runtimes",
-        Some(open(json!("qwen3-coder"))),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let wrong = json!({ "name": "x", "adapter": "aider", "source": "credits" });
-    let (status, body) = call(app, "POST", "/api/v1/runtimes", Some(wrong)).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert!(body.to_string().contains("adapter: "), "{body}");
-
-    let (_, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
-    let qwen = runtimes
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["name"] == "qwen-credits")
-        .unwrap();
-    assert_eq!(qwen["source"], "credits");
-    assert_eq!(qwen["model"], "qwen3-coder");
+    let connected = common::kernel_with_market(Arc::new(FakeCloud::default())).await;
+    for app in [&plain.app, &connected.app] {
+        let (status, body) = call(app, "POST", "/api/v1/runtimes", Some(credits.clone())).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "source: Sun credits are not available on this deployment yet; bring your own key \
+             or runtime."
+        );
+    }
+    let (_, runtimes) = call(&connected.app, "GET", "/api/v1/runtimes", None).await;
+    assert!(
+        runtimes
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["source"] != "credits"),
+        "{runtimes}"
+    );
 }
 
 /// The ecosystem's monthly cap and a task's budget round-trip.

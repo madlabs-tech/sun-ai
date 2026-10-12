@@ -43,8 +43,9 @@ export const page_on = (id: string) => feature_on(id) && (!NAV.find((n) => n.id 
 export const visible_nav = () => NAV.filter((n) => page_on(n.id));
 
 /** `approve` is the notification deep link: #/approve/<run_id>/<step_key>.
- *  `canvas` is a task's design canvas: #/canvas/<task_id>. `invite` is an invitation link: #/invite/<token>. */
-const PAGES = new Set([...NAV.map((n) => n.id), 'more', 'login', 'approve', 'canvas', 'invite']);
+ *  `canvas` is a task's design canvas: #/canvas/<task_id>. `invite` is an invitation link: #/invite/<token>.
+ *  `billing` is where Sun Cloud's hosted checkout returns: #/billing/return?status=success|canceled&workspace=<id>. */
+const PAGES = new Set([...NAV.map((n) => n.id), 'more', 'login', 'approve', 'canvas', 'invite', 'billing']);
 
 /** How a git connect came back: `github_connected=1` / `github_error=<reason>` (same for `gitlab`), with
  *  `return_to=repositories` when the picker should open. Taken out of the URL here, shown and cleared by

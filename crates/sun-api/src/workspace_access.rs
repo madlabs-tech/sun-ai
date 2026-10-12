@@ -11,6 +11,7 @@
 //! - path ids: `/workspaces/{id}`, `/tasks/{id}/*` (a key there is already
 //!   the task's id: [`crate::tasks::key_paths`]), `/runs/{id}/*`,
 //!   `/workflows/{id}/*`, `/knowledge/sources/{id}/*`, `/knowledge/docs/{id}`,
+//!   `/subscriptions/{id}/*`,
 //!   `/artifacts/{id}`, `/evals/{id}`, `/outbox/{id}/resolve`, `/projects/{id}`,
 //!   `/repos/{id}`, `/vcs/connections/{id}`, `/agents/{id}`, `/memory/{id}/*`,
 //!   `/corrections/{id}/*`, `/notes/{id}/*`, `/secrets/workspace/{id}/*`, and
@@ -280,7 +281,9 @@ fn from_path(path: &str, key: &str, value: &str, named: &mut Vec<Named>) {
         "id" if path.starts_with("/repos/") => push(named, value, Named::Repo),
         "id" if path.starts_with("/vcs/connections/") => push(named, value, Named::VcsConnection),
         "source_id" => named.push(Named::Source(value.to_owned())),
-        "id" if path.starts_with("/workspaces/") => push(named, value, Named::Workspace),
+        "id" if path.starts_with("/workspaces/") || path.starts_with("/subscriptions/") => {
+            push(named, value, Named::Workspace);
+        }
         "id" if path.starts_with("/tasks/") => push(named, value, Named::Task),
         "id" if path.starts_with("/runs/") => push(named, value, Named::Run),
         "id" if path.starts_with("/workflows/") => push(named, value, Named::Workflow),

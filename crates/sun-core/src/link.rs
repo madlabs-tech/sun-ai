@@ -421,26 +421,6 @@ pub trait Marketplace: Send + Sync {
     async fn release(&self, lease_id: &str) -> Result<serde_json::Value>;
 }
 
-/// The ecosystem's account at Sun: plan,
-/// seats, points, checkout and support from people. Sun Cloud kernels get
-/// all of it.
-/// Requests are validated by the caller; answers are Sun's JSON.
-#[async_trait]
-pub trait CloudAccount: Send + Sync {
-    /// Plan, subscription, points balance, catalog and support target.
-    async fn account(&self) -> Result<serde_json::Value>;
-    /// Starts or changes the plan and seats: the invoice with its checkout link.
-    async fn subscribe(&self, request: serde_json::Value) -> Result<serde_json::Value>;
-    /// Buys a credit pack: the invoice with its checkout link.
-    async fn top_up(&self, request: serde_json::Value) -> Result<serde_json::Value>;
-    /// Invoices, newest first.
-    async fn invoices(&self) -> Result<serde_json::Value>;
-    /// Support tickets with their threads, newest first.
-    async fn tickets(&self) -> Result<serde_json::Value>;
-    /// Opens a support ticket.
-    async fn open_ticket(&self, subject: &str, body: &str) -> Result<serde_json::Value>;
-}
-
 /// What the `sun` MCP server (in `sun-context`) may ask of the engine.
 ///
 /// Contract: every call is attributed to the run/step that made it and lands
