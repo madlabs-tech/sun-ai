@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 24 }
       # Builds the contract tests once, before any recording spends quota.
-      - run: cargo test --locked -p sun-runtime --test it contract::
+      - run: 'cargo test --locked -p sun-runtime --test it contract::'
 
       # One step per CLI, so one broken CLI doesn't hide the others.
       - id: claude_code
