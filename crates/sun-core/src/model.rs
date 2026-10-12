@@ -1713,6 +1713,16 @@ impl Secret {
         "GITLAB_OAUTH_CLIENT_SECRET",
     ];
 
+    /// Prefix of the workspace secrets the kernel keeps for a git
+    /// connection (`VCS_<connection id>_TOKEN`, `_REFRESH`, `_WEBHOOK`):
+    /// never listed, set or deleted by hand.
+    pub const CONNECTION_PREFIX: &str = "VCS_";
+
+    /// True for a [`Self::CONNECTION_PREFIX`] name.
+    pub fn is_connection(name: &str) -> bool {
+        name.starts_with(Self::CONNECTION_PREFIX)
+    }
+
     /// True for a deployment secret: a [`Self::DEPLOYMENT`] name or an SSO
     /// provider's client secret (`SSO_<ID>_SECRET`). Every other secret a
     /// person sets belongs to a workspace.
