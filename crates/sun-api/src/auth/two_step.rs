@@ -24,7 +24,7 @@ use std::time::Duration;
 use sun_core::model::{Factor, FactorKind, Mail, Member, SecurityPolicy};
 use sun_core::{FactorId, MemberId};
 
-use super::members::{may_act_on, not_yourself};
+use super::members::not_yourself;
 use super::passkey;
 use super::users::{code_hash, new_code, parse_id, send};
 use super::{Caller, SESSION_TTL, digest, same, session_cookie, wrong_credentials};
@@ -582,9 +582,9 @@ pub(super) async fn check_password_change(
     Ok(())
 }
 
-/// `DELETE /api/v1/members/{id}/two_step` (`edit_members`): removes every
+/// `DELETE /api/v1/members/{id}/two_step` (deployment owner): removes every
 /// second step of the member (they lost their phone) and ends their
-/// sessions. The member must pass `not_yourself` and `may_act_on`.
+/// sessions. Not on yourself (`not_yourself`).
 pub(crate) async fn reset(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -592,11 +592,11 @@ pub(crate) async fn reset(
 ) -> ApiResult<Json<Member>> {
     let id = parse_id(&id)?;
     not_yourself(&caller, id)?;
-    may_act_on(&api, &caller, id).await?;
+    api.engine.member(id).await?;
     Ok(Json(api.engine.reset_two_step(id, &caller.actor()).await?))
 }
 
-/// `GET /api/v1/settings/security` (`manage_settings`): the 2-step rules.
+/// `GET /api/v1/settings/security` (deployment owner): the 2-step rules.
 pub(crate) async fn get_policy(State(api): State<Api>) -> ApiResult<Json<SecurityPolicy>> {
     Ok(Json(api.engine.security_policy().await?))
 }
@@ -609,7 +609,7 @@ pub(crate) struct PolicyChange {
 }
 
 /// `PUT /api/v1/settings/security {require_two_step?, two_step_for_password_change?}`
-/// (`manage_settings`): saves the 2-step rules; a rule left out keeps its
+/// (deployment owner): saves the 2-step rules; a rule left out keeps its
 /// value. Answers with the saved rules.
 pub(crate) async fn put_policy(
     State(api): State<Api>,

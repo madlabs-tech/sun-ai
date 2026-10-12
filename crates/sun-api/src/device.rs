@@ -66,8 +66,8 @@ pub(crate) async fn live(
 ) -> ApiResult<Response> {
     let task_id: TaskId = id(&task, "task")?;
     same_origin(&headers)?;
-    api.engine.task(task_id).await?;
-    let can_input = caller.can(Permission::Run);
+    let workspace = api.engine.task(task_id).await?.workspace_id;
+    let can_input = caller.can_in(workspace, Permission::Run);
     let video = view.video.as_deref() == Some("h264");
     Ok(ws
         .max_message_size(MAX_INPUT)

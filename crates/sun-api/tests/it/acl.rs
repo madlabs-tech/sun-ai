@@ -1,8 +1,7 @@
 //! Workspace roles through the real kernel: a role grants fixed
-//! permissions, a workspace is visible to its members only, invites grant
-//! at most the inviter's role, and the take-over guard keeps members off
-//! anyone who can do or see more. Until M2 checks the role in the workspace
-//! a route names, a member's permissions are their role in Main.
+//! permissions in its workspace, a workspace is visible to its members
+//! only, invitations grant at most the inviter's role there, and the
+//! deployment's accounts are for deployment owners only.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::common;
@@ -104,16 +103,13 @@ async fn acl_roles_grant_their_permissions_and_anyone_creates_a_workspace() {
     let (bob, _) = member(&k.store, "bob", &[(MAIN, Role::Member)]).await;
     let (status, me) = call_as(app, &bob, "GET", "/api/v1/me", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        me["permissions"],
-        json!(["run", "approve", "create_workflow", "edit_workflow"])
-    );
     assert_eq!(me["memberships"][0]["role"], "member", "{me}");
+    let body = Some(json!({ "source_yaml": flow("b") }));
+    let (status, _) = call_as(app, &bob, "POST", "/api/v1/workflows", body).await;
+    assert_eq!(status, StatusCode::CREATED, "a member creates workflows");
     // A viewer reads, writes nothing, but creates a workspace of their own
     // and owns it.
     let (vic, vic_id) = member(&k.store, "vic", &[(MAIN, Role::Viewer)]).await;
-    let (_, me) = call_as(app, &vic, "GET", "/api/v1/me", None).await;
-    assert_eq!(me["permissions"], json!([]));
     let body = Some(json!({ "source_yaml": flow("v") }));
     let (status, _) = call_as(app, &vic, "POST", "/api/v1/workflows", body).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -130,8 +126,13 @@ async fn acl_roles_grant_their_permissions_and_anyone_creates_a_workspace() {
         .collect();
     assert_eq!(roles.len(), 2, "{me}");
     assert!(roles.contains(&"owner") && roles.contains(&"viewer"));
-    // Owning a workspace grants nothing in Main.
-    assert_eq!(me["permissions"], json!([]), "{me}");
+    // Owning a workspace grants nothing in Main, everything in it.
+    let body = Some(json!({ "source_yaml": flow("v") }));
+    let (status, _) = call_as(app, &vic, "POST", "/api/v1/workflows", body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "still a viewer in Main");
+    let body = Some(json!({ "source_yaml": flow("v"), "workspace_id": created["id"] }));
+    let (status, _) = call_as(app, &vic, "POST", "/api/v1/workflows", body).await;
+    assert_eq!(status, StatusCode::CREATED, "the owner of Vic's");
     let (_, listed) = call_as(app, &vic, "GET", "/api/v1/workspaces", None).await;
     assert!(lists(&listed, &id_of(&created)) && lists(&listed, &MAIN.to_string()));
     // Nobody else sees it.
@@ -145,46 +146,41 @@ async fn acl_invites_grant_at_most_the_inviters_role_where_they_are() {
     let app = &k.app;
     let x = workspace(app, "X").await;
     let (ada, _) = member(&k.store, "ada", &[(MAIN, Role::Admin)]).await;
-    let smtp = json!({ "host": "smtp.corp.io", "port": 587, "from": "sun@corp.io",
-        "tls": "starttls" });
-    let (status, _) = call_as(app, &ada, "PUT", "/api/v1/smtp", Some(smtp)).await;
-    assert_eq!(status, StatusCode::OK);
-    let invite = |name: &str, extra: Value| {
-        let mut body = json!({ "email": format!("{name}@corp.io"), "username": name,
-            "password": "a long enough password" });
-        for (key, value) in extra.as_object().unwrap() {
-            body[key] = value.clone();
-        }
-        Some(body)
+    let invite = |workspace: WorkspaceId, name: &str, role: &str| {
+        let path = format!("/api/v1/workspaces/{workspace}/invitations");
+        let body = Some(json!({ "email": format!("{name}@corp.io"), "role": role }));
+        (path, body)
     };
-    let post = |token: &str, body: Option<Value>| {
+    let post = |token: &str, (path, body): (String, Option<Value>)| {
         let token = token.to_owned();
-        async move { call_as(app, &token, "POST", "/api/v1/members", body).await }
+        async move { call_as(app, &token, "POST", &path, body).await }
     };
-    // Into Main as member or admin: yes; as owner, or as a deployment
-    // owner: no; into X, which ada doesn't see: 404.
-    let (status, cy) = post(&ada, invite("cy", json!({ "role": "member" }))).await;
+    // Into Main as member or admin: yes; as owner: no; into X, which ada
+    // doesn't see: 404.
+    let (status, cy) = post(&ada, invite(MAIN, "cy", "member")).await;
     assert_eq!(status, StatusCode::CREATED, "{cy}");
-    let (status, _) = post(&ada, invite("al", json!({ "role": "admin" }))).await;
+    let (status, _) = post(&ada, invite(MAIN, "al", "admin")).await;
     assert_eq!(status, StatusCode::CREATED);
-    let (status, _) = post(&ada, invite("ow", json!({ "role": "owner" }))).await;
+    let (status, _) = post(&ada, invite(MAIN, "ow", "owner")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = post(&ada, invite("o", json!({ "is_owner": true }))).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let into_x = json!({ "role": "viewer", "workspace_id": x });
-    let (status, _) = post(&ada, invite("xi", into_x.clone())).await;
+    let (status, _) = post(&ada, invite(x, "xi", "viewer")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    // The token holder may; the new member sees X only.
-    let (status, xi) = post(TOKEN, invite("xi", into_x)).await;
+    // Nor does she add accounts straight away: that is the deployment's.
+    let body = Some(json!({ "email": "o@corp.io", "username": "o",
+        "password": "a long enough password" }));
+    let (status, _) = call_as(app, &ada, "POST", "/api/v1/members", body).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // The token holder may.
+    let (status, xi) = post(TOKEN, invite(x, "xi", "viewer")).await;
     assert_eq!(status, StatusCode::CREATED, "{xi}");
-    let (_, audit) = call_as(app, &ada, "GET", "/api/v1/audit", None).await;
+    let (_, audit) = call_as(app, TOKEN, "GET", "/api/v1/audit", None).await;
     let audit = audit.to_string();
-    assert!(audit.contains("cy@corp.io into Main as member"), "{audit}");
-    assert!(audit.contains("xi@corp.io into X as viewer"), "{audit}");
+    assert!(audit.contains("invited to Main as member"), "{audit}");
+    assert!(audit.contains("invited to X as viewer"), "{audit}");
 
     // A member has none of the member or settings permissions.
     let (bo, _) = member(&k.store, "bo", &[(MAIN, Role::Member)]).await;
-    let (status, _) = post(&bo, invite("b2", json!({ "role": "viewer" }))).await;
+    let (status, _) = post(&bo, invite(MAIN, "b2", "viewer")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     for path in ["/api/v1/members", "/api/v1/audit", "/api/v1/smtp"] {
         let (status, _) = call_as(app, &bo, "GET", path, None).await;
@@ -292,8 +288,12 @@ async fn acl_workspace_visibility_matrix() {
             let token = token.clone();
             async move { call_as(app, &token, method, &path, body).await }
         };
-        let permissions = me("GET", "/api/v1/me".into(), None).await.1["permissions"].clone();
-        let can = |p: &str| permissions.as_array().unwrap().iter().any(|v| v == p);
+        // Their permission `p` in `workspace`, by their role there.
+        let can_in = |workspace: &str, p: &str| {
+            roles.iter().any(|(w, r)| {
+                w.to_string() == workspace && r.permissions().iter().any(|q| q.as_str() == p)
+            })
+        };
         let (_, listed) = me("GET", "/api/v1/workspaces".into(), None).await;
         for (workspace, want) in [&main, &x, &y].into_iter().zip(sees) {
             assert_eq!(
@@ -352,40 +352,41 @@ async fn acl_workspace_visibility_matrix() {
             .await;
             assert_eq!(
                 status,
-                want(StatusCode::OK, can("edit_workspace")),
+                want(StatusCode::OK, can_in(&o.workspace, "edit_workspace")),
                 "{what}: rename"
             );
             let yaml = flow(&format!("{name}-{}", o.label));
             let body = Some(json!({ "source_yaml": yaml, "workspace_id": o.workspace }));
             let (status, _) = me("POST", "/api/v1/workflows".into(), body).await;
-            let created = want(StatusCode::CREATED, can("create_workflow"));
+            let created = want(StatusCode::CREATED, can_in(&o.workspace, "create_workflow"));
             assert_eq!(status, created, "{what}: create workflow");
             let body = Some(json!({ "source_yaml": flow(&format!("w-{}", o.label)) }));
             let path = format!("/api/v1/workflows/{}/versions", o.workflow);
             let (status, _) = me("POST", path, body).await;
-            let edited = want(StatusCode::CREATED, can("edit_workflow"));
+            let edited = want(StatusCode::CREATED, can_in(&o.workspace, "edit_workflow"));
             assert_eq!(status, edited, "{what}: edit workflow");
             let body = Some(json!({ "title": "t", "workflow_id": o.workflow }));
             let (status, _) = me("POST", "/api/v1/tasks".into(), body).await;
             assert_eq!(
                 status,
-                want(StatusCode::CREATED, can("run")),
+                want(StatusCode::CREATED, can_in(&o.workspace, "run")),
                 "{what}: new task"
             );
         }
         // A workflow without a workspace goes on Main: only for who sees Main.
-        if !sees[0] && can("create_workflow") {
+        if !sees[0] && can_in(&x, "create_workflow") {
             let body = Some(json!({ "source_yaml": flow(&format!("{name}-default")) }));
             let (status, _) = me("POST", "/api/v1/workflows".into(), body).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{name}: defaults to Main");
         }
-        // Import needs manage_settings and both workspaces: X's source into Main.
+        // Import needs manage_settings in both workspaces: X's source into Main.
         let import = format!(
             "/api/v1/workspaces/{main}/knowledge_sources/{}",
             on[1].source
         );
         let (status, _) = me("POST", import, None).await;
-        let want = match (sees[0] && sees[1], can("manage_settings")) {
+        let both = can_in(&main, "manage_settings") && can_in(&x, "manage_settings");
+        let want = match (sees[0] && sees[1], both) {
             (true, true) => StatusCode::NO_CONTENT,
             (false, _) => StatusCode::NOT_FOUND,
             (true, false) => StatusCode::FORBIDDEN,
@@ -394,61 +395,51 @@ async fn acl_workspace_visibility_matrix() {
     }
 }
 
+/// No permission opens these: the deployment's accounts and settings are
+/// for deployment owners.
+const DEPLOYMENT: &[&str] = &[];
+
 /// The resource × verb matrix. A member of Main with each role gets past
 /// exactly the routes one of the role's permissions opens (anything but
 /// 403; the bodies are invalid, so nothing changes) and a 403 everywhere
-/// else. Creating a workspace needs no permission.
+/// else; the token holder gets past every one. Creating a workspace needs
+/// no permission.
 #[tokio::test]
 async fn acl_permission_matrix_opens_exactly_its_routes() {
     let k = kernel().await;
     let app = &k.app;
     let main = MAIN;
     let probes: Vec<(&str, String, Option<Value>, &[&str])> = vec![
-        ("GET", "/members".into(), None, &["view_members"]),
+        ("GET", "/members".into(), None, DEPLOYMENT),
         (
             "POST",
             "/members".into(),
             Some(json!({ "email": "bad", "username": "x" })),
-            &["invite_members"],
+            DEPLOYMENT,
         ),
         (
             "POST",
             "/members".into(),
             Some(json!({ "email": "bad", "username": "x", "password": "p" })),
-            &["create_members"],
+            DEPLOYMENT,
         ),
         (
             "PUT",
             "/members/nope/password".into(),
             Some(json!({ "password": "p" })),
-            &["edit_members"],
+            DEPLOYMENT,
         ),
-        (
-            "POST",
-            "/members/nope/invite".into(),
-            None,
-            &["edit_members"],
-        ),
-        (
-            "POST",
-            "/members/nope/deactivate".into(),
-            None,
-            &["deactivate_members"],
-        ),
-        (
-            "POST",
-            "/members/nope/activate".into(),
-            None,
-            &["deactivate_members"],
-        ),
-        ("GET", "/smtp".into(), None, &["manage_settings"]),
-        ("GET", "/settings/sso".into(), None, &["manage_settings"]),
-        ("GET", "/audit".into(), None, &["manage_settings"]),
+        ("POST", "/members/nope/invite".into(), None, DEPLOYMENT),
+        ("POST", "/members/nope/deactivate".into(), None, DEPLOYMENT),
+        ("POST", "/members/nope/activate".into(), None, DEPLOYMENT),
+        ("GET", "/smtp".into(), None, DEPLOYMENT),
+        ("GET", "/settings/sso".into(), None, DEPLOYMENT),
+        ("GET", "/audit".into(), None, DEPLOYMENT),
         (
             "PUT",
             "/settings/embeddings".into(),
             Some(json!({})),
-            &["manage_settings"],
+            DEPLOYMENT,
         ),
         (
             "PATCH",
@@ -463,43 +454,28 @@ async fn acl_permission_matrix_opens_exactly_its_routes() {
             &["delete_workspace"],
         ),
         // 2-step resets, the 2-step policy, SMTP and SSO providers.
-        (
-            "DELETE",
-            "/members/nope/two_step".into(),
-            None,
-            &["edit_members"],
-        ),
-        (
-            "GET",
-            "/settings/security".into(),
-            None,
-            &["manage_settings"],
-        ),
+        ("DELETE", "/members/nope/two_step".into(), None, DEPLOYMENT),
+        ("GET", "/settings/security".into(), None, DEPLOYMENT),
         (
             "PUT",
             "/settings/security".into(),
             Some(json!({ "fly": true })),
-            &["manage_settings"],
+            DEPLOYMENT,
         ),
         (
             "PUT",
             "/smtp".into(),
             Some(json!({ "host": "" })),
-            &["manage_settings"],
+            DEPLOYMENT,
         ),
-        ("POST", "/smtp/test".into(), None, &["manage_settings"]),
+        ("POST", "/smtp/test".into(), None, DEPLOYMENT),
         (
             "PUT",
             "/settings/sso/Bad-Id".into(),
             Some(json!({ "kind": "nope" })),
-            &["manage_settings"],
+            DEPLOYMENT,
         ),
-        (
-            "DELETE",
-            "/settings/sso/none_here".into(),
-            None,
-            &["manage_settings"],
-        ),
+        ("DELETE", "/settings/sso/none_here".into(), None, DEPLOYMENT),
     ];
     for role in [Role::Viewer, Role::Member, Role::Admin] {
         let name = format!("p_{role}");
@@ -520,6 +496,15 @@ async fn acl_permission_matrix_opens_exactly_its_routes() {
         let body = Some(json!({ "name": "" }));
         let (status, _) = call_as(app, &token, "POST", "/api/v1/workspaces", body).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{role}: create");
+    }
+    for (method, path, body, _) in &probes {
+        let path = format!("/api/v1{path}");
+        let (status, value) = call_as(app, TOKEN, method, &path, body.clone()).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "token: {method} {path} -> {value}"
+        );
     }
 }
 
@@ -648,21 +633,17 @@ async fn set_password(app: &Router, caller: &str, target: &str) -> StatusCode {
     call_as(app, caller, "PUT", &path, Some(body)).await.0
 }
 
-/// The take-over guard covers every route that acts on another member's
-/// account (reset code, deactivate, activate, password, 2-step): a member
-/// who can do more or sees a workspace the caller can't is out of reach;
-/// an equal peer, a weaker member and someone in no workspace are in
-/// reach. Deployment owners reach anyone; only they reach an owner.
+/// Every route that acts on another member's account (reset code,
+/// deactivate, activate, password, 2-step, owner flag) is for deployment
+/// owners only: a Main admin reaches nobody, not even a viewer; a
+/// deployment owner reaches anyone, another owner included.
 #[tokio::test]
-async fn acl_take_over_guard_reaches_only_members_who_do_and_see_no_more() {
+async fn acl_accounts_are_for_deployment_owners_only() {
     let k = kernel().await;
     let app = &k.app;
     let x = workspace(app, "X").await;
     let (ed, _) = member(&k.store, "ed", &[(MAIN, Role::Admin)]).await;
-    let (_, peer) = member(&k.store, "peer", &[(MAIN, Role::Admin)]).await;
-    let (_, wider) = member(&k.store, "wider", &[(MAIN, Role::Admin), (x, Role::Viewer)]).await;
     let (_, sam) = member(&k.store, "sam", &[(x, Role::Member)]).await;
-    let (_, nobody) = member(&k.store, "nobody", &[]).await;
     let (_, tim) = member(&k.store, "tim", &[(MAIN, Role::Viewer)]).await;
     let (olive, olive_id) = member(&k.store, "olive", &[]).await;
     let (_, oscar) = member(&k.store, "oscar", &[]).await;
@@ -673,14 +654,20 @@ async fn acl_take_over_guard_reaches_only_members_who_do_and_see_no_more() {
         assert_eq!(status, StatusCode::OK, "{value}");
     }
     for (caller, target, want, what) in [
-        (&ed, &peer, StatusCode::OK, "equal peer"),
-        (&ed, &nobody, StatusCode::OK, "in no workspace"),
-        (&ed, &wider, StatusCode::FORBIDDEN, "peer who also sees X"),
-        (&ed, &sam, StatusCode::FORBIDDEN, "on X only"),
-        (&ed, &oscar, StatusCode::FORBIDDEN, "a deployment owner"),
-        (&olive, &wider, StatusCode::OK, "owner on X's member"),
-        (&olive, &sam, StatusCode::OK, "owner on X's member"),
-        (&olive, &oscar, StatusCode::OK, "owner on owner"),
+        (
+            &ed,
+            &tim,
+            StatusCode::FORBIDDEN,
+            "a Main admin on a Main viewer",
+        ),
+        (
+            &ed,
+            &oscar,
+            StatusCode::FORBIDDEN,
+            "a Main admin on an owner",
+        ),
+        (&olive, &sam, StatusCode::OK, "an owner on X's member"),
+        (&olive, &oscar, StatusCode::OK, "an owner on an owner"),
     ] {
         assert_eq!(set_password(app, caller, target).await, want, "{what}");
     }
@@ -693,19 +680,22 @@ async fn acl_take_over_guard_reaches_only_members_who_do_and_see_no_more() {
             ("POST", format!("{m}/activate"), None),
             ("PUT", format!("{m}/password"), Some(password)),
             ("DELETE", format!("{m}/two_step"), None),
+            (
+                "PUT",
+                format!("{m}/owner"),
+                Some(json!({ "is_owner": true })),
+            ),
         ]
     };
-    for id in [&wider, &sam] {
-        for (method, path, body) in probes(id) {
-            let (status, value) = call_as(app, &ed, method, &path, body).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {value}");
-        }
+    for (method, path, body) in probes(&tim) {
+        let (status, value) = call_as(app, &ed, method, &path, body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {value}");
     }
     for (method, path, body) in probes(&tim) {
         if path.ends_with("/invite") {
             continue; // no SMTP in the test kernel
         }
-        let (status, value) = call_as(app, &ed, method, &path, body).await;
+        let (status, value) = call_as(app, &olive, method, &path, body).await;
         assert!(status.is_success(), "{method} {path}: {status} {value}");
     }
 }

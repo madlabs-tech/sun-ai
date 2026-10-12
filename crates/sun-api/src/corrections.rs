@@ -88,8 +88,9 @@ pub(crate) async fn decide(
         .into_iter()
         .find(|s| s.status == StepStatus::WaitingApproval)
         .ok_or_else(|| ApiError::conflict("This task is not waiting for a decision."))?;
+    let by = by.principal_in(api.engine.workspace_of_task(task_id).await?);
     api.engine
-        .correct_decision(run.id, step.step_key, by.principal, answer)
+        .correct_decision(run.id, step.step_key, by, answer)
         .await?;
     summary(&api, task_id).await
 }

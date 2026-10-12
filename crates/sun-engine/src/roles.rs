@@ -5,38 +5,26 @@
 //! leave it none. Who may make a change is the API's check
 //! ([`sun_core::model::Role::covers`]). Each change commits with its audit row.
 
-use sun_core::model::{
-    AuditAction, Member, Permission, Role, WorkspaceMember, permissions_of, roles_of,
-};
+use sun_core::model::{AuditAction, Member, Permission, Role, WorkspaceMember, roles_of};
 use sun_core::{MemberId, Result, WorkspaceId};
 use sun_store::{AuditRepo, MemberRepo, MembershipRepo, Tx, WorkspaceRepo};
 
 use crate::{Engine, Principal};
 
-/// What a member may do: who they are, their role in each workspace, and
-/// the permissions and approval roles those give.
+/// What a member may do: who they are and their role in each workspace
+/// (a deployment owner may do everything, everywhere).
 #[derive(Debug, Clone)]
 pub struct Access {
     /// The member row.
     pub member: Member,
     /// Their workspaces and role in each, by workspace id.
     pub memberships: Vec<WorkspaceMember>,
-    /// The union of their roles' permissions (all of them for a
-    /// deployment owner).
-    // ponytail: one set for every workspace; per-workspace checks
-    // ([`Access::can_in`]) replace it where a route names its workspace.
-    pub permissions: Vec<Permission>,
     /// The workspaces they see: their memberships, or `None` for every
     /// workspace (deployment owners).
     pub workspaces: Option<Vec<WorkspaceId>>,
 }
 
 impl Access {
-    /// True when one of their roles grants `permission`.
-    pub fn can(&self, permission: Permission) -> bool {
-        self.permissions.contains(&permission)
-    }
-
     /// True when they see `workspace`.
     pub fn sees(&self, workspace: WorkspaceId) -> bool {
         self.workspaces
@@ -61,16 +49,6 @@ impl Access {
                 .is_some_and(|r| r.permissions().contains(&permission))
     }
 
-    /// Who they are for approval `who:`: their username and the keys of
-    /// all their roles (and those below them).
-    pub fn principal(&self) -> Principal {
-        let roles: Vec<Role> = self.memberships.iter().map(|m| m.role).collect();
-        Principal {
-            user: self.member.username.clone(),
-            roles: roles_of(self.member.is_owner, &roles),
-        }
-    }
-
     /// Who they are for an approval on a task in `workspace`: their
     /// username and the keys of their role there (and those below it).
     pub fn principal_in(&self, workspace: WorkspaceId) -> Principal {
@@ -84,12 +62,9 @@ impl Access {
 
 async fn access(tx: &mut Tx, member: Member) -> Result<Access> {
     let memberships = tx.memberships_of(member.id).await?;
-    let roles: Vec<Role> = memberships.iter().map(|m| m.role).collect();
-    let permissions = permissions_of(member.is_owner, &roles);
     let workspaces =
         (!member.is_owner).then(|| memberships.iter().map(|m| m.workspace_id).collect());
     Ok(Access {
-        permissions,
         member,
         memberships,
         workspaces,

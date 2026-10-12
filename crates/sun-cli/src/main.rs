@@ -316,10 +316,13 @@ enum WorkspaceCommand {
         #[command(flatten)]
         remote: Remote,
     },
-    /// Create a workspace.
+    /// Create a workspace; you become its owner.
     Create {
         /// Name, 1–64 characters, unique ignoring case.
         name: String,
+        /// Its slug (default: from the name, made unique).
+        #[arg(long)]
+        slug: Option<String>,
         #[command(flatten)]
         remote: Remote,
     },
@@ -1593,8 +1596,8 @@ fn workspace(data_dir: &Path, command: WorkspaceCommand) -> Result<()> {
                 print(workspace);
             }
         }
-        WorkspaceCommand::Create { name, remote } => {
-            let body = json!({ "name": name });
+        WorkspaceCommand::Create { name, slug, remote } => {
+            let body = json!({ "name": name, "slug": slug });
             print(&client(data_dir, remote)?.post("/workspaces", &body)?);
         }
         WorkspaceCommand::Rename {

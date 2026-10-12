@@ -252,7 +252,8 @@ pub(crate) async fn list(
     Ok(Json(Connections {
         connections: api.engine.vcs_connections(workspace).await?,
         apps: api.engine.vcs_apps().await?,
-        can_manage: caller.can(Permission::EditWorkspace) && caller.can(Permission::ManageSecrets),
+        can_manage: caller.can_in(workspace, Permission::EditWorkspace)
+            && caller.can_in(workspace, Permission::ManageSecrets),
     }))
 }
 

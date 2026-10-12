@@ -18,6 +18,7 @@ mod projects;
 mod pull_requests;
 mod route_matrix;
 mod task_lifecycle;
+mod tenancy;
 mod vcs;
 mod workspace_profile;
 mod workspaces;

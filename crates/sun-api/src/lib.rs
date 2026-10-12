@@ -16,12 +16,13 @@
 //! - Reads and writes go through `sun_engine::Engine` (the API never touches
 //!   the store) and `sun_engine::Queue`; run transitions stay on the engine task.
 //! - Secrets (token, host keys) are compared in constant time and never logged.
-//! - Auth (`auth`): the local token (an `admin`), a session from a one-time
-//!   login link (the same admin), or an OIDC session (a member with a role);
-//!   sessions are stored. Invited members sign in with an emailed code,
-//!   then a password; mail goes through the injected `sun_core::Mailer`.
-//!   `GET`s need any role, other methods `member`, and
-//!   the admin group (members, roles, audit, host tokens, login links) `admin`. Logins,
+//! - Auth (`auth`): the local token (a deployment owner), or a member's
+//!   session (a password, an emailed code or SSO); sessions are stored.
+//!   People sign up (when the deployment allows it) or are invited into a
+//!   workspace; mail goes through the injected `sun_core::Mailer`. A member
+//!   acts in each workspace by their role there: `GET`s need membership,
+//!   other methods `run` there, and each workspace verb its permission; the
+//!   deployment's own settings and accounts need a deployment owner. Logins,
 //!   role changes and approvals are audited.
 //!
 //! **May depend on:** `sun-core`, `sun-engine`, `sun-context`, `sun-catalog`.
@@ -139,6 +140,8 @@ pub struct Api {
     mailer: Option<Arc<dyn Mailer>>,
     /// The kernel URL invite mails link to (`with_mailer`).
     mail_url: Option<String>,
+    /// Who may sign up and create workspaces (`with_signup_policy`).
+    signup: Arc<sun_core::model::SignupPolicy>,
 }
 
 impl Api {
@@ -168,7 +171,16 @@ impl Api {
             features: Features::default(),
             mailer: None,
             mail_url: None,
+            signup: Arc::default(),
         }
+    }
+
+    /// Who may sign up (`SUN_ALLOW_SIGNUP`, `SUN_ALLOWED_EMAIL_DOMAINS`) and
+    /// create workspaces (`SUN_DISABLE_WORKSPACE_CREATION`); by default
+    /// anyone may both.
+    pub fn with_signup_policy(mut self, policy: sun_core::model::SignupPolicy) -> Self {
+        self.signup = Arc::new(policy);
+        self
     }
 
     /// Rotates the kernel token through `rotate` when the first-run owner
