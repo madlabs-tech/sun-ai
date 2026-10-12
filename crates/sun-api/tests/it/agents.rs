@@ -12,7 +12,7 @@ use crate::workspaces::{FLOW, call, call_as, member_token};
 const MAIN: &str = "00000000000000000000000001";
 
 #[tokio::test]
-async fn agents_crud_needs_manage_runtimes_and_reads_are_open() {
+async fn agents_crud_and_reads_are_for_deployment_owners() {
     let k = kernel().await;
     let app = &k.app;
     for bad in [
@@ -59,13 +59,10 @@ async fn agents_crud_needs_manage_runtimes_and_reads_are_open() {
         (&json!("Fixes every bug"), &json!(["codex"]))
     );
 
-    // Bob (no manage_runtimes) reads but can't write.
+    // Bob (no deployment owner) neither reads nor writes.
     let bob = member_token(&k.store, "bob", Role::Member).await;
-    let (status, listed) = call_as(app, &bob, "GET", "/api/v1/agents", None).await;
-    assert_eq!(
-        (status, listed.as_array().unwrap().len()),
-        (StatusCode::OK, 1)
-    );
+    let (status, _) = call_as(app, &bob, "GET", "/api/v1/agents", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let create = json!({ "name": "Bob", "runtime_chain": ["codex"] });
     let (status, _) = call_as(app, &bob, "POST", "/api/v1/agents", Some(create)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);

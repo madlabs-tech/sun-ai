@@ -305,6 +305,9 @@ async fn acl_workspace_visibility_matrix() {
         let (_, all_tasks) = me("GET", "/api/v1/tasks".into(), None).await;
         let (_, all_workflows) = me("GET", "/api/v1/workflows".into(), None).await;
         let (_, all_sources) = me("GET", "/api/v1/knowledge/sources".into(), None).await;
+        // The deployment-wide outbox list is for deployment owners only.
+        let (status, _) = me("GET", "/api/v1/outbox?status=unknown".into(), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{name}: outbox");
         for o in &on {
             let visible = sees[usize::from(o.workspace != main)];
             let what = format!("{name} on {}", o.label);
@@ -321,8 +324,6 @@ async fn acl_workspace_visibility_matrix() {
                 "{what}: workflows"
             );
             assert_eq!(lists(&all_sources, &o.source), visible, "{what}: sources");
-            let (_, unknown) = me("GET", "/api/v1/outbox?status=unknown".into(), None).await;
-            assert_eq!(lists(&unknown, &o.outbox), visible, "{what}: outbox");
             if !visible {
                 let resolve = format!("/api/v1/outbox/{}/resolve", o.outbox);
                 let body = Some(json!({ "resolution": "delivered" }));
