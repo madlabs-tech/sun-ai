@@ -148,7 +148,7 @@ impl Engine {
     /// has the name. `update` replaces the config of the workspace's runtime
     /// of that name instead (`false`: no such runtime). `NotFound` for a
     /// missing workspace; `PlanLimit` when `plan` has no room for one more
-    /// runtime or BYO key.
+    /// runtime (a new one) or BYO key (a new one, or one turned into it).
     /// Rows a chain name made (`byo_runtime`) don't count.
     pub async fn save_runtime(
         &self,
@@ -175,7 +175,9 @@ impl Engine {
                 .filter(|r| r.source != RuntimeSource::ByoRuntime);
             plan.check(Quota::Runtimes, added.count())?;
         }
-        if !update && runtime.source == RuntimeSource::ByoKey {
+        let new_key = runtime.source == RuntimeSource::ByoKey
+            && before.is_none_or(|b| b.source != RuntimeSource::ByoKey);
+        if new_key {
             let keys = stored.iter().filter(|r| r.source == RuntimeSource::ByoKey);
             plan.check(Quota::ByoKeys, keys.count())?;
         }

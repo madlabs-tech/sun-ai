@@ -324,7 +324,6 @@ async fn runtimes_count_up_to_the_limit() {
 /// A runtime row a chain name made doesn't count; turning it into a BYO key
 /// runtime with `PUT` is one more BYO key, so the plan applies there too.
 #[tokio::test]
-#[ignore = "bug: PUT /runtimes/{name} changes the source without the plan check"]
 async fn changing_a_runtime_into_a_byo_key_counts_against_the_plan() {
     use sun_core::model::RuntimeSource;
     use sun_store::RuntimeRepo;
