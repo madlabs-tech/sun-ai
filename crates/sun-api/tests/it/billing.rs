@@ -467,6 +467,24 @@ async fn refusals_keep_their_meaning_and_support_is_any_person_s() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "billing_unavailable");
 
+    // Cancel or portal where the cloud has no subscription: 404, said so;
+    // any other failure there is still unavailable.
+    for what in ["cancel", "portal-sessions"] {
+        let path = format!("/api/v1/subscriptions/{MAIN}/{what}");
+        cloud.reply(&path, 404, json!({ "error": "no subscription" }));
+        let (status, body) = call_as(&app, &admin, "POST", &path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{what}: {body}");
+        assert_eq!(body["error"]["code"], "no_subscription");
+        assert_eq!(
+            body["error"]["message"],
+            "This workspace has no subscription."
+        );
+        cloud.reply(&path, 500, json!({}));
+        let (status, body) = call_as(&app, &admin, "POST", &path, None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{what}");
+        assert_eq!(body["error"]["code"], "billing_unavailable");
+    }
+
     // 429 keeps its Retry-After.
     let summary = format!("/api/v1/subscriptions/{MAIN}/summary");
     cloud.reply(&summary, 429, json!({}));

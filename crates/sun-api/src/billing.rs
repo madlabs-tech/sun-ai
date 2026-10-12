@@ -14,7 +14,8 @@
 //!   (the cloud answers 403, with why, to one who pays for no plan). The
 //!   kernel token (a machine) gets 403 on all of it.
 //! - The cloud's 404 (or any failure to answer) is `503 billing_unavailable`,
-//!   never the Free plan; 402, 409 and 429 pass through with their code.
+//!   never the Free plan, except on cancel and portal, where it is `404
+//!   no_subscription`; 402, 409 and 429 pass through with their code.
 // ponytail: wallets (`/billing/*`) are deferred with credits; add them here
 // when sun.madlabs.tech sells credits.
 
@@ -116,10 +117,21 @@ impl CloudBilling {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             return Ok((status, Json(answer)).into_response());
         }
-        if !matches!(status, 402 | 403 | 409 | 429 | 400 | 422) {
+        // Canceling or managing a plan there isn't: the cloud's 404 says so.
+        let no_plan =
+            status == 404 && (path.ends_with("/cancel") || path.ends_with("/portal-sessions"));
+        if !no_plan && !matches!(status, 402 | 403 | 409 | 429 | 400 | 422) {
             tracing::warn!("Sun Cloud {path}: answered {status}");
         }
-        let mut refused = refusal(status, &answer).into_response();
+        let refused = match no_plan {
+            true => ApiError::new(
+                StatusCode::NOT_FOUND,
+                "no_subscription",
+                "This workspace has no subscription.",
+            ),
+            false => refusal(status, &answer),
+        };
+        let mut refused = refused.into_response();
         if let Some(seconds) = retry_after.filter(|_| status == 429)
             && let Ok(value) = HeaderValue::from_str(&seconds)
         {

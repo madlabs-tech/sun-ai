@@ -140,7 +140,7 @@ export function billing_route(method: string, parts: string[], input: Record<str
   }
   if (what === 'seats/reconcile') return clone(s.seat_capacity);
   if (what === 'cancel') {
-    if (s.entitlement.status === 'none') throw new MockError(409, { error: { code: 'conflict', message: 'This workspace has no plan to cancel.' } });
+    if (s.entitlement.status === 'none') throw new MockError(404, { error: { code: 'no_subscription', message: 'This workspace has no subscription.' } });
     s.entitlement.status = 'canceled';
     s.available_actions.purchase_seats = false;
     return { status: 'canceled', period_end: '2026-11-13T00:00:00Z' };
