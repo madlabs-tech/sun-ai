@@ -545,3 +545,29 @@ async fn isolation_beta_is_404_to_alphas_owner_by_path_query_and_body() {
     let (status, _) = call_as(app, &bob, "DELETE", &drop, None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
+
+/// A catalog install by PR or a catalog listing naming Beta's repo is 404
+/// to Alpha's owner, whatever workspace it names.
+#[tokio::test(flavor = "multi_thread")]
+async fn isolation_beta_repo_is_404_through_the_catalog() {
+    let k = kernel().await;
+    let app = &k.app;
+    let bob = member_token_in(&k.store, "bob", &[]).await;
+    let ada = member_token_in(&k.store, "ada", &[]).await;
+    let b = beta(&k, &bob).await;
+    let a = id(&ok(
+        app,
+        &ada,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({ "name": "Alpha" })),
+    )
+    .await);
+    let install = format!("/api/v1/catalog/tdd/install?workspace={a}");
+    let body = Some(json!({ "repo_id": b.repo }));
+    let (status, value) = call_as(app, &ada, "POST", &install, body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "install by PR: {value}");
+    let listing = format!("/api/v1/catalog?workspace={a}&repo_id={}", b.repo);
+    let (status, value) = call_as(app, &ada, "GET", &listing, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "listing: {value}");
+}
