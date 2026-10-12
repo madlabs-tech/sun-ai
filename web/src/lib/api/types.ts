@@ -596,6 +596,10 @@ export interface Host {
   /** Bytes per task folder on the host */
   disk?: { task_id: Ulid; bytes: number }[];
   last_seen_at: Timestamp;
+  /** The workspaces it is attached to (those the caller sees); their runs may go to it. */
+  workspace_ids: Ulid[];
+  /** Who minted the token it joined with; `null` from before, or the kernel's own host. */
+  enrolled_by: Ulid | null;
 }
 
 /** One device tool a host detected; `detail` says what's missing and the fix. */
@@ -858,7 +862,7 @@ export interface Features {
   catalog: boolean;
 }
 
-/** POST /api/v1/hosts/tokens — single-use enrolment token for `sun host join` */
+/** POST /api/v1/workspaces/{id}/hosts/tokens — single-use enrolment token for `sun host join` */
 export interface HostToken {
   token: string;
   expires_at: Timestamp;
@@ -1300,6 +1304,8 @@ export type McpTransport =
 export interface McpServer {
   name: string;
   transport: McpTransport;
+  /** A custom server's workspace (absent: Main's, or a catalog install). */
+  workspace_id?: Ulid;
 }
 
 /** One tool an MCP server offers. */

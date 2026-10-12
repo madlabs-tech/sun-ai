@@ -95,6 +95,7 @@ import type { OnLimit, OutboxItem, Resolution,
   WorkflowSource,
   WorkflowTemplate,
 } from './types';
+import { MAIN_WORKSPACE } from './types';
 
 const BASE = '/api/v1';
 
@@ -317,7 +318,6 @@ export const api = {
   usage: (run_id: string) => request<Usage>('GET', `/usage?run_id=${id_path(run_id)}`),
   usage_by_runtime: () => request<RuntimeUsage[]>('GET', '/usage?by=runtime'),
   get_features: () => request<Features>('GET', '/features'),
-  create_host_token: () => request<HostToken>('POST', '/hosts/tokens', {}),
   /** Workflows of `workspace` (every workspace when absent). */
   list_workflows: (workspace?: string) => request<Workflow[]>('GET', '/workflows' + query({ workspace })),
   get_workflow: (id: string) => request<WorkflowSource>('GET', `/workflows/${id_path(id)}`),
@@ -336,7 +336,6 @@ export const api = {
   /** Admin: the permission mode every new session of runtime `id` gets (audited). */
   set_runtime_policy: (id: string, permission_mode: PermissionMode) =>
     request<{ id: string; permission_mode: PermissionMode }>('PUT', `/runtimes/${id_path(id)}/policy`, { permission_mode }),
-  list_hosts: () => request<Host[]>('GET', '/hosts'),
   kernel_use: () => request<KernelUse>('GET', '/kernel'),
   /** Admin: stops a live session; its run pauses and records `reason`. */
   kill_session: (session_id: string, reason: string) =>
@@ -352,25 +351,15 @@ export const api = {
   /** Admin: stops and uninstalls it; data and secrets go too only with `purge`. */
   remove_mod: (name: string, purge: boolean) =>
     request<{ removed: string; needed_by: string[] }>('DELETE', `/mods/${id_path(name)}${purge ? '?purge=true' : ''}`),
-  /** Ranked for the stack of the checkout at `repo` (an absolute path on the kernel's machine);
-   *  with `repo_id`, also the skills installed into that registered repo by PR. */
-  list_catalog: (repo = '', repo_id = '') => {
-    const query = new URLSearchParams(Object.entries({ repo, repo_id }).filter(([, v]) => v)).toString();
-    return request<CatalogView>('GET', '/catalog' + (query ? `?${query}` : ''));
-  },
   /** Dismissed for the whole ecosystem, so it stays hidden in every browser. */
   dismiss_catalog: (id: string) => request<null>('PUT', `/catalog/${id_path(id)}/dismissed`),
   restore_catalog: (id: string) => request<null>('DELETE', `/catalog/${id_path(id)}/dismissed`),
   catalog_files: (id: string) => request<CatalogFile[]>('GET', `/catalog/${id_path(id)}/files`),
-  /** `runtimes`: the adapter ids that get a skill; omitted = every runtime */
-  install_catalog: (id: string, runtimes?: string[]) =>
-    request<null>('POST', `/catalog/${id_path(id)}/install`, runtimes ? { runtimes } : {}),
   /** Commits a skill into `repo_id` on `sun/skill-<id>` and asks the git host for a PR. Idempotent. */
   install_skill_pr: (id: string, repo_id: string, runtimes?: string[]) =>
     request<SkillPr>('POST', `/catalog/${id_path(id)}/install`, runtimes ? { repo_id, runtimes } : { repo_id }),
   /** 404 when the skill was never installed into that repo. */
   skill_pr: (id: string, repo_id: string) => request<SkillPr>('GET', `/catalog/${id_path(id)}/repos/${id_path(repo_id)}`),
-  uninstall_catalog: (id: string) => request<null>('DELETE', `/catalog/${id_path(id)}`),
   /** Sources of `workspace` (every source when absent). */
   list_sources: (workspace?: string) => request<KnowledgeSource[]>('GET', '/knowledge/sources' + query({ workspace })),
   add_source: (input: NewSource) => request<KnowledgeSource>('POST', '/knowledge/sources', input),
@@ -432,13 +421,6 @@ export const api = {
   /** The pack an agent step would get with this selection. Stores nothing. */
   preview_context: (task_id: string, context: TaskContext) =>
     request<ContextPreview>('POST', `/tasks/${id_path(task_id)}/context/preview`, context),
-  list_mcp_servers: () => request<McpServer[]>('GET', '/mcp_servers'),
-  /** Admin. The kernel connects once to list its tools; 422 in plain words when it can't. */
-  add_mcp_server: (server: McpServer) => request<McpServerAdded>('POST', '/mcp_servers', server),
-  /** Connects to the server now. */
-  mcp_tools: (name: string) => request<McpTool[]>('GET', `/mcp_servers/${id_path(name)}/tools`),
-  /** Admin. */
-  remove_mcp_server: (name: string) => request<null>('DELETE', `/mcp_servers/${id_path(name)}`),
   task_mcp: (task_id: string) => request<McpGrant[]>('GET', `/tasks/${id_path(task_id)}/mcp`),
   set_task_mcp: (task_id: string, grants: McpGrant[]) =>
     request<McpGrant[]>('PUT', `/tasks/${id_path(task_id)}/mcp`, grants),
@@ -470,6 +452,44 @@ export const api = {
   memory_metrics: (workspace?: string) =>
     request<MemoryMetrics>('GET', '/memory/metrics' + query({ workspace })),
   // --- end per workspace (M4)
+
+  // --- Per workspace (M5): hosts, catalog installs and MCP servers.
+  // `workspace` is required for anyone but a deployment owner, who may leave
+  // it out for every workspace's (a change then goes to Main).
+  /** The hosts attached to the workspace; its runs go only to these. */
+  list_hosts: (workspace?: string) => request<Host[]>('GET', '/hosts' + query({ workspace })),
+  /** `manage_runtimes` in the workspace: the host it enrols is attached there. */
+  create_host_token: (workspace: string = MAIN_WORKSPACE) =>
+    request<HostToken>('POST', `/workspaces/${id_path(workspace)}/hosts/tokens`, {}),
+  /** `manage_runtimes` in the workspace, and a deployment owner or whoever enrolled the host. */
+  attach_host: (workspace: string, host_id: string) =>
+    request<null>('PUT', `/workspaces/${id_path(workspace)}/hosts/${id_path(host_id)}`),
+  /** `manage_runtimes` in the workspace: its runs stop going to the host. */
+  detach_host: (workspace: string, host_id: string) =>
+    request<null>('DELETE', `/workspaces/${id_path(workspace)}/hosts/${id_path(host_id)}`),
+  /** With the workspace's installs. Ranked for the stack of the checkout at `repo` (an absolute
+   *  path on the kernel's machine: deployment owners only); with `repo_id`, also the skills
+   *  installed into that registered repo by PR. */
+  list_catalog: (repo = '', repo_id = '', workspace?: string) =>
+    request<CatalogView>('GET', '/catalog' + query({ repo, repo_id, workspace })),
+  /** `manage_plugins` in the workspace. `runtimes`: the adapter ids that get a skill; omitted = every runtime */
+  install_catalog: (id: string, runtimes?: string[], workspace?: string) =>
+    request<null>('POST', `/catalog/${id_path(id)}/install` + query({ workspace }), runtimes ? { runtimes } : {}),
+  /** `manage_plugins` in the workspace; the files go once no workspace has it. */
+  uninstall_catalog: (id: string, workspace?: string) =>
+    request<null>('DELETE', `/catalog/${id_path(id)}` + query({ workspace })),
+  /** The workspace's catalog installs and custom servers. */
+  list_mcp_servers: (workspace?: string) => request<McpServer[]>('GET', '/mcp_servers' + query({ workspace })),
+  /** `manage_plugins` in the workspace. The kernel connects once with the workspace's secrets to list its tools; 422 in plain words when it can't. */
+  add_mcp_server: (server: McpServer, workspace?: string) =>
+    request<McpServerAdded>('POST', '/mcp_servers' + query({ workspace }), server),
+  /** Connects to the workspace's server now. */
+  mcp_tools: (name: string, workspace?: string) =>
+    request<McpTool[]>('GET', `/mcp_servers/${id_path(name)}/tools` + query({ workspace })),
+  /** `manage_plugins` in the workspace. */
+  remove_mcp_server: (name: string, workspace?: string) =>
+    request<null>('DELETE', `/mcp_servers/${id_path(name)}` + query({ workspace })),
+  // --- end per workspace (M5)
 };
 
 /** One artifact version's bytes, as a download (the session cookie authorizes it). */
