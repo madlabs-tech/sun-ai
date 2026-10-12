@@ -1,5 +1,6 @@
-//! `sun user list|invite|reinvite|set-password|deactivate|activate` and
-//! `sun smtp set|show|test`, through the running kernel (admin token).
+//! `sun user list|invite|promote|reinvite|set-password|deactivate|activate`
+//! and `sun smtp set|show|test`, through the running kernel (the kernel
+//! token holder is a deployment owner).
 //! Secrets are read from stdin, never argv.
 
 use std::io::BufRead;
@@ -14,21 +15,24 @@ use crate::client::Client;
 pub enum UserCommand {
     /// Members: who they are, and whether their invite is pending.
     List,
-    /// Invite someone: they get an email with a one-time sign-in code, then
-    /// pick a password. Needs `sun smtp set` first.
+    /// Invite someone into a workspace: they get a link by mail (or, with
+    /// no mail server, the link is printed for you to pass on), sign up or
+    /// in with this email, and accept it. The link works once, for 7 days.
     Invite {
         /// Their email.
-        #[arg(long)]
         email: String,
-        /// Their username (approvals' `who: user:<name>`).
-        #[arg(long)]
-        name: String,
-        /// Their role in Main: viewer, member, admin or owner.
+        /// The workspace (id, name or slug).
+        #[arg(long, default_value = "Main")]
+        workspace: String,
+        /// Their role there: viewer, member, admin or owner.
         #[arg(long, default_value = "viewer")]
         role: String,
-        /// Make them an owner (only an owner can).
-        #[arg(long)]
-        owner: bool,
+    },
+    /// Make a member a deployment owner: they may do everything, in every
+    /// workspace, and manage the deployment.
+    Promote {
+        /// Member id or email.
+        member: String,
     },
     /// Send a new code (a lost invite or a forgotten password): their
     /// password is cleared and their sessions end.
@@ -138,18 +142,29 @@ pub fn run_user(client: &Client, command: UserCommand) -> Result<()> {
         }
         UserCommand::Invite {
             email,
-            name,
+            workspace,
             role,
-            owner,
         } => {
-            let body = json!({ "email": email, "username": name, "role": role,
-                "is_owner": owner });
-            let member = client.post("/members", &body)?;
-            println!(
-                "invited {} ({}): the code is in their mail",
-                member["username"].as_str().unwrap_or("?"),
-                member["email"].as_str().unwrap_or("?")
-            );
+            let id = client.workspace_id(&workspace)?;
+            let body = json!({ "email": email, "role": role });
+            let sent = client.post(&format!("/workspaces/{id}/invitations"), &body)?;
+            match sent["link"].as_str() {
+                Some(link) => println!(
+                    "invited {email} to {workspace} as {role}. No mail server is set up \
+                     (`sun smtp set`), so pass them this link:\n{link}"
+                ),
+                None => {
+                    println!("invited {email} to {workspace} as {role}: the link is in their mail")
+                }
+            }
+        }
+        UserCommand::Promote { member } => {
+            let id = member_id(client, &member)?;
+            client.put(
+                &format!("/members/{id}/owner"),
+                &json!({ "is_owner": true }),
+            )?;
+            println!("{member} is now a deployment owner");
         }
         UserCommand::Reinvite { member } => {
             let id = member_id(client, &member)?;

@@ -398,6 +398,9 @@ pub async fn start(
         .with_mod_installer(installer)
         .with_mcp(mcp_sessions)
         .with_mailer(Arc::new(crate::mail::SmtpMailer), &public_url)
+        .with_signup_policy(sun_core::model::SignupPolicy::from_env(|name| {
+            std::env::var(name).ok()
+        }))
         .with_token_rotation({
             let data_dir = data_dir.clone();
             Arc::new(move || KernelSecrets::rotate_token(&data_dir).map_err(|e| format!("{e:#}")))

@@ -39,6 +39,7 @@ impl Client {
             .flatten()
             .find(|b| {
                 b["id"] == workspace
+                    || b["slug"] == workspace
                     || b["name"]
                         .as_str()
                         .is_some_and(|n| n.eq_ignore_ascii_case(workspace))
