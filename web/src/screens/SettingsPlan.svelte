@@ -1,9 +1,9 @@
-<!-- The plan badge: which plan Main runs on, where it comes from, and its limits. -->
+<!-- The plan badge: which plan the open workspace runs on, where it comes from, and its limits. -->
 <script lang="ts">
   import { Badge, Icon } from '@hryer/madlabs-design-system/svelte';
   import { api } from '../lib/api/client';
   import type { Entitlement } from '../lib/api/types';
-  import { error_text } from '../lib/app_state.svelte';
+  import { current_workspace, error_text } from '../lib/app_state.svelte';
   import { clock } from '../lib/format';
 
   const PLAN = { community: 'Self-hosted', free: 'Free', pro: 'Pro', business: 'Business' };
@@ -11,7 +11,7 @@
   let current = $state<Entitlement | null>(null);
   let load_error = $state('');
 
-  api.get_entitlement().then((e) => (current = e), (e) => (load_error = error_text(e)));
+  api.get_entitlement(current_workspace() || undefined).then((e) => (current = e), (e) => (load_error = error_text(e)));
 
   const tone = (e: Entitlement) =>
     ({ cloud: 'success', stale: 'warning', unavailable: 'warning', community: 'neutral' } as const)[e.status];

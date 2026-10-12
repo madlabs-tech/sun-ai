@@ -130,11 +130,10 @@
     </div>
     {#if unavailable}
       <p class="sun-row__meta billing__copy">
-        Plans and Sun credits are for Sun Cloud ecosystems. Self-hosted, every engine feature stays free; a license adds exclusive mods
-        and support.
+        Plans and Sun credits are for deployments connected to Sun Cloud. Self-hosted, every engine feature stays free.
       </p>
     {:else if account && !account.cloud}
-      <p class="sun-row__meta billing__copy">This ecosystem runs on its license. Plans, invoices and Sun credits are managed in Sun Cloud.</p>
+      <p class="sun-row__meta billing__copy">This deployment isn’t billed through Sun Cloud. Plans, invoices and Sun credits are managed there.</p>
     {:else if account}
       <p class="sun-row__meta billing__copy">
         {#if account.subscription && account.subscription.status !== 'pending'}

@@ -203,17 +203,6 @@
       ? ` · ${Math.round(metrics.held_up_rate * 100)}% of merged work held up (${metrics.held_up} of ${metrics.decided})`
       : '',
   );
-
-  // Plan cap on agents at once: say why queued tasks wait instead of leaving people guessing.
-  let agents_cap = $state<number | null>(null);
-  api.get_entitlement().then((e) => (agents_cap = e.limits?.agents ?? null), () => {});
-  const plan_notice = $derived.by(() => {
-    if (agents_cap === null) return '';
-    const active = app.tasks.filter((t) => ['in_progress', 'verifying', 'needs_you'].includes(t.status) && t.run).length;
-    const queued = app.tasks.filter((t) => t.status === 'todo' && t.run?.status === 'queued').length;
-    if (active < agents_cap || !queued) return '';
-    return `Your plan runs ${agents_cap} agents at once. ${queued} queued ${queued === 1 ? 'task starts' : 'tasks start'} when one finishes.`;
-  });
 </script>
 
 <PageHeader
@@ -266,9 +255,6 @@
 
 {#if !project_id}<Onboarding />{/if}
 
-{#if plan_notice}
-  <p class="plan-notice" role="status"><Icon name="info" size={16} />{plan_notice} <a href={href('settings', 'billing')}>See the plan</a></p>
-{/if}
 
 {#if project_id && !app.error && !app.tasks.some((t) => t.project_id === project_id)}
   <p class="sun-empty project-empty">No tasks in this project yet. Move tasks in from Tasks: Swimlane, rows by Project.</p>
@@ -300,23 +286,6 @@
 {/if}
 
 <style>
-  .plan-notice {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    margin: 0 var(--space-4);
-    padding: var(--space-3);
-    border-radius: var(--radius-md);
-    border: 1.5px solid var(--border-subtle);
-    background: var(--surface-tint);
-    font-size: 13px;
-    color: var(--fg-1);
-  }
-  .plan-notice a {
-    color: var(--fg-link);
-    font-weight: 600;
-  }
   .tasks-search {
     flex: 1 1 200px;
   }

@@ -4,7 +4,7 @@ import { expect, test } from '@playwright/test';
 test.use({ viewport: { width: 360, height: 740 } });
 
 test('plan badge: the plan of Main from Sun Cloud, nothing to install', async ({ page }) => {
-  await page.goto('/?mock=1#/settings/billing');
+  await page.goto('/?mock=1#/settings/plan');
   const plan = page.getByRole('region', { name: /Plan/ });
   await expect(plan.getByText('Pro', { exact: true })).toBeVisible();
   await expect(plan.getByText(/From Sun Cloud, paid/)).toBeVisible();

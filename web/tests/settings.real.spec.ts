@@ -15,7 +15,7 @@ test('plan badge and write-only secrets on the real kernel', async ({ page }) =>
   await page.getByLabel('Email').fill('me@example.com');
   await page.getByLabel('Password', { exact: true }).fill('test-token');
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await page.goto('/#/settings/billing');
+  await page.goto('/#/settings/plan');
 
   const plan = page.getByRole('region', { name: /Plan/ });
   await expect(plan.getByText('Business')).toBeVisible();

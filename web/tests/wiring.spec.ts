@@ -91,7 +91,7 @@ test('picking a role puts its templates first, installing nothing', async ({ pag
 });
 
 test('the plan shows the limits Sun Cloud sets', async ({ page }) => {
-  await open(page, 'settings/billing');
+  await open(page, 'settings/plan');
   const plan = page.getByRole('region', { name: /Plan/ });
   await expect(plan).toContainText('Plan limits: 5 seats · 2 hosts · 2 own API keys.');
 });
