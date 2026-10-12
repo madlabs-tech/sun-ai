@@ -247,6 +247,7 @@ fn fetch_release(entry: &crate::registry::Entry) -> Result<Source> {
     std::fs::write(&file, asset)?;
     unpack_into(&file, &source.dir)?;
     source.dir = package_root(&source.dir)?;
+    crate::registry::check_release(entry, &load_manifest(&source.dir)?)?;
     Ok(source)
 }
 
