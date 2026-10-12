@@ -1,8 +1,9 @@
-//! Agents, part of the **Facade** for the API: ecosystem-wide agents a task
-//! can be assigned to. Each change commits with its audit row.
+//! Agents, part of the **Facade** for the API: each workspace's agents, which
+//! its tasks can be assigned to (never another workspace's). Each change
+//! commits with its audit row.
 //!
 //! An agent runs through the engine like any workflow: a task assigned to
-//! it runs the agent's hidden **system workflow** on the task's workspace
+//! it runs the agent's hidden **system workflow** on its workspace
 //! (one `agent` step with its runtime chain, instructions and skills, no
 //! approval), made on the first assignment there ([`system_workflow`]).
 //! Editing the agent saves a new version of each of its system workflows;
@@ -33,7 +34,7 @@ pub const AGENT_STEP: &str = "agent";
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentFields {
-    /// 1–64 characters, unique among active agents ignoring case.
+    /// 1–64 characters, unique among the workspace's active agents ignoring case.
     pub name: Option<String>,
     /// At most 1000 characters.
     pub description: Option<String>,
@@ -139,13 +140,17 @@ pub(crate) async fn with_task(tx: &mut Tx, run: &Run, prompt: String) -> Result<
 }
 
 /// `agent`'s system workflow on `workspace`, made with its first version on
-/// the first assignment there. `InvalidInput` for an archived agent.
+/// the first assignment there. `NotFound` for another workspace's agent,
+/// `InvalidInput` for an archived one.
 pub(crate) async fn system_workflow(
     tx: &mut Tx,
     agent: AgentId,
     workspace: WorkspaceId,
 ) -> Result<WorkflowId> {
     let agent = tx.get_agent(agent).await?;
+    if agent.workspace_id != workspace {
+        return Err(Error::NotFound(format!("agent {}", agent.id)));
+    }
     if agent.archived_at.is_some() {
         return Err(Error::InvalidInput(format!(
             "The agent {} is archived; pick another one.",
@@ -169,9 +174,9 @@ pub(crate) async fn system_workflow(
 }
 
 impl Engine {
-    /// The active agents, by name.
-    pub async fn agents(&self) -> Result<Vec<Agent>> {
-        Ok(self.store.read().await?.agents().await?)
+    /// The active agents of `workspace` (`None`: of every workspace), by name.
+    pub async fn agents(&self, workspace: Option<WorkspaceId>) -> Result<Vec<Agent>> {
+        Ok(self.store.read().await?.agents(workspace).await?)
     }
 
     /// One agent, archived too; `NotFound` when there is none.
@@ -210,10 +215,17 @@ impl Engine {
         Ok(out)
     }
 
-    /// Creates an agent from `fields` (a name and a runtime at least).
-    pub async fn create_agent(&self, fields: AgentFields, actor: &str) -> Result<Agent> {
+    /// Creates an agent on `workspace` from `fields` (a name and a runtime
+    /// at least); `NotFound` for a missing workspace.
+    pub async fn create_agent(
+        &self,
+        workspace: WorkspaceId,
+        fields: AgentFields,
+        actor: &str,
+    ) -> Result<Agent> {
         let agent = fields.apply(Agent {
             id: AgentId::generate(),
+            workspace_id: workspace,
             name: String::new(),
             description: String::new(),
             instructions: String::new(),
@@ -223,6 +235,7 @@ impl Engine {
             archived_at: None,
         })?;
         let mut tx = self.store.begin().await?;
+        tx.get_workspace(workspace).await?;
         tx.insert_agent(&agent).await?;
         audit(&mut tx, &agent, actor, "created").await?;
         tx.commit().await?;
@@ -297,6 +310,7 @@ mod tests {
     fn agent(instructions: &str, chain: &[&str]) -> Agent {
         Agent {
             id: AgentId::generate(),
+            workspace_id: WorkspaceId::MAIN,
             name: "Ada".into(),
             description: String::new(),
             instructions: instructions.into(),

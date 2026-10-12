@@ -77,6 +77,7 @@ async fn stored_secret_never_appears_in_handoff_or_context_pack() {
     });
     let memory = vec![MemoryItem {
         id: MemoryItemId::generate(),
+        workspace_id: sun_core::WorkspaceId::MAIN,
         scope: MemoryScope::Ecosystem,
         scope_id: None,
         body: leak.clone(),

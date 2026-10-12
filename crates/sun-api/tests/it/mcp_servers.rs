@@ -72,14 +72,15 @@ async fn mcp_servers_are_tested_on_add_and_granted_per_task() {
     let docs = json!({"name": "docs", "transport":
         {"type": "url", "url": url, "bearer_secret": "DOCS_TOKEN"}});
 
-    // The bearer secret is not stored yet: plain 422 naming it.
+    // The bearer secret is not stored yet: plain 422 naming it. Until MCP
+    // servers are per workspace their secrets are Main's.
     let (status, error) = call(app, "POST", "/api/v1/mcp_servers", Some(docs.clone())).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
     assert!(error.to_string().contains("DOCS_TOKEN"), "{error}");
     let (status, _) = call(
         app,
         "PUT",
-        "/api/v1/secrets/ecosystem/00000000000000000000000000/DOCS_TOKEN",
+        "/api/v1/secrets/workspace/00000000000000000000000001/DOCS_TOKEN",
         Some(json!({"value": "t0ken-value"})),
     )
     .await;

@@ -124,3 +124,45 @@ async fn seats_count_the_workspace_members_at_invite_and_accept() {
     let (status, value) = call_as(app, &cat, "POST", &accept, None).await;
     assert_eq!(status, StatusCode::OK, "{value}");
 }
+
+/// Agents, runtimes and BYO key runtimes count per workspace against its
+/// plan; a runtime row a chain name made doesn't count.
+#[tokio::test]
+async fn agents_runtimes_and_byo_keys_count_per_workspace() {
+    let k = common::kernel().await;
+    let app = &k.app;
+    let ops = workspace(app, common::TOKEN, "Ops").await;
+    let limits = Limits {
+        agents: Some(1),
+        runtimes: Some(2),
+        byo_keys: Some(1),
+        ..Limits::default()
+    };
+    common::plan(&k, ops, limits);
+    let limited = |value: &Value| value["error"]["code"] == "plan_limit";
+    let agent = |name: &str| Some(json!({ "name": name, "runtime_chain": ["codex"] }));
+    let agents = format!("/api/v1/agents?workspace={ops}");
+    let (status, _) = call(app, "POST", &agents, agent("Ada")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, value) = call(app, "POST", &agents, agent("Bo")).await;
+    assert!(
+        status == StatusCode::FORBIDDEN && limited(&value),
+        "{value}"
+    );
+    // Main's plan is its own.
+    let (status, _) = call(app, "POST", "/api/v1/agents", agent("Bo")).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let byo = |name: &str| {
+        Some(json!({ "name": name, "source": "byo_key",
+            "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen" } }))
+    };
+    let runtimes = format!("/api/v1/runtimes?workspace={ops}");
+    let (status, value) = call(app, "POST", &runtimes, byo("one")).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let (status, value) = call(app, "POST", &runtimes, byo("two")).await;
+    assert!(
+        status == StatusCode::FORBIDDEN && limited(&value),
+        "byo keys: {value}"
+    );
+}

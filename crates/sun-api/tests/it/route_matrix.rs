@@ -471,16 +471,18 @@ async fn every_new_route_hides_other_workspaces_and_checks_its_permission() {
             assert_eq!(status, StatusCode::FORBIDDEN, "member: {method} {path}");
         }
     }
-    // Agents: reads and writes are for deployment owners.
+    // Main's agents: any member reads them (naming Main); writes need
+    // `manage_runtimes` there.
     let agent = format!("/api/v1/agents/{}", w.agent);
+    let of_main = format!("/api/v1/agents?workspace={MAIN}");
     assert_eq!(
-        call_as(app, &viewer, "GET", "/api/v1/agents", None).await.0,
-        StatusCode::FORBIDDEN
+        call_as(app, &viewer, "GET", &of_main, None).await.0,
+        StatusCode::OK
     );
     let writes = [
         (
             "POST",
-            "/api/v1/agents".to_owned(),
+            of_main.clone(),
             Some(json!({ "name": "Bo", "runtime_chain": ["codex"] })),
         ),
         ("PATCH", agent.clone(), Some(json!({ "description": "x" }))),
@@ -491,6 +493,10 @@ async fn every_new_route_hides_other_workspaces_and_checks_its_permission() {
             let status = call_as(app, token, method, &path, body).await.0;
             assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}");
         }
+    }
+    for (method, path, body) in writes {
+        let status = call_as(app, &editor, method, &path, body).await.0;
+        assert!(status.is_success(), "admin: {method} {path}: {status}");
     }
 
     // With the permission, each route does its job on Main (whatever its
@@ -519,13 +525,20 @@ async fn every_new_route_hides_other_workspaces_and_checks_its_permission() {
 async fn filters_and_bodies_never_reach_into_a_hidden_workspace() {
     let w = world().await;
     let app = &w.k.app;
-    let assign = json!({ "assignee": { "kind": "agent", "id": w.agent } });
-    for side in [&w.main, &w.ops] {
+    let ops_agent = ok(
+        app,
+        "POST",
+        &format!("/api/v1/agents?workspace={}", w.ops.id),
+        Some(json!({ "name": "Ada", "runtime_chain": ["claude-code"] })),
+    )
+    .await;
+    for (side, agent) in [(&w.main, json!(w.agent)), (&w.ops, ops_agent["id"].clone())] {
+        let assign = json!({ "assignee": { "kind": "agent", "id": agent } });
         ok(
             app,
             "PATCH",
             &format!("/api/v1/tasks/{}", side.plain),
-            Some(assign.clone()),
+            Some(assign),
         )
         .await;
     }
@@ -546,6 +559,15 @@ async fn filters_and_bodies_never_reach_into_a_hidden_workspace() {
         .map(|t| t["key"].as_str().unwrap())
         .collect();
     assert_eq!(keys, [w.main.plain.as_str()]);
+    let by_ops_agent = format!(
+        "/api/v1/tasks?assignee={}",
+        ops_agent["id"].as_str().unwrap()
+    );
+    let (status, listed) = call_as(app, &member, "GET", &by_ops_agent, None).await;
+    assert!(
+        status == StatusCode::NOT_FOUND || listed == json!([]),
+        "{status} {listed}"
+    );
     let by_project = format!("/api/v1/tasks?project={}", w.ops.project);
     let (status, listed) = call_as(app, &member, "GET", &by_project, None).await;
     assert!(
@@ -560,14 +582,13 @@ async fn filters_and_bodies_never_reach_into_a_hidden_workspace() {
 
 /// The deployment-wide reads, until they are per workspace: 403 for every
 /// member who isn't a deployment owner (even naming their own workspace),
-/// and open to a deployment owner.
+/// and open to a deployment owner. Agents, runtimes and memory are per
+/// workspace: open to every member naming it.
 #[tokio::test(flavor = "multi_thread")]
 async fn deployment_wide_reads_are_for_deployment_owners_only() {
     let k = kernel().await;
     let app = &k.app;
     let reads = [
-        "/runtimes",
-        "/agents",
         "/hosts",
         "/kernel",
         "/mods",
@@ -578,8 +599,6 @@ async fn deployment_wide_reads_are_for_deployment_owners_only() {
         "/settings/budget",
         "/settings/embeddings",
         "/quality/metrics",
-        "/memory",
-        "/memory/metrics",
         "/corrections",
         "/outbox?status=unknown",
     ];
@@ -596,7 +615,6 @@ async fn deployment_wide_reads_are_for_deployment_owners_only() {
     );
     // Their own answer for an unknown id, but never the owner guard's 403.
     let by_id = [
-        "/runtimes/claude-code/readiness",
         "/catalog/tdd/files",
         repo.as_str(),
         "/mcp_servers/nope/tools",
@@ -622,6 +640,20 @@ async fn deployment_wide_reads_are_for_deployment_owners_only() {
         let (status, value) = call_as(app, common::TOKEN, "GET", &path, None).await;
         assert_eq!(status, StatusCode::OK, "{path}: {value}");
     }
+    for path in ["/runtimes", "/agents", "/memory", "/memory/metrics"] {
+        let path = format!("/api/v1{path}?workspace={MAIN}");
+        for token in &tokens {
+            let (status, value) = call_as(app, token, "GET", &path, None).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {value}");
+        }
+    }
+    let readiness = format!("/api/v1/runtimes/claude-code/readiness?workspace={MAIN}");
+    let (status, _) = call_as(app, &tokens[0], "GET", &readiness, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "its own answer: no such runtime"
+    );
     for path in by_id {
         let path = format!("/api/v1{path}");
         let (status, value) = call_as(app, common::TOKEN, "GET", &path, None).await;

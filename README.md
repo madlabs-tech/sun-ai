@@ -144,8 +144,8 @@ sun task list
 | `sun plugin mcp add\|list\|…` | Register the MCP servers agents can use. |
 | `sun mod dev <dir>` · `publish` · `yank` | Develop a mod with hot reload, sign and submit it to the registry, or hide a version. |
 | `sun skill new <name>` · `sun mcp new <name>` | Scaffold a skill or a dependency-free MCP server. |
-| `sun secret set\|list\|rm [--mod M]` | Manage sealed ecosystem or mod secrets. Values come from stdin, never argv. `scripts/load-git-apps.sh [.env]` sets the GitHub App and GitLab OAuth app secrets from a `chmod 600` `.env` (or the environment); `scripts/dev.sh` runs it when `./.env` exists. |
-| `sun runtime add <name> --byo-key --kind K --adapter A --model M [--endpoint] [--key-secret]` · `check` · `on-limit` | Add a bring-your-own-key runtime, check it, or set the ecosystem limit policy. |
+| `sun secret set\|list\|rm [--mod M \| --workspace W]` | Manage sealed secrets: a workspace's (default Main), a mod's, or the deployment's own (SMTP, SSO, git host apps, embeddings), which stay in the ecosystem. Values come from stdin, never argv. `scripts/load-git-apps.sh [.env]` sets the GitHub App and GitLab OAuth app secrets from a `chmod 600` `.env` (or the environment); `scripts/dev.sh` runs it when `./.env` exists. |
+| `sun runtime add <name> --byo-key --kind K --adapter A --model M [--endpoint] [--key-secret] [--workspace W]` · `check [--workspace W]` · `on-limit` | Add a bring-your-own-key runtime to a workspace (default Main), check it, or set the ecosystem limit policy. |
 | `sun knowledge …` · `sun eval …` | Manage knowledge sources and search, or replay past tasks against a changed instruction. |
 | `sun upgrade [--check]` · `rollback` · `backup` | Upgrade (wait for a checkpoint, back up, swap, migrate, restart), undo the last upgrade, or back up the store. |
 | `sun ecosystem export\|import` | Move a whole ecosystem as one archive. |

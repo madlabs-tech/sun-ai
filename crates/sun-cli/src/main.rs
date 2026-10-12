@@ -651,21 +651,57 @@ enum EcosystemCommand {
     },
 }
 
-/// Which secrets: a mod's, else the ecosystem's.
+/// Which secrets: a mod's, a workspace's, else the deployment's own names
+/// (`Secret::is_deployment`: SMTP, SSO, the git host apps, embeddings) in
+/// the ecosystem and every other name in Main.
 #[derive(Args)]
 struct SecretScopeArgs {
-    /// The mod they belong to. Default: the ecosystem.
-    #[arg(long = "mod")]
+    /// The mod they belong to.
+    #[arg(long = "mod", conflicts_with = "workspace")]
     mod_name: Option<String>,
+    /// The workspace they belong to (id, slug or name). Default: Main, or
+    /// the ecosystem for a deployment secret.
+    #[arg(long)]
+    workspace: Option<String>,
 }
 
 impl SecretScopeArgs {
-    fn scope(self) -> Result<SecretScope> {
-        match self.mod_name {
-            Some(name) => Ok(SecretScope::Mod(name)),
-            None => Ok(sun_engine::ecosystem_scope()?),
+    /// The scope of secret `name` (see the type); without a name (a
+    /// list), both default scopes.
+    async fn scopes(self, store: &Store, name: Option<&str>) -> Result<Vec<SecretScope>> {
+        if let Some(mod_name) = self.mod_name {
+            return Ok(vec![SecretScope::Mod(mod_name)]);
         }
+        if let Some(workspace) = self.workspace {
+            let id = workspace_in_store(store, &workspace).await?;
+            return Ok(vec![SecretScope::Workspace(id)]);
+        }
+        let ecosystem = sun_engine::ecosystem_scope()?;
+        let main = SecretScope::Workspace(sun_core::WorkspaceId::MAIN);
+        Ok(match name {
+            Some(name) if sun_core::model::Secret::is_deployment(name) => vec![ecosystem],
+            Some(_) => vec![main],
+            None => vec![ecosystem, main],
+        })
     }
+
+    /// [`Self::scopes`] of one secret.
+    async fn scope(self, store: &Store, name: &str) -> Result<SecretScope> {
+        let scopes = self.scopes(store, Some(name)).await?;
+        scopes.into_iter().next().context("no secret scope")
+    }
+}
+
+/// The workspace `text` names (its id, slug or name, ignoring case), read
+/// from the store.
+async fn workspace_in_store(store: &Store, text: &str) -> Result<sun_core::WorkspaceId> {
+    use sun_store::WorkspaceRepo;
+    let workspaces = store.read().await?.workspaces().await?;
+    workspaces
+        .into_iter()
+        .find(|w| w.id.to_string() == text || w.slug == text || w.name.eq_ignore_ascii_case(text))
+        .map(|w| w.id)
+        .with_context(|| format!("no workspace {text}: see `sun workspace list`"))
 }
 
 #[derive(Subcommand)]
@@ -693,9 +729,10 @@ enum SecretCommand {
 
 #[derive(Subcommand)]
 enum RuntimeCommand {
-    /// Add a BYO key runtime: your own provider key on OpenCode (any kind),
-    /// Claude Code (anthropic) or Codex (openai_compatible). Set its key
-    /// first with `sun secret set <NAME>`.
+    /// Add a BYO key runtime to a workspace: your own provider key on
+    /// OpenCode (any kind), Claude Code (anthropic) or Codex
+    /// (openai_compatible). Set its key in the same workspace with
+    /// `sun secret set <NAME> [--workspace W]`.
     Add {
         /// Name used in workflow `runtime.chain`, e.g. ollama-qwen.
         name: String,
@@ -715,16 +752,22 @@ enum RuntimeCommand {
         /// Model id at that endpoint, e.g. qwen2.5-coder:7b.
         #[arg(long)]
         model: String,
-        /// Ecosystem secret holding the key; omit for a keyless endpoint.
+        /// The workspace's secret holding the key; omit for a keyless endpoint.
         #[arg(long)]
         key_secret: Option<String>,
+        /// The workspace (id, slug or name). Default: Main.
+        #[arg(long)]
+        workspace: Option<String>,
         #[command(flatten)]
         remote: Remote,
     },
-    /// Show whether a runtime can take work, and what to fix.
+    /// Show whether a workspace's runtime can take work, and what to fix.
     Check {
         /// The runtime's name.
         name: String,
+        /// The workspace (id, slug or name). Default: Main.
+        #[arg(long)]
+        workspace: Option<String>,
         #[command(flatten)]
         remote: Remote,
     },
@@ -1680,6 +1723,7 @@ fn runtime_command(data_dir: &Path, command: RuntimeCommand) -> Result<()> {
             endpoint,
             model,
             key_secret,
+            workspace,
             remote,
         } => {
             if !byo_key {
@@ -1690,13 +1734,21 @@ fn runtime_command(data_dir: &Path, command: RuntimeCommand) -> Result<()> {
             let body = json!({ "name": name, "adapter": adapter, "source": "byo_key",
                 "config": { "kind": kind, "endpoint": endpoint, "model": model,
                     "key_secret": key_secret } });
-            client(data_dir, remote)?.post("/runtimes", &body)?;
+            let client = client(data_dir, remote)?;
+            let workspace = workspace_or_main(&client, workspace.as_deref())?;
+            client.post(&format!("/runtimes?workspace={workspace}"), &body)?;
             println!("added {name}; check it with `sun runtime check {name}`");
             Ok(())
         }
-        RuntimeCommand::Check { name, remote } => {
-            let path = format!("/runtimes/{name}/readiness");
-            let ready = client(data_dir, remote)?.get(&path)?;
+        RuntimeCommand::Check {
+            name,
+            workspace,
+            remote,
+        } => {
+            let client = client(data_dir, remote)?;
+            let workspace = workspace_or_main(&client, workspace.as_deref())?;
+            let path = format!("/runtimes/{name}/readiness?workspace={workspace}");
+            let ready = client.get(&path)?;
             let ok = ready["installed"] == true && ready["logged_in"] == true;
             println!("{name}: {}", if ok { "ready" } else { "not ready" });
             if let Some(detail) = ready["detail"].as_str() {
@@ -1710,6 +1762,14 @@ fn runtime_command(data_dir: &Path, command: RuntimeCommand) -> Result<()> {
         RuntimeCommand::OnLimit { policy, remote } => {
             on_limit(&client(data_dir, remote)?, "/settings/on_limit", policy)
         }
+    }
+}
+
+/// The id of `workspace` (id, slug or name), Main when none is named.
+fn workspace_or_main(client: &Client, workspace: Option<&str>) -> Result<String> {
+    match workspace {
+        Some(workspace) => client.workspace_id(workspace),
+        None => Ok(sun_core::WorkspaceId::MAIN.to_string()),
     }
 }
 
@@ -1768,10 +1828,13 @@ async fn ecosystem_archive(data_dir: &Path, command: EcosystemCommand) -> Result
                         sun_core::model::SecretScope::Mod(name) => format!(" --mod {name}"),
                         sun_core::model::SecretScope::Ecosystem(_) => String::new(),
                         // A git connection's token: connect again in the UI.
-                        sun_core::model::SecretScope::Workspace(id) => {
+                        sun_core::model::SecretScope::Workspace(id)
+                            if sun_core::model::Secret::is_connection(&secret.name) =>
+                        {
                             println!("  reconnect Git in workspace {id} (Settings → Code)");
                             continue;
                         }
+                        sun_core::model::SecretScope::Workspace(id) => format!(" --workspace {id}"),
                     };
                     println!("  sun secret set{flag} {}", secret.name);
                 }
@@ -1794,25 +1857,28 @@ async fn secret(data_dir: &Path, command: SecretCommand) -> Result<()> {
     let actor = "token:local";
     match command {
         SecretCommand::Set { name, scope } => {
-            let scope = scope.scope()?;
+            let scope = scope.scope(&store, &name).await?;
             let value = read_secret(&name)?;
             sun_engine::set_secret(&store, &scope, &name, &value, actor).await?;
             println!("set {name} ({}:{})", scope.kind(), scope.id());
         }
         SecretCommand::List { scope } => {
-            let scope = scope.scope()?;
+            let scopes = scope.scopes(&store, None).await?;
             let mut tx = store.read().await?;
-            for secret in tx.list_secrets(Some(&scope)).await? {
-                println!("{:<24} {}", secret.name, secret.updated_at);
-            }
-            for secret in tx.secrets_to_reenter().await? {
-                if secret.scope == scope {
+            let to_reenter = tx.secrets_to_reenter().await?;
+            for scope in &scopes {
+                let at = format!("{}:{}", scope.kind(), scope.id());
+                for secret in tx.list_secrets(Some(scope)).await? {
+                    println!("{:<24} {} {at}", secret.name, secret.updated_at);
+                }
+                for secret in to_reenter.iter().filter(|s| &s.scope == scope) {
                     println!("{:<24} not set: re-enter it after import", secret.name);
                 }
             }
         }
         SecretCommand::Rm { name, scope } => {
-            if !sun_engine::delete_secret(&store, &scope.scope()?, &name, actor).await? {
+            let scope = scope.scope(&store, &name).await?;
+            if !sun_engine::delete_secret(&store, &scope, &name, actor).await? {
                 bail!("no secret {name}");
             }
             println!("deleted {name}");

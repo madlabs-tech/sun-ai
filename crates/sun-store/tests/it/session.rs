@@ -6,7 +6,7 @@ use sun_core::model::{
 };
 use sun_core::{
     HandoffPackId, HostId, NoteId, RunId, RunStatus, SessionHandle, SessionId, StepId, StepKey,
-    StepStatus, TaskStatus, WorkflowId,
+    StepStatus, TaskStatus, WorkflowId, WorkspaceId,
 };
 use sun_store::{NoteRepo, RunRepo, RuntimeRepo, SessionRepo, Store, TaskRepo, WorkflowRepo};
 
@@ -57,16 +57,31 @@ async fn runtime_session_handoff_and_note_rows_round_trip() {
 
     // A configured runtime keeps its adapter; a chain name alone maps to itself.
     let configured = tx
-        .upsert_runtime("claude-max", "claude-code", RuntimeSource::ByoRuntime)
+        .upsert_runtime(
+            WorkspaceId::MAIN,
+            "claude-max",
+            "claude-code",
+            RuntimeSource::ByoRuntime,
+        )
         .await
         .unwrap();
     let again = tx
-        .upsert_runtime("claude-max", "claude-max", RuntimeSource::ByoRuntime)
+        .upsert_runtime(
+            WorkspaceId::MAIN,
+            "claude-max",
+            "claude-max",
+            RuntimeSource::ByoRuntime,
+        )
         .await
         .unwrap();
     assert_eq!(again, configured);
     assert_eq!(again.adapter, "claude-code");
-    assert!(tx.runtime_by_name("codex").await.unwrap().is_none());
+    assert!(
+        tx.runtime_by_name(WorkspaceId::MAIN, "codex")
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let until = chrono::Utc::now() + chrono::Duration::minutes(30);
     tx.set_cooldown(configured.id, Some(until)).await.unwrap();
@@ -127,6 +142,7 @@ async fn byo_key_runtime_config_round_trips() {
     let store = Store::open(dir.path()).await.unwrap();
     let mut runtime = sun_core::model::Runtime {
         id: sun_core::RuntimeId::generate(),
+        workspace_id: WorkspaceId::MAIN,
         name: "ollama".into(),
         adapter: "opencode".into(),
         source: RuntimeSource::ByoKey,
@@ -136,12 +152,15 @@ async fn byo_key_runtime_config_round_trips() {
             model: "qwen2.5-coder:7b".into(),
             key_secret: None,
         }),
+        created_by: None,
     };
     let mut tx = store.begin().await.unwrap();
     assert!(tx.insert_runtime(&runtime).await.unwrap());
     assert!(!tx.insert_runtime(&runtime).await.unwrap(), "name taken");
     assert_eq!(
-        tx.runtime_by_name("ollama").await.unwrap(),
+        tx.runtime_by_name(WorkspaceId::MAIN, "ollama")
+            .await
+            .unwrap(),
         Some(runtime.clone())
     );
 
@@ -152,15 +171,25 @@ async fn byo_key_runtime_config_round_trips() {
     assert_eq!(tx.get_runtime(runtime.id).await.unwrap(), runtime);
     // The engine's upsert keeps the configured row.
     let upserted = tx
-        .upsert_runtime("ollama", "ollama", RuntimeSource::ByoRuntime)
+        .upsert_runtime(
+            WorkspaceId::MAIN,
+            "ollama",
+            "ollama",
+            RuntimeSource::ByoRuntime,
+        )
         .await
         .unwrap();
     assert_eq!(upserted, runtime);
-    tx.upsert_runtime("codex", "codex", RuntimeSource::ByoRuntime)
-        .await
-        .unwrap();
+    tx.upsert_runtime(
+        WorkspaceId::MAIN,
+        "codex",
+        "codex",
+        RuntimeSource::ByoRuntime,
+    )
+    .await
+    .unwrap();
     let names: Vec<_> = tx
-        .runtimes()
+        .runtimes(Some(WorkspaceId::MAIN))
         .await
         .unwrap()
         .into_iter()

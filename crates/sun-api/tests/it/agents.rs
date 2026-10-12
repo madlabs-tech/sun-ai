@@ -1,4 +1,5 @@
-//! Agents over HTTP: CRUD (DELETE archives) behind `manage_runtimes`,
+//! Agents over HTTP: CRUD (DELETE archives) behind `manage_runtimes` in
+//! the agent's workspace, reads for its members,
 //! readiness, assigning tasks, and the hidden system workflow.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -12,7 +13,7 @@ use crate::workspaces::{FLOW, call, call_as, member_token};
 const MAIN: &str = "00000000000000000000000001";
 
 #[tokio::test]
-async fn agents_crud_and_reads_are_for_deployment_owners() {
+async fn agents_crud_needs_manage_runtimes_and_members_read_their_workspaces() {
     let k = kernel().await;
     let app = &k.app;
     for bad in [
@@ -59,12 +60,21 @@ async fn agents_crud_and_reads_are_for_deployment_owners() {
         (&json!("Fixes every bug"), &json!(["codex"]))
     );
 
-    // Bob (no deployment owner) neither reads nor writes.
+    // Bob, a member of Main (no deployment owner), reads Main's agents
+    // (naming Main) but writes none.
     let bob = member_token(&k.store, "bob", Role::Member).await;
     let (status, _) = call_as(app, &bob, "GET", "/api/v1/agents", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let of_main = format!("/api/v1/agents?workspace={MAIN}");
+    let (status, listed) = call_as(app, &bob, "GET", &of_main, None).await;
+    assert_eq!(
+        (status, listed[0]["id"].clone()),
+        (StatusCode::OK, ada["id"].clone())
+    );
     let create = json!({ "name": "Bob", "runtime_chain": ["codex"] });
-    let (status, _) = call_as(app, &bob, "POST", "/api/v1/agents", Some(create)).await;
+    let (status, _) = call_as(app, &bob, "POST", "/api/v1/agents", Some(create.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call_as(app, &bob, "POST", &of_main, Some(create)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _) = call_as(app, &bob, "PATCH", &path, Some(json!({ "name": "B" }))).await;
     assert_eq!(status, StatusCode::FORBIDDEN);

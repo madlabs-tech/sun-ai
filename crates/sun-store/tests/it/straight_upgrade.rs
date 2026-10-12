@@ -322,10 +322,10 @@ async fn a_pre_rename_data_dir_upgrades_through_every_migration_in_one_open() {
         "{audit:?}"
     );
 
-    // The old install secret is an ecosystem secret, re-sealed so it opens.
-    let ecosystem = SecretScope::Ecosystem(NIL.parse().unwrap());
+    // The old install secret is a person's: re-sealed into Main (M4) so it opens.
+    let main = SecretScope::Workspace(sun_core::WorkspaceId::MAIN);
     assert_eq!(
-        tx.secret_value(&ecosystem, "API_TOKEN").await.unwrap(),
+        tx.secret_value(&main, "API_TOKEN").await.unwrap(),
         "dummy-old-install-value"
     );
     drop(tx);
@@ -352,7 +352,7 @@ async fn a_pre_rename_data_dir_upgrades_through_every_migration_in_one_open() {
         .fetch_all(&mut conn)
         .await
         .unwrap();
-    assert_eq!(kinds, ["ecosystem"]);
+    assert_eq!(kinds, ["workspace"]);
     let system: i64 =
         sqlx::query_scalar("SELECT count(*) FROM workflow WHERE system_agent_id IS NOT NULL")
             .fetch_one(&mut conn)
