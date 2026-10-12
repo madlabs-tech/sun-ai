@@ -249,6 +249,7 @@ fn spec(dir: &Path, env: &[(&str, &str)]) -> SessionSpec {
         .collect();
     vars.insert("SUN_OUT".into(), dir.join("out").display().to_string());
     SessionSpec {
+        skills: None,
         session_id: SessionId::generate(),
         run_id: RunId::generate(),
         step_key: StepKey::new("implement").unwrap(),
