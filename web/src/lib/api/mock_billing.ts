@@ -1,5 +1,5 @@
 // In-memory Sun Cloud billing for the mock: each workspace's subscription (`subscriptions/**`) and the
-// deployment owners' support tickets (`support`). Main is on Pro with 5 seats; `?plan=free` puts every
+// signed-in person's support tickets (`support`; `?plan=free` refuses new ones: nobody pays). Main is on Pro with 5 seats; `?plan=free` puts every
 // workspace on Free (no subscription), `?prices=none` has the cloud return no prices, and `?billing=down`
 // makes the cloud unreachable (503 `billing_unavailable`, never Free).
 import type { PlanPrices, SeatPreview, SubscriptionSummary, Ticket } from './types';
@@ -79,6 +79,10 @@ export function billing_route(method: string, parts: string[], input: Record<str
     throw new MockError(503, { error: { code: 'billing_unavailable', message: 'Billing is unavailable right now: Sun Cloud didn’t answer. Try again in a few minutes.' } });
   if (parts[0] === 'support') {
     if (method === 'GET') return clone(tickets);
+    if (mock_free)
+      throw new MockError(403, {
+        error: { code: 'forbidden', message: 'support from people comes with the Pro and Business plans; the community forum answers Free questions' },
+      });
     const subject = String(input.subject ?? '').trim();
     const body = String(input.body ?? '').trim();
     if (!subject || subject.length > 200) throw invalid('The subject must be 1–200 characters on one line.');

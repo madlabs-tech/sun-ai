@@ -1452,7 +1452,7 @@ export interface SeatPreview {
   expected_current_seats: number;
   expected_purchase_version: number | string;
 }
-/** `GET /support`: a deployment owner's questions to Sun. */
+/** `GET /support`: the signed-in person's questions to Sun. */
 export interface Ticket {
   id: string;
   plan: Plan;

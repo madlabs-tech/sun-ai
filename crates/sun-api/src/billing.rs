@@ -10,8 +10,9 @@
 //! purchase and an owner's or admin's summary.
 //!
 //! - Workspace reads (summary, prices): any member there. Writes (checkout,
-//!   portal, seats): its owners and admins. Support: deployment owners.
-//!   The kernel token (a machine) gets 403 on all of it.
+//!   portal, seats): its owners and admins. Support: any signed-in person
+//!   (the cloud answers 403, with why, to one who pays for no plan). The
+//!   kernel token (a machine) gets 403 on all of it.
 //! - The cloud's 404 (or any failure to answer) is `503 billing_unavailable`,
 //!   never the Free plan; 402, 409 and 429 pass through with their code.
 // ponytail: wallets (`/billing/*`) are deferred with credits; add them here
@@ -537,7 +538,7 @@ async fn as_person(
     cloud.send(method, path, user, body, None).await
 }
 
-/// `GET /support` (deployment owners): the tickets they opened at Sun.
+/// `GET /support` (any signed-in person): the tickets they opened at Sun.
 pub(crate) async fn tickets(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -559,7 +560,8 @@ pub(crate) struct NewTicket {
     body: String,
 }
 
-/// `POST /support` `{subject, body}` (deployment owners): 201 the ticket.
+/// `POST /support` `{subject, body}` (any signed-in person): 201 the
+/// ticket, or the cloud's 403 for one who pays for no plan.
 pub(crate) async fn open_ticket(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,

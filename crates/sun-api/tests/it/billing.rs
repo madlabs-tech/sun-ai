@@ -440,7 +440,7 @@ async fn workspace_writes_are_for_owners_and_admins_with_allowlisted_bodies() {
 }
 
 #[tokio::test]
-async fn refusals_keep_their_meaning_and_support_stays_the_owners() {
+async fn refusals_keep_their_meaning_and_support_is_any_person_s() {
     let cloud = Cloud::default();
     let (k, app) = connected(&cloud).await;
     let admin = member_token(&k.store, "ada", Role::Admin).await;
@@ -478,21 +478,37 @@ async fn refusals_keep_their_meaning_and_support_stays_the_owners() {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(response.headers()[header::RETRY_AFTER], "7");
 
-    // Support stays the deployment owners', at the cloud's `/account/support`.
+    // Support is any signed-in person's, at the cloud's `/account/support`,
+    // as that person; the kernel token is a machine.
+    let before = cloud.count();
+    let (status, _) = call_as(&app, TOKEN, "GET", "/api/v1/support", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let ticket = json!({ "subject": "Help", "body": "It broke." });
+    let (status, _) = call_as(&app, TOKEN, "POST", "/api/v1/support", Some(ticket.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(cloud.count(), before);
     let lone = member_token_in(&k.store, "lou", &[]).await;
     let (status, _) = call_as(&app, &lone, "GET", "/api/v1/support", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let owner = deployment_owner(&k).await;
-    let (status, _) = call_as(&app, &owner, "GET", "/api/v1/support", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cloud.last().path, "/account/support");
-    let ticket = json!({ "subject": "Help", "body": "It broke." });
-    let (status, _) = call_as(&app, &owner, "POST", "/api/v1/support", Some(ticket)).await;
-    assert_eq!(status, StatusCode::OK);
+    let seen = cloud.last();
+    assert_eq!(seen.path, "/account/support");
     assert_eq!(
-        cloud.last().body,
-        json!({ "subject": "Help", "body": "It broke." })
+        seen.headers["x-user-id"],
+        member_id(&k, "lou").await.as_str()
     );
+    let (status, _) = call_as(&app, &lone, "POST", "/api/v1/support", Some(ticket.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cloud.last().body, ticket);
+    // One who pays for no plan: the cloud's 403 and its reason.
+    let why = "support from people comes with the Pro and Business plans";
+    cloud.reply(
+        "/account/support",
+        403,
+        json!({ "error": why, "code": "forbidden" }),
+    );
+    let (status, body) = call_as(&app, &lone, "POST", "/api/v1/support", Some(ticket)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["message"], why);
 }
 
 /// The cloud recounts members before a checkout or a seat purchase, and
@@ -560,16 +576,6 @@ async fn checkouts_and_seat_purchases_follow_a_recount() {
     let (status, body) = call_as(&app, &admin, "GET", &summary, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["seat_capacity"]["used"], members);
-}
-
-/// A session token of a deployment owner (a person, not the kernel token).
-async fn deployment_owner(k: &common::Kernel) -> String {
-    let token = member_token_in(&k.store, "dee", &[]).await;
-    let mut tx = k.store.begin().await.unwrap();
-    let dee = tx.member_by_email("dee@corp.io").await.unwrap().unwrap();
-    tx.set_member_owner(dee.id, true).await.unwrap();
-    tx.commit().await.unwrap();
-    token
 }
 
 #[tokio::test]

@@ -308,7 +308,7 @@ pub(crate) fn router(api: Api) -> Router {
     // sign-in, security, audit, the kernel's own resources and sessions,
     // mods, ecosystem and mod secrets, the permission mode of each runtime
     // adapter (every workspace's sessions of it), limits, dismissed catalog
-    // suggestions, usage, its support tickets at Sun and marketplace.
+    // suggestions, usage and marketplace.
     let deployment = Router::new()
         .route(
             "/members",
@@ -373,10 +373,6 @@ pub(crate) fn router(api: Api) -> Router {
         .route(
             "/settings/embeddings",
             get(crate::knowledge::get_embeddings).put(crate::knowledge::put_embeddings),
-        )
-        .route(
-            "/support",
-            get(crate::billing::tickets).post(crate::billing::open_ticket),
         )
         .route(
             "/runtimes/{id}/policy",
@@ -457,6 +453,12 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/me/two_step/{id}", delete(auth::remove_my_two_step))
         // Plans and wallets: each handler checks the person and their role.
         .merge(crate::billing::routes())
+        // Support from people at Sun: any signed-in person; Sun Cloud says
+        // who pays for it.
+        .route(
+            "/support",
+            get(crate::billing::tickets).post(crate::billing::open_ticket),
+        )
         // Runs after `authenticate`: 404 for anything on a hidden workspace.
         .route_layer(middleware::from_fn_with_state(
             api.clone(),

@@ -1,5 +1,5 @@
-<!-- Support from people at Sun (deployment owners): a form to ask, and the conversations so far.
-     Without Sun Cloud it points to the community instead. -->
+<!-- Support from people at Sun (anyone signed in; it comes with a paid workspace plan, and Sun Cloud says why when
+     not): a form to ask, and the conversations so far. Without Sun Cloud it points to the community instead. -->
 <script lang="ts">
   import { Badge, Button, Icon, Input } from '@hryer/madlabs-design-system/svelte';
   import { api } from '../lib/api/client';
@@ -52,7 +52,10 @@
         most questions.
       </p>
     {:else if tickets}
-      <p class="sun-row__meta support__copy">A person at Sun reads every question. Never paste secrets here.</p>
+      <p class="sun-row__meta support__copy">
+        Support from people comes with a paid workspace plan (Pro or Business): a person at Sun reads every question. On
+        Free, the community forum and the docs answer. Never paste secrets here.
+      </p>
       <form class="support__form" aria-label="Ask Sun" onsubmit={send} novalidate>
         <Input label="Subject" maxlength={200} placeholder="e.g. Codex steps stop after an hour" bind:value={form.subject} error={errors.subject} />
         <label class="ml-field">

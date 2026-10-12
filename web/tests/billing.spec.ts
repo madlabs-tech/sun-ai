@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 // At 360 px, mock API: Plan & billing per workspace through Sun Cloud (status, seats, Upgrade to the hosted checkout,
 // Manage billing, Buy seats after a price preview; members read only; Free with no limits), the checkout's return
-// page, support tickets for deployment owners, and spend caps.
+// page, support tickets for anyone signed in (in My Account), and spend caps.
 test.use({ viewport: { width: 360, height: 740 } });
 
 const open = async (page: Page, route: string, query = '') => {
@@ -142,6 +142,20 @@ test('support: a question sent, earlier answers shown', async ({ page }) => {
   await expect(fresh.getByText('Waiting for Sun')).toBeVisible();
   await expect(fresh.getByText(/Answer due by \d{4}-\d{2}-\d{2}/)).toBeVisible();
   await expect(form.getByLabel('Subject')).toHaveValue('');
+  expect(await overflow(page)).toBeLessThanOrEqual(0);
+});
+
+test('support: in My Account for a member; without a paid plan Sun Cloud says why', async ({ page }) => {
+  await open(page, 'settings/support', '&mock_role=member&plan=free');
+  await expect(page.getByRole('heading', { name: 'Support', exact: true })).toBeVisible();
+  const support = page.getByRole('region', { name: /Support/ });
+  await expect(support).toContainText('Support from people comes with a paid workspace plan');
+  const form = support.getByRole('form', { name: 'Ask Sun' });
+  await form.getByLabel('Subject').fill('Can I get help?');
+  await form.getByLabel('Message').fill('We are on Free.');
+  await form.getByRole('button', { name: 'Send to Sun' }).click();
+  await expect(page.getByText('support from people comes with the Pro and Business plans')).toBeVisible();
+  await expect(form.getByLabel('Subject')).toHaveValue('Can I get help?');
   expect(await overflow(page)).toBeLessThanOrEqual(0);
 });
 
