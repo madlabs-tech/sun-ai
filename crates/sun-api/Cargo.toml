@@ -36,7 +36,6 @@ ulid.workspace = true
 http-body-util = "0.1.3"
 # The tests' software passkey signs with it.
 p256 = { version = "0.13.2", features = ["ecdsa"] }
-sun-core = { workspace = true, features = ["dev-license"] }
 sun-host.workspace = true
 sun-runtime.workspace = true
 sun-store.workspace = true

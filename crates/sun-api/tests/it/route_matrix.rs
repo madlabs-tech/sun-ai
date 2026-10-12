@@ -599,7 +599,6 @@ async fn deployment_wide_reads_are_for_deployment_owners_only() {
         "/settings/budget",
         "/settings/embeddings",
         "/quality/metrics",
-        "/entitlement",
         "/corrections",
         "/outbox?status=unknown",
     ];

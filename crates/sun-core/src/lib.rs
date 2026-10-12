@@ -4,7 +4,7 @@
 //! types (one per table), the run/step/task **state machines**,
 //! [`SunEvent`], errors, the boundary traits ([`RuntimeAdapter`], [`HostLink`],
 //! [`ModLink`], [`EngineHandle`]), the one shared secret filter ([`redact`])
-//! and plans/signed licenses ([`entitlement`]).
+//! and plans per workspace ([`entitlement`]).
 //!
 //! **Contract:**
 //! - **No I/O.** Pure types and pure functions only; nothing here opens a file,

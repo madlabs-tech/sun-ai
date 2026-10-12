@@ -27,8 +27,8 @@ use sun_engine::FirstSignIn;
 use super::members::not_yourself;
 use super::{Caller, digest};
 use crate::Api;
+use crate::entitlement::within_plan;
 use crate::error::{ApiError, ApiResult};
-use crate::license::within_plan;
 use crate::routes::Body;
 
 /// How long an invite code works.
@@ -337,8 +337,12 @@ pub(crate) async fn invite_member(
             "Use a username of 1-64 letters, digits, - _ or .",
         ));
     }
-    let members = api.engine.members().await?;
-    within_plan(&api, Quota::Seats, "seats", members.len())?;
+    let seats = api
+        .engine
+        .workspace_members(input.workspace_id)
+        .await?
+        .len();
+    within_plan(&api, input.workspace_id, Quota::Seats, "seats", seats).await?;
     if let Some(password) = input.password {
         check_password(&password)?;
         let hash = hash_password_blocking(password).await?;

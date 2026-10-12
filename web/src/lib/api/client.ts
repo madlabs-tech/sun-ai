@@ -408,7 +408,9 @@ export const api = {
   /** Admin. Omit `api_key` to keep the saved key. */
   set_embeddings: (input: Omit<Embeddings, 'has_api_key'> & { api_key?: string }) =>
     request<Embeddings>('PUT', '/settings/embeddings', input),
-  get_entitlement: () => request<Entitlement>('GET', '/entitlement'),
+  /** No workspace: Main. */
+  get_entitlement: (workspace?: string) =>
+    request<Entitlement>('GET', workspace ? `/entitlement?workspace=${encodeURIComponent(workspace)}` : '/entitlement'),
   /** The account at Sun (plan, credits, support); 503 when this ecosystem isn't connected to Sun. */
   get_account: () => request<Account>('GET', '/account'),
   /** Admin. The invoice's `checkout_url` is Sun's hosted payment page; the plan applies once paid. */
@@ -419,7 +421,6 @@ export const api = {
   list_invoices: () => request<Invoice[]>('GET', '/account/invoices'),
   list_tickets: () => request<Ticket[]>('GET', '/account/support'),
   open_ticket: (subject: string, body: string) => request<Ticket>('POST', '/account/support', { subject, body }),
-  install_license: (token: string) => request<Entitlement>('PUT', '/license', { token }),
   /** Write-only: the value goes in, never comes back. */
   set_secret: (scope: SecretScope, name: string, value: string) =>
     request<Secret>('PUT', `/secrets/${scope.kind}/${id_path(scope.id)}/${id_path(name)}`, { value }),

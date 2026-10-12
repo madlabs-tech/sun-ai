@@ -1382,21 +1382,20 @@ export type DeviceInput =
   | { kind: 'text'; text: string }
   | { kind: 'key'; key: 'home' | 'back' | 'enter' | 'delete' };
 
-/** `GET /entitlement`: the effective plan and why. */
-export type Plan = 'community' | 'free' | 'individual' | 'business';
-export type EntitlementStatus =
-  | { state: 'unlicensed' }
-  | { state: 'active' }
-  | { state: 'grace'; ends_at: string }
-  | { state: 'expired'; ended_at: string }
-  | { state: 'invalid'; reason: string };
+/** `GET /entitlement?workspace=`: a workspace's plan and where it comes from. */
+export type Plan = 'community' | 'free' | 'pro' | 'business';
+/** `cloud`: Sun Cloud's policy, fresh until `valid_until`; `stale`: its last policy while it can't be reached;
+ *  `unavailable`: Sun Cloud unreachable, Community until it answers; `community`: self-hosted. */
+export type EntitlementStatus = 'cloud' | 'stale' | 'unavailable' | 'community';
 export interface Entitlement {
   plan: Plan;
-  /** Caps of the plan; missing or null = unlimited. `runtimes` caps hosts, `agents` runs at once. */
-  limits: Partial<Record<'ecosystems' | 'runtimes' | 'byo_keys' | 'agents' | 'seats', number | null>>;
+  /** A paid plan (exclusive mods). */
+  paid: boolean;
+  /** Caps of the plan; null = unlimited. */
+  limits: Record<'seats' | 'runtimes' | 'byo_keys' | 'agents' | 'hosts', number | null>;
   status: EntitlementStatus;
-  /** The installed license when it verified (never the token). */
-  license: { licensee: string; expires_at: string } | null;
+  /** Set when `status` is `cloud`. */
+  valid_until: string | null;
 }
 
 /** `GET /secrets`: metadata only; a value is never sent back. */
@@ -1414,7 +1413,7 @@ export interface Secret {
 /** `GET /account`: the ecosystem's account at Sun. */
 export type Currency = 'idr' | 'usd';
 export type PayMethod = 'qris' | 'bank_transfer' | 'card';
-export type PaidPlan = 'individual' | 'business';
+export type PaidPlan = 'pro' | 'business';
 export interface PlanPrice {
   plan: PaidPlan;
   currency: Currency;
@@ -1437,7 +1436,7 @@ export interface Subscription {
   period_end: string | null;
 }
 export interface Account {
-  /** `true` under Sun Cloud; `false` for a self-hosted paid license (plan and support only). */
+  /** `true` under Sun Cloud. */
   cloud: boolean;
   plan: Plan;
   subscription: Subscription | null;

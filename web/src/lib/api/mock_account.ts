@@ -1,4 +1,4 @@
-// In-memory Sun account for the mock: a Sun Cloud ecosystem on Individual, with
+// In-memory Sun account for the mock: a Sun Cloud ecosystem on Pro, with
 // checkout invoices (never paid here: payment happens on the provider's page)
 // and support tickets.
 import type { Account, Invoice, Ticket } from './types';
@@ -13,13 +13,13 @@ const hours_ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString
 
 const account: Account = {
   cloud: true,
-  plan: 'individual',
-  subscription: { plan: 'individual', seats: 1, currency: 'idr', method: 'qris', status: 'active', period_end: '2026-12-31T00:00:00Z' },
+  plan: 'pro',
+  subscription: { plan: 'pro', seats: 1, currency: 'idr', method: 'qris', status: 'active', period_end: '2026-12-31T00:00:00Z' },
   balance: 2_450_000,
   catalog: {
     plans: [
-      { plan: 'individual', currency: 'idr', period_months: 3, base: 199_000, per_seat: 0 },
-      { plan: 'individual', currency: 'usd', period_months: 1, base: 1_200, per_seat: 0 },
+      { plan: 'pro', currency: 'idr', period_months: 3, base: 199_000, per_seat: 0 },
+      { plan: 'pro', currency: 'usd', period_months: 1, base: 1_200, per_seat: 0 },
       { plan: 'business', currency: 'idr', period_months: 3, base: 990_000, per_seat: 149_000 },
       { plan: 'business', currency: 'usd', period_months: 1, base: 6_000, per_seat: 900 },
     ],
@@ -52,7 +52,7 @@ const invoices: Invoice[] = [
 const tickets: Ticket[] = [
   {
     id: 'tic_01JMOCK1',
-    plan: 'individual',
+    plan: 'pro',
     subject: 'Codex runs stop after an hour',
     status: 'answered',
     created_at: hours_ago(30),
@@ -100,8 +100,8 @@ export function account_route(method: string, parts: string[], input: Record<str
     const seats = Number(input.seats);
     const price = account.catalog.plans.find((p) => p.plan === input.plan && p.currency === input.currency);
     if (!price) throw not_found(`price for ${input.plan} in ${input.currency}`);
-    if (!Number.isInteger(seats) || seats < 1 || (input.plan === 'individual' && seats !== 1))
-      throw invalid('Individual has exactly 1 seat; Business 1–10000.');
+    if (!Number.isInteger(seats) || seats < 1 || (input.plan === 'pro' && seats !== 1))
+      throw invalid('Pro has exactly 1 seat; Business 1–10000.');
     const points = (input.plan === 'business' ? 2_000_000 : 1_000_000) * price.period_months;
     return invoice('subscription', price.currency, price.base + price.per_seat * seats, input.method as Invoice['method'], points, price.period_months);
   }

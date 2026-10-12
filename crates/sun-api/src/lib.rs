@@ -42,12 +42,12 @@ mod auth;
 mod catalog;
 mod corrections;
 mod device;
+mod entitlement;
 mod error;
 mod evals;
 mod features;
 mod hosts;
 mod knowledge;
-mod license;
 mod marketplace;
 mod mcp;
 mod memory;
@@ -74,9 +74,9 @@ use sun_core::{HostId, Mailer, Marketplace, ModInstaller, ModLink};
 use sun_engine::{Engine, Principal, Queue};
 
 pub use auth::PresetUrls;
+pub use entitlement::CloudPolicy;
 pub use features::Features;
 pub use hosts::{HostHub, host_key_for};
-pub use license::Licensing;
 
 /// Settings for the API, supplied by `sun-cli`.
 #[derive(Debug, Clone)]
@@ -126,8 +126,8 @@ pub struct Api {
     sun_cloud: bool,
     /// Lists and installs bundled and marketplace mods (`with_mod_installer`).
     mod_installer: Option<Arc<dyn ModInstaller>>,
-    /// The license file behind `/entitlement` and `/license` (`with_license`).
-    license: Option<Arc<Licensing>>,
+    /// Each workspace's plan (`with_entitlements`); Community by default.
+    entitlements: Arc<dyn sun_core::entitlement::EntitlementProvider>,
     /// Sun Cloud's marketplace (`with_marketplace`).
     market: Option<Arc<dyn Marketplace>>,
     /// The ecosystem's account at Sun (`with_account`).
@@ -164,7 +164,7 @@ impl Api {
             allow_bypass: false,
             sun_cloud: false,
             mod_installer: None,
-            license: None,
+            entitlements: Arc::new(sun_core::entitlement::Community),
             market: None,
             account: None,
             public_url: None,
@@ -280,11 +280,13 @@ impl Api {
         self
     }
 
-    /// Resolves the plan from `licensing` (`GET /entitlement`) and lets an
-    /// admin replace it (`PUT|DELETE /license`). Without it: Community, and
-    /// the license routes answer 503.
-    pub fn with_license(mut self, licensing: Licensing) -> Self {
-        self.license = Some(Arc::new(licensing));
+    /// Takes each workspace's plan (`GET /entitlement`, plan limits) from
+    /// `provider`. Without it every workspace is Community, unlimited.
+    pub fn with_entitlements(
+        mut self,
+        provider: Arc<dyn sun_core::entitlement::EntitlementProvider>,
+    ) -> Self {
+        self.entitlements = provider;
         self
     }
 

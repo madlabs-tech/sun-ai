@@ -51,6 +51,7 @@ const DEFAULTS_TO_MAIN: &[(Method, &str)] = &[
     (Method::POST, "/knowledge/sources"),
     (Method::GET, "/knowledge/search"),
     (Method::DELETE, "/knowledge/sources/{id}"),
+    (Method::GET, "/entitlement"),
 ];
 
 /// The query parameters that name something on a workspace.
