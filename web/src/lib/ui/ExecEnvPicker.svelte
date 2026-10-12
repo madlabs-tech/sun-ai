@@ -3,6 +3,7 @@
 <script lang="ts">
   import { Input, Select } from '@hryer/madlabs-design-system/svelte';
   import { api } from '../api/client';
+  import { current_workspace } from '../app_state.svelte';
   import type { ExecEnvCapability, ExecEnvKind, ExecEnvSpec } from '../api/types';
 
   let { value = $bindable(null), error = '' }: { value?: ExecEnvSpec | null; error?: string } = $props();
@@ -19,7 +20,7 @@
   let template = $state('default');
 
   api
-    .list_hosts()
+    .list_hosts(current_workspace())
     .then((hosts) => {
       reported = hosts.filter((h) => h.status === 'online').flatMap((h) => h.capabilities.exec_envs ?? []);
     })

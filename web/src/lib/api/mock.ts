@@ -48,7 +48,7 @@ import type { OutboxItem, Agent, MemoryItem,
 } from './types';
 import { BYO_KEY_ADAPTERS, MAIN_WORKSPACE, TASK_MOVES } from './types';
 import { LineCounter, isMap, isSeq, parse, parseDocument, stringify } from 'yaml';
-import { DESIGN_WORKSPACE, mock_join, mock_me } from './auth';
+import { DESIGN_WORKSPACE, mock_join, mock_me, need } from './auth';
 import { eval_route } from './mock_evals';
 import { market_route } from './mock_market';
 import { account_route, sun_cloud } from './mock_account';
@@ -278,7 +278,7 @@ const HOSTS: Host[] = [
   disk: [{ task_id: fake_id('T', 142), bytes: 1.4 * 1024 * MIB }, { task_id: fake_id('T', 147), bytes: 3 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
   { id: fake_id('H', 2), name: 'build-box-01', status: 'online', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['opencode', 'codex'], devices: ['Pixel_8_API_35'] }, sessions: 1,
     session_stats: [live(139, 'fix', 410, 0.4, 7380)], disk: [{ task_id: fake_id('T', 139), bytes: 820 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
-  { id: fake_id('H', 3), name: 'rina-laptop', status: 'offline', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['claude-code'], devices: [] }, sessions: 0, last_seen_at: today('06:40'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
+  { id: fake_id('H', 3), name: 'rina-laptop', status: 'offline', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['claude-code'], devices: [] }, sessions: 0, last_seen_at: today('06:40'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: 'm_me' },
 ];
 
 const MODS: ModInstall[] = [
@@ -308,6 +308,11 @@ function mock_readiness(r: Runtime) {
 
 const entry = (e: Partial<CatalogEntry> & Pick<CatalogEntry, 'id' | 'kind' | 'description' | 'source' | 'author' | 'license' | 'version'>): CatalogEntry =>
   ({ stacks: [], reviewed: true, installed: null, matches: [], in_workflows: false, hosts: [], secrets: [], ...e });
+/** The workspaces that have each entry installed; `installed` on an entry is the version on disk, shared by all. */
+const INSTALLED_IN = new Map<string, Set<string>>();
+const installed_in = (id: string) => INSTALLED_IN.get(id) ?? INSTALLED_IN.set(id, new Set()).get(id)!;
+/** An entry as `workspace` sees it (none: installed anywhere, as for owners). */
+const entry_in = (e: CatalogEntry, workspace: string | null): CatalogEntry => ({ ...e, installed: !workspace || installed_in(e.id).has(workspace) ? e.installed : null });
 /** Suggestions the ecosystem dismissed. */
 const DISMISSED = new Set<string>();
 const CATALOG: CatalogEntry[] = [
@@ -318,6 +323,7 @@ const CATALOG: CatalogEntry[] = [
   entry({ id: 'playwright', kind: 'mcp', description: 'Drive a real browser: open pages, click, fill forms, take screenshots.', source: 'github.com/microsoft/playwright-mcp', author: 'Microsoft', license: 'Apache-2.0', version: '0.0.41', stacks: ['frontend'], tools: ['browser_navigate', 'browser_click'], hosts: ['registry.npmjs.org'] }),
   entry({ id: 'context7', kind: 'mcp', description: 'Up-to-date library docs and code examples for the prompt.', source: 'github.com/upstash/context7', author: 'Upstash', license: 'MIT', version: '1.0.20', tools: ['resolve-library-id', 'get-library-docs'], hosts: ['mcp.context7.com'], secrets: ['CONTEXT7_API_KEY'] }),
 ];
+for (const e of CATALOG) if (e.installed) installed_in(e.id).add(MAIN_WORKSPACE);
 
 export class MockError extends Error {
   constructor(
@@ -334,12 +340,13 @@ export const not_found = (what: string) => new MockError(404, { error: { code: '
 const MCP_SERVERS: McpServer[] = [];
 const MCP_GRANTS = new Map<string, McpGrant[]>();
 const invalid = (message: string) => new MockError(422, { error: { code: 'invalid_input', message } });
-const mcp_servers = (): McpServer[] => [
-  ...CATALOG.filter((e) => e.kind === 'mcp' && e.installed).map((e) => ({
+/** `workspace`'s MCP servers: its catalog installs and custom ones (none: every registered one). */
+const mcp_servers = (workspace: string | null = null): McpServer[] => [
+  ...CATALOG.map((e) => entry_in(e, workspace)).filter((e) => e.kind === 'mcp' && e.installed).map((e) => ({
     name: e.id,
     transport: { type: 'url' as const, url: `https://${e.hosts[0] ?? e.id}/mcp`, ...(e.secrets[0] ? { bearer_secret: e.secrets[0] } : {}) },
   })),
-  ...MCP_SERVERS,
+  ...MCP_SERVERS.filter((s) => !workspace || (s.workspace_id ?? MAIN_WORKSPACE) === workspace),
 ].sort((a, b) => a.name.localeCompare(b.name));
 /** Catalog servers offer their listed tools (the first one read-only); custom ones a docs-style set. */
 function mcp_tools(name: string): McpTool[] {
@@ -351,12 +358,12 @@ function mcp_tools(name: string): McpTool[] {
     { name: 'create_page', description: 'Creates a page.', read_only: false },
   ];
 }
-function mcp_server(name: string): McpServer {
-  const s = mcp_servers().find((x) => x.name === name);
+function mcp_server(name: string, workspace: string): McpServer {
+  const s = mcp_servers(workspace).find((x) => x.name === name);
   if (!s) throw not_found(`MCP server ${name}`);
   return s;
 }
-function add_mcp_server(server: McpServer): McpServerAdded {
+function add_mcp_server(server: McpServer, workspace: string): McpServerAdded {
   if (!/^[a-z][a-z0-9_-]{0,63}$/.test(server.name ?? '')) throw invalid(`invalid input: mcp server: name ${JSON.stringify(server.name)} must match [a-z][a-z0-9_-]{0,63}`);
   if (server.name === 'sun') throw invalid('invalid input: mcp server name `sun` is reserved for Sun’s own tools');
   if (mcp_servers().some((s) => s.name === server.name)) throw invalid(`invalid input: an MCP server named ${server.name} already exists; pick another name or remove it first`);
@@ -366,13 +373,14 @@ function add_mcp_server(server: McpServer): McpServerAdded {
   const secrets = t.type === 'url' ? (t.bearer_secret ? [t.bearer_secret] : []) : t.secrets;
   const missing = secrets.find((n) => !has_ecosystem_secret(n));
   if (missing) throw invalid(`invalid input: secret ${missing} is not set; add it under Settings → Secrets (or \`sun secret set ${missing}\`) first`);
-  MCP_SERVERS.push(clone(server));
-  return { server: clone(server), tools: mcp_tools(server.name) };
+  const saved = { ...clone(server), workspace_id: workspace };
+  MCP_SERVERS.push(saved);
+  return { server: clone(saved), tools: mcp_tools(server.name) };
 }
 function set_task_mcp(task_id: string, grants: McpGrant[]): McpGrant[] {
-  find_task(task_id);
+  const workspace = find_task(task_id).workspace_id;
   const names = grants.map((g) => g.server);
-  const unknown = names.find((n) => !mcp_servers().some((s) => s.name === n));
+  const unknown = names.find((n) => !mcp_servers(workspace).some((s) => s.name === n));
   if (unknown) throw invalid(`No MCP server named ${unknown} is registered. Add it first.`);
   if (new Set(names).size !== names.length) throw invalid('invalid input: mcp server granted twice');
   MCP_GRANTS.set(task_id, clone(grants));
@@ -381,6 +389,12 @@ function set_task_mcp(task_id: string, grants: McpGrant[]): McpGrant[] {
 
 /** Repo-scope skill installs by `<skill>:<repo_id>`; the PR opens on the next status read. */
 const SKILL_PRS = new Map<string, SkillPr>();
+
+/** Removes `workspace`'s install of `e`; the files go with the last one. */
+function uninstall(e: CatalogEntry, workspace: string) {
+  installed_in(e.id).delete(workspace);
+  if (!installed_in(e.id).size) e.installed = null;
+}
 
 function catalog_entry(id: string): CatalogEntry {
   const e = CATALOG.find((x) => x.id === id);
@@ -892,6 +906,15 @@ function route(method: string, full_path: string, body: unknown): unknown {
   if (method === 'POST' && path === '/agents') return agents_route(method, parts, input, params.get('workspace') ?? MAIN_WORKSPACE);
   if (parts[0] === 'agents') return agents_route(method, parts, input);
   const key = `${method} /${parts[0] ?? ''}${parts.length > 1 ? '/:id' : ''}${parts[2] ? '/' + parts[2] : ''}`;
+  /** Like the kernel's `listed_workspace`: `?workspace=` (404 unless the caller sees it), or none for a deployment owner. */
+  const listed = () => {
+    const workspace = params.get('workspace');
+    if (workspace) return find_workspace(workspace).id;
+    if (mock_me().is_owner) return null;
+    throw invalid('Pass ?workspace=<workspace id>.');
+  };
+  /** The workspace a change goes to: the named one, Main for an owner naming none. */
+  const named = () => listed() ?? MAIN_WORKSPACE;
 
   switch (key) {
     case 'GET /tasks': {
@@ -1199,14 +1222,19 @@ function route(method: string, full_path: string, body: unknown): unknown {
       const cost = tasks.find((x) => x.run?.id === params.get('run_id'))?.run?.cost_usd ?? 0;
       return { input_tokens: Math.round(cost * 120_000), output_tokens: Math.round(cost * 9_000), cost_usd: cost };
     }
-    // --- Per workspace (M5): a token enrols a host into its workspace; attach and detach.
+    // --- Per workspace (M5): a token enrols a host into its workspace; attach (a deployment owner, or whoever
+    // enrolled the host; anyone else gets 404) and detach (404 when it isn't attached), all with manage_runtimes there.
     case 'POST /workspaces/:id/hosts': // /workspaces/{id}/hosts/tokens
+      need('manage_runtimes', find_workspace(parts[1]).id, 'manage runtimes');
       return { token: 'sun_enrol_' + Math.random().toString(36).slice(2, 14), expires_at: new Date(Date.now() + 3600_000).toISOString() };
     case 'PUT /workspaces/:id/hosts':
     case 'DELETE /workspaces/:id/hosts': {
-      const host = HOSTS.find((h) => h.id === parts[3]);
-      if (!host) throw not_found('Host');
-      host.workspace_ids = host.workspace_ids.filter((w) => w !== parts[1]).concat(method === 'PUT' ? [parts[1]] : []);
+      const workspace = find_workspace(parts[1]).id;
+      need('manage_runtimes', workspace, 'manage runtimes');
+      const me = mock_me();
+      const host = HOSTS.find((h) => h.id === parts[3] && (method === 'DELETE' || me.is_owner || h.enrolled_by === me.id));
+      if (!host || (method === 'DELETE' && !host.workspace_ids.includes(workspace))) throw not_found(`host ${parts[3]}`);
+      host.workspace_ids = host.workspace_ids.filter((w) => w !== workspace).concat(method === 'PUT' ? [workspace] : []);
       return null;
     }
     // --- end per workspace (M5)
@@ -1255,8 +1283,12 @@ function route(method: string, full_path: string, body: unknown): unknown {
       return { id: r.id, permission_mode: mode };
     }
     case 'GET /hosts': {
-      const workspace = params.get('workspace');
-      return clone(HOSTS.filter((h) => !workspace || h.workspace_ids.includes(workspace)));
+      // Each names only the workspaces the caller sees.
+      const [workspace, seen] = [listed(), mock_me()];
+      return clone(HOSTS.filter((h) => !workspace || h.workspace_ids.includes(workspace))).map((h) => ({
+        ...h,
+        workspace_ids: h.workspace_ids.filter((w) => seen.is_owner || seen.workspaces.includes(w)),
+      }));
     }
     case 'GET /kernel':
       return { pid: 4242, rss_bytes: 46 * MIB, cpu_percent: 0.6, uptime_s: 93_600 };
@@ -1348,8 +1380,10 @@ function route(method: string, full_path: string, body: unknown): unknown {
       return clone(mod);
     }
     case 'GET /catalog': {
+      const workspace = listed();
+      if (params.get('repo') && !mock_me().is_owner) throw invalid("repo: only a deployment owner may name a folder on the kernel's machine; use repo_id.");
       const stacks = params.get('repo') ? ['frontend', 'node', 'svelte'] : [];
-      const entries = CATALOG.map((e) => ({ ...e, matches: e.stacks.filter((t) => stacks.includes(t)) }));
+      const entries = CATALOG.map((e) => ({ ...entry_in(e, workspace), matches: e.stacks.filter((t) => stacks.includes(t)) }));
       const repo_id = params.get('repo_id');
       return clone({
         stacks,
@@ -1394,7 +1428,11 @@ function route(method: string, full_path: string, body: unknown): unknown {
         SKILL_PRS.set(key, pr);
         return clone(pr);
       }
+      const workspace = named();
+      need('manage_plugins', workspace, 'manage plugins');
+      // The files are shared: an update is every workspace's.
       e.installed = e.version;
+      installed_in(e.id).add(workspace);
       if (e.kind === 'skill') e.runtimes = runtimes ?? null;
       return null;
     }
@@ -1483,16 +1521,21 @@ function route(method: string, full_path: string, body: unknown): unknown {
       return null;
     }
     case 'GET /mcp_servers':
-      return mcp_servers();
-    case 'POST /mcp_servers':
-      return add_mcp_server(input as unknown as McpServer);
+      return mcp_servers(listed());
+    case 'POST /mcp_servers': {
+      const workspace = named();
+      need('manage_plugins', workspace, 'manage plugins');
+      return add_mcp_server(input as unknown as McpServer, workspace);
+    }
     case 'GET /mcp_servers/:id/tools':
-      return mcp_tools(mcp_server(parts[1]).name);
+      return mcp_tools(mcp_server(parts[1], named()).name);
     case 'DELETE /mcp_servers/:id': {
-      const name = mcp_server(parts[1]).name;
+      const workspace = named();
+      need('manage_plugins', workspace, 'manage plugins');
+      const name = mcp_server(parts[1], workspace).name;
       const i = MCP_SERVERS.findIndex((s) => s.name === name);
       if (i >= 0) MCP_SERVERS.splice(i, 1);
-      else catalog_entry(name).installed = null;
+      else uninstall(catalog_entry(name), workspace);
       return null;
     }
     case 'GET /tasks/:id/mcp':
@@ -1500,9 +1543,10 @@ function route(method: string, full_path: string, body: unknown): unknown {
     case 'PUT /tasks/:id/mcp':
       return set_task_mcp(parts[1], body as McpGrant[]);
     case 'DELETE /catalog/:id': {
-      const e = catalog_entry(parts[1]);
-      if (!e.installed) throw not_found(`${e.id} install`);
-      e.installed = null;
+      const [e, workspace] = [catalog_entry(parts[1]), named()];
+      need('manage_plugins', workspace, 'manage plugins');
+      if (!installed_in(e.id).has(workspace)) throw not_found(`${e.id} install`);
+      uninstall(e, workspace);
       return null;
     }
   }

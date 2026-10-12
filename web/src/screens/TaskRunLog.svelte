@@ -114,7 +114,7 @@
       api.knowledge_flags(t.id).catch(() => []),
       api.task_quality(t.id).catch(() => NO_QUALITY),
       api.corrections(t.id).catch(() => []),
-      api.list_hosts().catch(() => []),
+      api.list_hosts(t.workspace_id).catch(() => []),
       api.task_on_limit(t.id).catch(() => ({ on_limit: null })),
       api.task_budget(t.id).catch(() => ({ cost_usd: null })),
       t.run ? api.list_outbox('unknown').catch(() => []) : [],
@@ -364,7 +364,7 @@
       <TaskContext task_id={task.id} workspace_id={task.workspace_id} {plain} />
       <TaskQuality task_id={task.id} {flags} bind:quality />
 
-      {#if !plain}<TaskMcp task_id={task.id} />{/if}
+      {#if !plain}<TaskMcp task_id={task.id} workspace={task.workspace_id} />{/if}
 
       {#if run}
         {@render steps_list(run.steps, true)}

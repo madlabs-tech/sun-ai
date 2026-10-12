@@ -1,14 +1,15 @@
-<!-- Catalog: installed and suggested skills, MCP servers (GET /catalog) and role templates
-     (GET /templates). Suggestions are a ranking only; nothing installs until the user reads the
-     files and clicks Install, and a template's mods only with their own checkbox. -->
+<!-- Catalog: the open workspace's installed and suggested skills, MCP servers (GET /catalog?workspace=) and role
+     templates (GET /templates). Suggestions are a ranking only; nothing installs until the user reads the files and
+     clicks Install, and a template's mods only with their own checkbox. Installs and MCP servers need manage_plugins
+     there, templates create_workflow; the repo folder scan, dismissals and mods are the deployment owners'. -->
 <script lang="ts">
   import { Badge, Button, Checkbox, Dialog, Icon, Input, Radio, Select, Switch, Tabs, Tag } from '@hryer/madlabs-design-system/svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import McpServerDialog from '../lib/ui/McpServerDialog.svelte';
-  import { ECOSYSTEM_SCOPE, api } from '../lib/api/client';
+  import { api } from '../lib/api/client';
   import type { CatalogEntry, CatalogFile, CatalogView, McpServer, McpServerAdded, ModInstall, Repo, SkillPr, WorkflowTemplate } from '../lib/api/types';
-  import { current_workspace, error_text, toast } from '../lib/app_state.svelte';
+  import { can, current_workspace, error_text, is_owner, toast } from '../lib/app_state.svelte';
   import { repo_name, safe_url } from '../lib/format';
 
   type Kind = CatalogEntry['kind'] | 'workflow';
@@ -22,7 +23,7 @@
   const ICON: Record<Kind, string> = { skill: 'sparkles', mcp: 'plug', workflow: 'list-ordered' };
   const WHERE: Record<Kind, string> = {
     skill: 'Copied into each picked agent’s own skills folder when a session starts. The copies stay out of your commits.',
-    mcp: 'Registers the server for this ecosystem. Turn it on per workflow or task; only read-only tools are on by default.',
+    mcp: 'Registers the server for this workspace. Turn it on per workflow or task; only read-only tools are on by default.',
     workflow: 'Saves it as a workflow you can run and edit.',
   };
 
@@ -64,6 +65,13 @@
     }
   };
 
+  const workspace = current_workspace();
+  /** MCP servers and catalog secrets are the workspace's. */
+  const WORKSPACE_SCOPE = { kind: 'workspace' as const, id: workspace };
+  const owner = is_owner();
+  const manage = can('manage_plugins');
+  const add_workflows = can('create_workflow');
+
   let kind = $state<Kind>('skill');
   let tab = $state('installed');
   let repo = $state(read('sun.catalog.repo') ?? '');
@@ -75,7 +83,7 @@
   let mod_picks = $state<string[]>([]);
   /** Skill dialog: the runtimes that get it. */
   let runtime_picks = $state<string[]>([]);
-  /** Skill dialog: the ecosystem store, or one repo by PR. */
+  /** Skill dialog: the workspace (value `ecosystem`), or one repo by PR. */
   let scope = $state<'ecosystem' | 'repo'>('ecosystem');
   let repos = $state<Repo[]>([]);
   let repo_pick = $state('');
@@ -84,12 +92,12 @@
   let poll_token = 0;
   /** Write-only values typed in the install dialog, by secret name. */
   let secret_values = $state<Record<string, string>>({});
-  /** Ecosystem secrets already stored (names only). */
+  /** The workspace’s secrets already stored (names only). */
   let stored_secrets = $state<string[]>([]);
   let load_error = $state('');
   /** The ecosystem's dismissed suggestions (server-side, so every browser agrees). */
   let dismissed = $state<string[]>([]);
-  /** Installed skills: where to look (the ecosystem store or one repo by id) and for which agent. */
+  /** Installed skills: where to look (the workspace or one repo by id) and for which agent. */
   let installed_in = $state('ecosystem');
   let agent = $state('');
   let repo_installs = $state<SkillPr[] | null>(null);
@@ -103,12 +111,13 @@
   let adding_mcp = $state(false);
 
   async function load() {
-    const folder = repo.trim();
+    // A folder on the kernel's machine is the deployment owners' to name.
+    const folder = owner ? repo.trim() : '';
     try {
-      [view, mcp_servers] = await Promise.all([api.list_catalog(folder), api.list_mcp_servers().catch(() => [])]);
+      [view, mcp_servers] = await Promise.all([api.list_catalog(folder, '', workspace), api.list_mcp_servers(workspace).catch(() => [])]);
       dismissed = view.dismissed;
       repo_error = load_error = '';
-      save('sun.catalog.repo', folder);
+      if (owner) save('sun.catalog.repo', folder);
     } catch (e) {
       if (folder) repo_error = error_text(e);
       else load_error = error_text(e);
@@ -118,14 +127,14 @@
 
   async function load_templates() {
     try {
-      const [t, w, m] = await Promise.all([api.list_templates(), api.list_workflows(current_workspace()), api.list_mods()]);
+      const [t, w, m] = await Promise.all([api.list_templates(), api.list_workflows(workspace), owner ? api.list_mods() : []]);
       [templates, workflow_names, mods] = [t, w.map((x) => x.name), m];
     } catch (e) {
       load_error = error_text(e);
     }
   }
   load_templates();
-  api.list_repos(current_workspace()).then((r) => (repos = r), () => (repos = []));
+  api.list_repos(workspace).then((r) => (repos = r), () => (repos = []));
 
   /** The picked repo's by-PR skill installs. */
   async function load_repo_installs() {
@@ -133,7 +142,7 @@
     repo_installs = null;
     if (repo_id === 'ecosystem') return;
     try {
-      const installs = (await api.list_catalog('', repo_id)).repo_installs ?? [];
+      const installs = (await api.list_catalog('', repo_id, workspace)).repo_installs ?? [];
       if (installed_in === repo_id) repo_installs = installs;
     } catch (e) {
       load_error = error_text(e);
@@ -182,7 +191,7 @@
   }
   const missing_mods = $derived(picked?.mods.filter((m) => !mods.some((x) => x.installed && x.name === m)) ?? []);
   const asks_of = (name: string) => mods.find((m) => m.name === name)?.permissions ?? [];
-  /** Skills only: the ecosystem store per agent, or one repo's by-PR installs. */
+  /** Skills only: the workspace’s installs per agent, or one repo's by-PR installs. */
   const by_repo = $derived(kind === 'skill' && installed_in !== 'ecosystem');
   const for_agent = (e: Row) => !agent || e.kind !== 'skill' || !e.runtimes || e.runtimes.includes(agent);
   const installed = $derived(
@@ -264,10 +273,10 @@
     runtime_picks = e.runtimes ?? ALL_RUNTIMES;
     scope = repo_id ? 'repo' : 'ecosystem';
     repo_pick = repo_id;
-    if (e.kind === 'skill') api.list_repos(current_workspace()).then((r) => (repos = r), () => (repos = []));
+    if (e.kind === 'skill') api.list_repos(workspace).then((r) => (repos = r), () => (repos = []));
     secret_values = {};
     if (e.secrets.length) {
-      api.list_secrets(ECOSYSTEM_SCOPE).then(
+      api.list_secrets(WORKSPACE_SCOPE).then(
         (s) => (stored_secrets = s.map((x) => x.name)),
         () => (stored_secrets = []), // members can't list; saving still reports the error
       );
@@ -292,7 +301,7 @@
       if (e.kind === 'workflow') {
         // Only the mods the user ticked; a failed mod stops before the workflow is added.
         for (const m of mod_picks) await api.install_mod(m, asks_of(m));
-        await api.install_template(e.id, current_workspace());
+        await api.install_template(e.id, workspace);
       } else {
         // Every runtime: send none, so runtimes added later get it too.
         const all = ALL_RUNTIMES.every((r) => runtime_picks.includes(r));
@@ -306,9 +315,9 @@
           busy = '';
           return;
         }
-        await api.install_catalog(e.id, runtimes);
-        // Ecosystem scope: the MCP server reads them when Sun connects. Values never come back.
-        for (const name of e.secrets) if (secret_values[name]) await api.set_secret(ECOSYSTEM_SCOPE, name, secret_values[name]);
+        await api.install_catalog(e.id, runtimes, workspace);
+        // The workspace's: its MCP server reads them when Sun connects. Values never come back.
+        for (const name of e.secrets) if (secret_values[name]) await api.set_secret(WORKSPACE_SCOPE, name, secret_values[name]);
       }
       secret_values = {};
       picked = null;
@@ -324,7 +333,7 @@
   async function remove(e: Row) {
     busy = e.id;
     try {
-      await (e.custom ? api.remove_mcp_server(e.id) : api.uninstall_catalog(e.id));
+      await (e.custom ? api.remove_mcp_server(e.id, workspace) : api.uninstall_catalog(e.id, workspace));
       toast('success', `${e.id} removed`, 'Agents stop getting it from their next session.');
       await load();
     } catch (err) {
@@ -339,7 +348,7 @@
 </PageHeader>
 
 <div class="sun-page">
-  <form class="catalog-repo" onsubmit={(e) => (e.preventDefault(), load())}>
+  {#if owner}<form class="catalog-repo" onsubmit={(e) => (e.preventDefault(), load())}>
     <Input
       label="Suggest for a repo"
       placeholder="/path/to/your/checkout"
@@ -350,7 +359,7 @@
       hint={repo_error ? undefined : 'Absolute path on the kernel’s machine. Suggestions rank by the stack found there.'}
     />
     <Button type="submit" variant="secondary" iconLeft="scan-search">Detect stack</Button>
-  </form>
+  </form>{/if}
   {#if view?.stacks.length}
     <div class="sun-chips" aria-label="Detected stack">
       {#each view.stacks as s (s)}<Tag size="sm">{s}</Tag>{/each}
@@ -366,11 +375,11 @@
       ]}
     />
     <span class="sun-header__spacer"></span>
-    {#if kind === 'mcp'}
+    {#if kind === 'mcp' && manage}
       <Button size="sm" variant="secondary" iconLeft="plus" onclick={() => (adding_mcp = true)}>Add MCP server</Button>
     {/if}
     {#if tab === 'suggested'}
-      {#if dismissed.length}<Button size="sm" variant="ghost" onclick={restore}>Show {dismissed.length} dismissed</Button>{/if}
+      {#if owner && dismissed.length}<Button size="sm" variant="ghost" onclick={restore}>Show {dismissed.length} dismissed</Button>{/if}
       <Switch label="Show suggestions" bind:checked={show_suggestions} />
     {/if}
   </div>
@@ -381,7 +390,7 @@
         size="sm"
         bind:value={installed_in}
         options={[
-          { value: 'ecosystem', label: 'Ecosystem' },
+          { value: 'ecosystem', label: 'This workspace' },
           ...repos.map((r) => ({ value: r.id, label: `${repo_name(r.url)} (by PR)` })),
         ]}
       />
@@ -445,18 +454,22 @@
               <Badge tone="info" dot>In the repo by PR</Badge>
             {/if}
           {:else if e.installed}
-            {#if !e.custom && e.installed !== e.version}
+            {#if manage && !e.custom && e.installed !== e.version}
               <Button size="sm" variant="ice" iconLeft="rotate-ccw" onclick={() => pick(e)}>Update to v{e.version}</Button>
             {/if}
             {#if e.kind === 'workflow'}
               <Badge tone="success" dot>Added</Badge>
-            {:else}
+            {:else if manage}
               <Button size="sm" variant="secondary" loading={busy === e.id} onclick={() => remove(e)}>Remove</Button>
+            {:else}
+              <Badge tone="success" dot>Installed</Badge>
             {/if}
           {:else}
             <div class="catalog-actions">
-              <Button size="sm" variant="ice" iconLeft="download" onclick={() => pick(e)}>{e.kind === 'workflow' ? 'Add' : 'Install'}</Button>
-              <IconButton icon="eye-off" label="Dismiss {e.id}" variant="ghost" size="sm" onclick={() => dismiss(e)} />
+              {#if e.kind === 'workflow' ? add_workflows : manage}
+                <Button size="sm" variant="ice" iconLeft="download" onclick={() => pick(e)}>{e.kind === 'workflow' ? 'Add' : 'Install'}</Button>
+              {/if}
+              {#if owner}<IconButton icon="eye-off" label="Dismiss {e.id}" variant="ghost" size="sm" onclick={() => dismiss(e)} />{/if}
             </div>
           {/if}
         </div>
@@ -468,7 +481,7 @@
 </div>
 
 {#if adding_mcp}
-  <McpServerDialog onclose={() => (adding_mcp = false)} onadded={mcp_added} />
+  <McpServerDialog {workspace} onclose={() => (adding_mcp = false)} onadded={mcp_added} />
 {/if}
 
 {#if picked}
@@ -481,7 +494,7 @@
       {#if e.kind === 'skill'}
         <fieldset class="catalog-mods">
           <legend class="catalog-file">Install into</legend>
-          <Radio bind:group={scope} name="scope" value="ecosystem" label="Whole ecosystem" description={WHERE.skill} />
+          <Radio bind:group={scope} name="scope" value="ecosystem" label="This workspace" description={WHERE.skill} />
           <Radio
             bind:group={scope}
             name="scope"
@@ -544,14 +557,16 @@
               type="password"
               autocomplete="off"
               hint={stored_secrets.includes(name)
-                ? 'Already set for the ecosystem. Leave empty to keep it.'
-                : 'Write-only, ecosystem-wide. Leave empty to add it later in Settings.'}
+                ? 'Already set in this workspace. Leave empty to keep it.'
+                : 'Write-only, for this workspace. Leave empty to add it later in Settings.'}
               bind:value={secret_values[name]}
             />
           {/each}
         </fieldset>
       {/if}
-      {#if missing_mods.length}
+      {#if !owner && e.mods.length}
+        <p class="sun-row__meta">Uses the {e.mods.join(', ')} mod{e.mods.length > 1 ? 's' : ''}. A deployment owner installs mods.</p>
+      {:else if missing_mods.length}
         <fieldset class="catalog-mods">
           <legend class="catalog-file">Mods this workflow uses</legend>
           <p class="sun-row__meta">Not installed yet. Tick the ones to install with it; the workflow can’t run its actions without them.</p>

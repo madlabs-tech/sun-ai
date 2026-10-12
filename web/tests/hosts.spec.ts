@@ -1,8 +1,20 @@
-// Hosts screen: kernel use apart from sessions, RSS per session, device fixes, disk, kill, mock API.
+// Hosts screen: kernel use apart from sessions, RSS per session, device fixes, disk, kill, mock API; the workspaces each
+// host serves and who enrolled it; attach and detach for owners, enrollers and members.
 import { expect, test, type Page } from '@playwright/test';
 
 const no_overflow = async (page: Page) =>
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
+const sidebar = (page: Page) => page.getByRole('complementary', { name: 'Main' });
+/** Creates workspace `name` from the workspace menu and opens its Hosts page in-app (the mock's data lives in the page). */
+async function new_workspace_hosts(page: Page, name: string) {
+  await sidebar(page).getByRole('button', { name: /^Workspace: / }).click();
+  await sidebar(page).getByRole('menu').getByRole('menuitem', { name: 'New workspace' }).click();
+  await page.getByRole('dialog').getByLabel('Name').fill(name);
+  await page.getByRole('dialog').getByRole('button', { name: 'Create workspace' }).click();
+  await expect(sidebar(page).getByRole('button', { name: `Workspace: ${name}` })).toBeVisible();
+  await sidebar(page).getByRole('link', { name: 'Hosts' }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Hosts');
+}
 
 test('hosts: kernel use, RSS per session, missing device tools and disk', async ({ page }) => {
   await page.goto('/?mock=1#/hosts');
@@ -48,4 +60,61 @@ test('360 px: hosts and sessions fit', async ({ page }) => {
   await page.goto('/?mock=1#/hosts');
   await expect(page.getByRole('article', { name: 'hery-mbp' }).getByRole('listitem').first()).toBeVisible();
   await no_overflow(page);
+});
+
+test('hosts: each names the workspaces it serves and who enrolled it', async ({ page }) => {
+  await page.goto('/?mock=1#/hosts');
+  await expect(page.getByRole('article', { name: 'hery-mbp' })).toContainText('Serves Main · no enroller on record');
+  await expect(page.getByRole('article', { name: 'rina-laptop' })).toContainText('Serves Main · enrolled by you');
+});
+
+test('hosts: an owner attaches any host to a new workspace and detaches it again', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/?mock=1#/tasks');
+  await new_workspace_hosts(page, 'Lab');
+  await expect(page.getByText('No hosts serve this workspace yet. Add one, or attach one below.')).toBeVisible();
+  const others = page.getByRole('region', { name: 'Hosts you can attach' });
+  await expect(others.getByRole('article')).toHaveCount(3);
+  await others.getByRole('article', { name: 'build-box-01' }).getByRole('button', { name: 'Attach to this workspace' }).click();
+  await expect(page.getByText('build-box-01 attached')).toBeVisible();
+  const attached = page.getByRole('article', { name: 'build-box-01' }).first();
+  await expect(attached).toContainText('Serves Main, Lab');
+  await expect(others.getByRole('article')).toHaveCount(2);
+
+  await page.getByRole('button', { name: 'Detach build-box-01' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toContainText('Only a deployment owner, or whoever enrolled it, can attach it again.');
+  await dialog.getByRole('button', { name: 'Detach' }).click();
+  await expect(page.getByText('build-box-01 detached')).toBeVisible();
+  await expect(others.getByRole('article')).toHaveCount(3);
+});
+
+test('hosts: a workspace admin attaches only the hosts they enrolled (360 px)', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/?mock=1&mock_role=admin#/tasks');
+  // In Main an admin adds and detaches hosts, but the kernel's use and killing sessions are the owners'.
+  await sidebar(page).getByRole('link', { name: 'Hosts' }).click();
+  await expect(page.getByRole('button', { name: 'Add host' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Detach hery-mbp' })).toBeVisible();
+  await expect(page.getByRole('article', { name: 'Kernel' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Kill session/ })).toHaveCount(0);
+
+  await new_workspace_hosts(page, 'Lab');
+  const others = page.getByRole('region', { name: 'Hosts you can attach' });
+  await expect(others).toContainText('Hosts you enrolled in your other workspaces.');
+  await expect(others.getByRole('article')).toHaveCount(1);
+  await page.setViewportSize({ width: 360, height: 740 });
+  await expect(others.getByRole('article', { name: 'rina-laptop' })).toContainText('serves Main · enrolled by you');
+  await no_overflow(page);
+  await others.getByRole('button', { name: 'Attach to this workspace' }).click();
+  await expect(page.getByRole('article', { name: 'rina-laptop' })).toContainText('Serves Main, Lab · enrolled by you');
+  await expect(others).toHaveCount(0);
+  await no_overflow(page);
+});
+
+test('hosts: a member reads the workspace’s hosts and changes nothing', async ({ page }) => {
+  await page.goto('/?mock=1&mock_role=member#/hosts');
+  await expect(page.getByRole('article', { name: 'hery-mbp' })).toContainText('Serves Main');
+  for (const name of ['Add host', 'Detach hery-mbp', /^Kill session/]) await expect(page.getByRole('button', { name })).toHaveCount(0);
+  await expect(page.getByRole('region', { name: 'Hosts you can attach' })).toHaveCount(0);
 });

@@ -55,8 +55,8 @@ test('an invitation link from Members: the invitee signs in on its page and join
   await expect(ivy).toHaveURL(new RegExp(`#/tasks\\?workspace=${slug}$`));
   expect(await ivy.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
 
-  // As a member she reads the workspace's agents, runtimes and memory (the reads name the workspace).
-  for (const page_id of ['agents', 'runtimes', 'memory']) {
+  // As a member she reads the workspace's agents, runtimes, memory, hosts and catalog (the reads name the workspace).
+  for (const page_id of ['agents', 'runtimes', 'memory', 'hosts', 'catalog']) {
     await ivy.evaluate(([id, ws]) => (location.hash = `#/${id}?workspace=${ws}`), [page_id, slug]);
     await expect(ivy.getByRole('heading', { level: 1 })).toHaveText(page_id[0].toUpperCase() + page_id.slice(1));
     await expect(ivy.getByText('Loading…')).toHaveCount(0);

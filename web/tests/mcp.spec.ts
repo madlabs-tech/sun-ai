@@ -60,3 +60,37 @@ for (const [label, width, height] of [['desktop', 1280, 800], ['360 px', 360, 74
     await no_overflow(page);
   });
 }
+
+test('an MCP server added in one workspace is not another’s; a member can’t add one', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/?mock=1&mock_role=admin#/catalog');
+  const sidebar = page.getByRole('complementary', { name: 'Main' });
+  await sidebar.getByRole('button', { name: /^Workspace: / }).click();
+  await sidebar.getByRole('menu').getByRole('menuitem', { name: 'New workspace' }).click();
+  await page.getByRole('dialog').getByLabel('Name').fill('Lab');
+  await page.getByRole('dialog').getByRole('button', { name: 'Create workspace' }).click();
+  await sidebar.getByRole('link', { name: 'Catalog' }).click();
+  await page.getByRole('tab', { name: 'MCP servers' }).click();
+  // Main's catalog install isn't Lab's.
+  await expect(page.getByRole('article').filter({ hasText: 'github' })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Add MCP server' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Name').fill('labdocs');
+  await dialog.getByLabel('URL').fill('https://labdocs.example.com/mcp');
+  await dialog.getByRole('button', { name: 'Connect and add' }).click();
+  await dialog.getByRole('button', { name: 'Done' }).click();
+  await expect(page.getByRole('article').filter({ hasText: 'labdocs.example.com' })).toBeVisible();
+
+  await sidebar.getByRole('button', { name: /^Workspace: / }).click();
+  await sidebar.getByRole('menu').getByRole('menuitemradio', { name: 'Main', exact: true }).click();
+  await page.getByRole('tab', { name: 'MCP servers' }).click();
+  await expect(page.getByRole('article').filter({ hasText: 'github' })).toBeVisible();
+  await expect(page.getByRole('article').filter({ hasText: 'labdocs.example.com' })).toHaveCount(0);
+});
+
+test('a member sees the workspace’s MCP servers but no Add MCP server', async ({ page }) => {
+  await page.goto('/?mock=1&mock_role=member#/catalog');
+  await page.getByRole('tab', { name: 'MCP servers' }).click();
+  await expect(page.getByRole('article').filter({ hasText: 'github' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add MCP server' })).toHaveCount(0);
+});

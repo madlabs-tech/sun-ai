@@ -1,5 +1,5 @@
 <!-- Picks a secret of `scope` by name (values never come back), or adds one write-only: the open workspace's for
-     a BYO-key runtime, the ecosystem's (the default) for the MCP server form and catalog installs. -->
+     a BYO-key runtime or an MCP server, the ecosystem's by default. -->
 <script lang="ts">
   import { Button, Input, Select } from '@hryer/madlabs-design-system/svelte';
   import { ECOSYSTEM_SCOPE, api } from '../api/client';

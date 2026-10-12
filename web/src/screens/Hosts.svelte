@@ -1,15 +1,91 @@
+<!-- Hosts: the machines that run the open workspace's agent sessions. Each names the workspaces it serves and who
+     enrolled it. "Add host" (manage_runtimes) mints a join token that attaches the new host here; a deployment owner,
+     or whoever enrolled a host, may attach it to more workspaces; anyone with manage_runtimes may detach one. -->
 <script lang="ts">
   import { Badge, Button, Dialog, Icon, Input, Tag } from '@hryer/madlabs-design-system/svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import Loaded from '../lib/ui/Loaded.svelte';
   import { api } from '../lib/api/client';
+  import { auth } from '../lib/api/auth';
   import type { DeviceTool, Host, HostToken, KernelUse, SessionStats } from '../lib/api/types';
-  import { copy_text, error_text, toast } from '../lib/app_state.svelte';
+  import { app, can, copy_text, current_workspace, error_text, is_owner, toast, workspace_of } from '../lib/app_state.svelte';
   import { bytes, clock, uptime } from '../lib/format';
 
-  let load = $state(api.list_hosts());
-  const kernel = api.kernel_use().catch(() => null);
+  const workspace = current_workspace();
+  const here = workspace_of(workspace)?.name ?? 'this workspace';
+  /** The kernel's own use and killing sessions are the deployment's: its owners only. */
+  const owner = is_owner();
+  const manage = can('manage_runtimes');
+  /** The signed-in person's member id (the kernel's token holder has none). */
+  const me = app.memberships[0]?.member_id ?? null;
+
+  let load = $state(api.list_hosts(workspace));
+  const kernel: Promise<KernelUse | null> = owner ? api.kernel_use().catch(() => null) : Promise.resolve(null);
+
+  /** Usernames by member id, for "enrolled by": every account for an owner, this workspace's people otherwise. */
+  let names = $state<Record<string, string>>({});
+  (owner
+    ? auth.list_members().then((list) => list.map((m) => [m.id, m.username]))
+    : auth.workspace_members(workspace).then((list) => list.map((m) => [m.member_id, m.username]))
+  ).then(
+    (pairs) => (names = Object.fromEntries(pairs)),
+    () => {},
+  );
+  const enrolled = (h: Host) =>
+    h.enrolled_by === null
+      ? 'no enroller on record'
+      : h.enrolled_by === me
+        ? 'enrolled by you'
+        : `enrolled by ${names[h.enrolled_by] ?? 'someone outside this workspace'}`;
+  const serves = (h: Host) => h.workspace_ids.map((id) => workspace_of(id)?.name ?? '').filter(Boolean).join(', ') || 'no workspace';
+
+  /** Hosts not attached here that the caller may attach: any for an owner, the ones they enrolled otherwise. */
+  let others = $state<Host[]>([]);
+  async function load_others() {
+    if (!manage) return;
+    // ponytail: one list per workspace of the caller's; a route of "hosts I enrolled" if that grows.
+    const from = owner ? [undefined] : app.memberships.map((m) => m.workspace_id).filter((w) => w !== workspace);
+    const lists = await Promise.all(from.map((w) => api.list_hosts(w).catch(() => [] as Host[])));
+    const found = new Map<string, Host>();
+    for (const h of lists.flat()) if (!h.workspace_ids.includes(workspace) && (owner || (me && h.enrolled_by === me))) found.set(h.id, h);
+    others = [...found.values()];
+  }
+  load_others();
+
+  function reload() {
+    load = api.list_hosts(workspace);
+    load_others();
+  }
+
+  let acting = $state('');
+  async function attach(h: Host) {
+    acting = h.id;
+    try {
+      await api.attach_host(workspace, h.id);
+      toast('success', `${h.name} attached`, `${here}’s runs may go to it now.`);
+      reload();
+    } catch (e) {
+      toast('danger', `Couldn’t attach ${h.name}`, error_text(e));
+    }
+    acting = '';
+  }
+
+  let detaching = $state<Host | null>(null);
+  async function detach() {
+    if (!detaching) return;
+    const h = detaching;
+    acting = h.id;
+    try {
+      await api.detach_host(workspace, h.id);
+      toast('success', `${h.name} detached`, `${here}’s new runs no longer go to it.`);
+      detaching = null;
+      reload();
+    } catch (e) {
+      toast('danger', `Couldn’t detach ${h.name}`, error_text(e));
+    }
+    acting = '';
+  }
 
   let enrol = $state<HostToken | null>(null);
   let enrol_open = $state(false);
@@ -17,7 +93,7 @@
 
   async function add_host() {
     try {
-      enrol = await api.create_host_token();
+      enrol = await api.create_host_token(workspace);
       enrol_open = true;
     } catch (e) {
       toast('danger', 'Couldn’t create a join token', error_text(e));
@@ -57,7 +133,7 @@
       await api.kill_session(killing.session.session_id, reason.trim());
       toast('success', 'Session killed', 'Its run is paused. Resume it from the task.');
       killing = null;
-      load = api.list_hosts();
+      reload();
     } catch (e) {
       reason_error = error_text(e);
     } finally {
@@ -66,12 +142,12 @@
   }
 </script>
 
-<PageHeader title="Hosts" subtitle="Machines that run agent sessions. They dial in to the kernel.">
-  <Button size="sm" variant="ice" iconLeft="plus" onclick={add_host}>Add host</Button>
+<PageHeader title="Hosts" subtitle="Machines that run {here}’s agent sessions. They dial in to the kernel.">
+  {#if manage}<Button size="sm" variant="ice" iconLeft="plus" onclick={add_host}>Add host</Button>{/if}
 </PageHeader>
 
 <Dialog bind:open={enrol_open} onclose={() => (enrol_open = false)} title="Add a host">
-  <Input label="Run this on the machine" mono readonly value={command} hint="Works once, until {enrol ? clock(enrol.expires_at) : ''}.">
+  <Input label="Run this on the machine" mono readonly value={command} hint="Works once, until {enrol ? clock(enrol.expires_at) : ''}. The host serves {here}.">
     {#snippet trailing()}<IconButton icon="copy" label="Copy command" variant="ghost" size="sm" onclick={copy} />{/snippet}
   </Input>
   {#snippet footer()}<Button variant="secondary" onclick={() => (enrol_open = false)}>Done</Button>{/snippet}
@@ -91,6 +167,23 @@
   </Dialog>
 {/if}
 
+{#if detaching}
+  <Dialog open onclose={() => (detaching = null)} title="Detach {detaching.name}?">
+    <p class="sun-kill__lede">
+      {here}’s new runs stop going to it; sessions already on it finish. Only a deployment owner, or whoever enrolled it,
+      can attach it again.
+    </p>
+    {#snippet footer()}
+      <Button variant="secondary" onclick={() => (detaching = null)}>Cancel</Button>
+      <Button variant="danger" loading={acting === detaching?.id} onclick={detach}>Detach</Button>
+    {/snippet}
+  </Dialog>
+{/if}
+
+{#snippet status(h: Host)}
+  {#if h.status === 'online'}<Badge tone="success" dot>Online</Badge>{:else}<Badge dot>Offline</Badge>{/if}
+{/snippet}
+
 <div class="sun-page">
   {#await kernel then k}
     {#if k}
@@ -105,7 +198,7 @@
       </article>
     {/if}
   {/await}
-  <Loaded {load} empty="No hosts yet. Run sun host on a machine to connect it.">
+  <Loaded {load} empty={manage ? 'No hosts serve this workspace yet. Add one, or attach one below.' : 'No hosts serve this workspace yet. Ask a workspace admin to add one.'}>
     {#snippet row(h: Host)}
       <article class="sun-row" aria-label={h.name}>
         <span class="sun-tile"><Icon name="server" size={18} /></span>
@@ -116,6 +209,7 @@
             {#if h.disk?.length}· {bytes(disk_total(h))} in {h.disk.length} task {h.disk.length === 1 ? 'folder' : 'folders'}{/if}
             · seen <span class="ml-mono">{clock(h.last_seen_at)}</span>
           </div>
+          <div class="sun-row__meta">Serves {serves(h)} · {enrolled(h)}</div>
           <div class="sun-chips" style="margin-top:8px">
             {#each [...h.capabilities.runtimes, ...h.capabilities.devices] as c (c)}<Tag size="sm">{c}</Tag>{/each}
           </div>
@@ -130,19 +224,57 @@
                     <span class="ml-mono sun-session__id">{s.step_key ?? 'session'} · {s.session_id.slice(-6)}</span>
                     <span class="sun-session__use">{usage(s.rss_bytes, s.cpu_percent)} · up {uptime(s.uptime_s)}</span>
                   </div>
-                  <Button size="sm" variant="ghost" iconLeft="square" aria-label="Kill session {s.step_key ?? s.session_id} on {h.name}" onclick={() => ask_kill(h.name, s)}>Kill</Button>
+                  {#if owner}<Button size="sm" variant="ghost" iconLeft="square" aria-label="Kill session {s.step_key ?? s.session_id} on {h.name}" onclick={() => ask_kill(h.name, s)}>Kill</Button>{/if}
                 </li>
               {/each}
             </ul>
           {/if}
         </div>
-        {#if h.status === 'online'}<Badge tone="success" dot>Online</Badge>{:else}<Badge dot>Offline</Badge>{/if}
+        <div class="sun-row__aside">
+          {@render status(h)}
+          {#if manage}<Button size="sm" variant="secondary" aria-label="Detach {h.name}" onclick={() => (detaching = h)}>Detach</Button>{/if}
+        </div>
       </article>
     {/snippet}
   </Loaded>
+
+  {#if others.length}
+    <section class="sun-hosts__others" aria-labelledby="other-hosts">
+      <h2 id="other-hosts">Hosts you can attach</h2>
+      <p class="sun-row__meta">{owner ? 'Every other host of this deployment.' : 'Hosts you enrolled in your other workspaces.'}</p>
+      {#each others as h (h.id)}
+        <article class="sun-row" aria-label={h.name}>
+          <span class="sun-tile"><Icon name="server" size={18} /></span>
+          <div class="sun-row__body">
+            <div class="sun-row__title"><span class="ml-mono">{h.name}</span></div>
+            <div class="sun-row__meta"><span class="ml-mono">{h.capabilities.os}/{h.capabilities.arch}</span> · serves {serves(h)} · {enrolled(h)}</div>
+          </div>
+          <div class="sun-row__aside">
+            {@render status(h)}
+            <Button size="sm" variant="ice" iconLeft="link" loading={acting === h.id} onclick={() => attach(h)}>Attach to this workspace</Button>
+          </div>
+        </article>
+      {/each}
+    </section>
+  {/if}
 </div>
 
 <style>
+  .sun-hosts__others {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .sun-hosts__others h2 {
+    margin: var(--space-4) 0 0;
+    font-family: var(--font-heading);
+    font-weight: 400;
+    font-size: 20px;
+    color: var(--fg-1);
+  }
+  .sun-hosts__others > .sun-row__meta {
+    margin: 0;
+  }
   .sun-kill__lede {
     margin: 0 0 var(--space-3);
     font-size: var(--size-sm);
