@@ -21,6 +21,8 @@
   import Settings from './screens/Settings.svelte';
   import More from './screens/More.svelte';
   import SignIn from './screens/SignIn.svelte';
+  import Invite from './screens/Invite.svelte';
+  import Welcome from './screens/Welcome.svelte';
   import QuickAction from './screens/QuickAction.svelte';
   import Canvas from './screens/Canvas.svelte';
   import Projects from './screens/Projects.svelte';
@@ -66,8 +68,12 @@
 
 <svelte:window onkeydown={shortcut} />
 
-{#if app.signed_out || app.gate || route.page === 'login'}
+{#if route.page === 'invite'}
+  <Invite token={route.id ?? ''} />
+{:else if app.signed_out || app.gate || route.page === 'login'}
   <SignIn />
+{:else if app.loaded && !app.error && !app.workspaces.length}
+  <Welcome />
 {:else}
 <div class="sun-app" class:sun-app--collapsed={app.sidebar_collapsed}>
   <Sidebar on_new={open_new} />

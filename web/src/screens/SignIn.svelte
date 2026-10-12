@@ -5,14 +5,20 @@
      before anything else; the first-run owner (admin@sun.local) and a member from before invites give their email first.
      A right password that needs a second step shows SignInTwoStep; when the ecosystem requires 2-step and the
      person has none, they add one (TwoStepMethods) before going on.
-     #/login/failed, /denied, /invite and /seats explain a failed provider round trip. -->
+     #/login/failed, /denied, /invite and /seats explain a failed provider round trip.
+     When the deployment allows sign-up (or `invited`: an invitation link admits the email), "Create account" mails
+     a 6-digit code (POST /signup); the code signs them in and they choose a password like an invited member.
+     `embedded`: inside another page (the invitation link's), without the full-page frame. -->
 <script lang="ts">
   import { Button, Card, Input } from '@hryer/madlabs-design-system/svelte';
   import { auth, sso_login_url, type TwoStepAnswer, type TwoStepChallenge } from '../lib/api/auth';
+  import { ApiFailure } from '../lib/api/client';
   import { app, error_text, recheck_gate, sign_out, toast } from '../lib/app_state.svelte';
   import { go, route } from '../lib/router.svelte';
   import SignInTwoStep from './SignInTwoStep.svelte';
   import TwoStepMethods from './TwoStepMethods.svelte';
+
+  let { embedded = false, email: start_email = '', invited = false }: { embedded?: boolean; email?: string; invited?: boolean } = $props();
 
   const REASONS: Record<string, string> = {
     failed: 'Sign-in with your provider didn’t finish. Try again, or use your email.',
@@ -28,9 +34,17 @@
     const hash = location.hash;
     return hash.startsWith('#/') && !hash.startsWith('#/login') ? `?return_to=${encodeURIComponent(hash)}` : '';
   });
-  const providers = auth.providers().catch(() => ({ providers: [], local: true }));
+  const providers = auth.providers().catch(() => ({ providers: [], local: true, allow_signup: false }));
+  /** "Create account" shows: the deployment allows sign-up, or an invitation admits this email. */
+  let can_sign_up = $state(false);
+  providers.then((p) => (can_sign_up = invited || !!p.allow_signup));
 
-  let email = $state('');
+  /** Sign in, create an account (email), or type the code that mail brought. */
+  let mode = $state<'sign_in' | 'sign_up' | 'code'>('sign_in');
+  /** The email already has an account: offer sign-in instead. */
+  let exists = $state(false);
+  // svelte-ignore state_referenced_locally
+  let email = $state(start_email);
   let password = $state('');
   let confirm = $state('');
   let errors = $state<{ email?: string; password?: string; confirm?: string }>({});
@@ -102,13 +116,47 @@
     busy = false;
   }
 
+  function switch_to(next: typeof mode) {
+    [mode, errors, exists, password] = [next, {}, false, ''];
+  }
+
+  async function sign_up(e: SubmitEvent) {
+    e.preventDefault();
+    errors = { email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim()) ? undefined : 'Enter an email such as you@company.com.' };
+    exists = false;
+    if (errors.email) return;
+    busy = true;
+    try {
+      await auth.signup(email.trim());
+      switch_to('code');
+    } catch (err) {
+      if (err instanceof ApiFailure && err.status === 409) exists = true;
+      else errors = { email: error_text(err) };
+    }
+    busy = false;
+  }
+
+  async function verify(e: SubmitEvent) {
+    e.preventDefault();
+    errors = { password: /^\d{6}$/.test(password.trim()) ? undefined : 'Enter the 6 digits from the mail.' };
+    if (errors.password) return;
+    busy = true;
+    try {
+      await auth.sign_in(email.trim(), password.trim());
+      await signed_in();
+    } catch (err) {
+      errors = { password: error_text(err) };
+    }
+    busy = false;
+  }
+
   async function second_step(answer: TwoStepAnswer) {
     await auth.sign_in_two_step(answer);
     await signed_in();
   }
 </script>
 
-<main class="sign-in">
+<svelte:element this={embedded ? 'div' : 'main'} class="sign-in" class:sign-in--embedded={embedded}>
   {#if app.gate === 'password'}
     <Card as="form" class="sign-in__card" onsubmit={save_password} aria-labelledby="sign-in-title">
       <div class="sun-wordmark"><span class="sun-wordmark__sun">SUN</span><span class="sun-wordmark__by">by <b>MADLABS</b></span></div>
@@ -142,6 +190,29 @@
       <h1 id="sign-in-title" class="sign-in__title">Verify it’s you</h1>
       <SignInTwoStep challenge={pending} onanswer={second_step} oncancel={() => (pending = null)} />
     </Card>
+  {:else if mode === 'code'}
+    <Card as="form" class="sign-in__card" onsubmit={verify} aria-labelledby="sign-in-title">
+      <div class="sun-wordmark"><span class="sun-wordmark__sun">SUN</span><span class="sun-wordmark__by">by <b>MADLABS</b></span></div>
+      <h1 id="sign-in-title" class="sign-in__title">Check your email</h1>
+      <p class="sign-in__lead" role="status">We emailed a 6-digit code to <b>{email.trim()}</b>. It works once, for 15 minutes.</p>
+      <Input label="Code" autocomplete="one-time-code" inputmode="numeric" maxlength={6} bind:value={password} error={errors.password} />
+      <Button variant="ice" type="submit" block loading={busy}>Continue</Button>
+      <Button variant="ghost" block onclick={() => switch_to('sign_up')}>Use another email</Button>
+    </Card>
+  {:else if mode === 'sign_up'}
+    <Card as="form" class="sign-in__card" onsubmit={sign_up} aria-labelledby="sign-in-title">
+      <div class="sun-wordmark"><span class="sun-wordmark__sun">SUN</span><span class="sun-wordmark__by">by <b>MADLABS</b></span></div>
+      <h1 id="sign-in-title" class="sign-in__title">Create your account</h1>
+      {@render sso()}
+      <Input label="Email" type="email" autocomplete="email" inputmode="email" bind:value={email} error={errors.email} hint="We email you a code to confirm it’s yours." />
+      {#if exists}
+        <p class="sign-in__alert" role="alert">
+          This email already has an account. <button type="button" class="sign-in__link" onclick={() => switch_to('sign_in')}>Sign in instead.</button>
+        </p>
+      {/if}
+      <Button variant="ice" type="submit" block loading={busy}>Email me a code</Button>
+      <Button variant="ghost" block onclick={() => switch_to('sign_in')}>I have an account</Button>
+    </Card>
   {:else}
     <Card as="form" class="sign-in__card" onsubmit={submit} aria-labelledby="sign-in-title">
       <div class="sun-wordmark"><span class="sun-wordmark__sun">SUN</span><span class="sun-wordmark__by">by <b>MADLABS</b></span></div>
@@ -151,12 +222,7 @@
         <p class="sign-in__alert" role="alert">{reason}</p>
       {/if}
 
-      {#await providers then p}
-        {#each p.providers as provider (provider.id)}
-          <Button variant="secondary" block class="sign-in__provider" iconLeft="log-in" href={sso_login_url(provider.id) + return_to}>Continue with {provider.name}</Button>
-        {/each}
-        {#if p.providers.length}<div class="sign-in__or"><span>or</span></div>{/if}
-      {/await}
+      {@render sso()}
 
       <Input label="Email" type="email" autocomplete="username" inputmode="email" bind:value={email} error={errors.email} />
       <Input
@@ -169,9 +235,23 @@
       />
       <Button variant="ice" type="submit" block loading={busy}>Sign in</Button>
       <p class="sign-in__lead">Forgot it? Ask an admin to email you a reset code.</p>
+      {#if can_sign_up}
+        <Button variant="secondary" block iconLeft="user-plus" onclick={() => switch_to('sign_up')}>Create account</Button>
+      {:else}
+        <p class="sign-in__lead">New here? Only invited people can sign in. Ask a workspace admin for an invitation.</p>
+      {/if}
     </Card>
   {/if}
-</main>
+</svelte:element>
+
+{#snippet sso()}
+  {#await providers then p}
+    {#each p.providers as provider (provider.id)}
+      <Button variant="secondary" block class="sign-in__provider" iconLeft="log-in" href={sso_login_url(provider.id) + return_to}>Continue with {provider.name}</Button>
+    {/each}
+    {#if p.providers.length}<div class="sign-in__or"><span>or</span></div>{/if}
+  {/await}
+{/snippet}
 
 <style>
   .sign-in {
@@ -180,6 +260,24 @@
     place-items: center;
     padding: var(--space-5) var(--space-4);
     box-sizing: border-box;
+  }
+  .sign-in--embedded {
+    min-height: 0;
+    padding: 0;
+  }
+  .sign-in__link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-weight: 600;
+    color: var(--fg-1);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .sign-in__link:focus-visible {
+    outline: none;
+    box-shadow: var(--ring-focus);
   }
   .sign-in > :global(.sign-in__card) {
     width: 100%;
