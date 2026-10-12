@@ -218,3 +218,165 @@ async fn hosts_count_the_hosts_attached_to_the_workspace() {
     let attached = k.store.read().await.unwrap().hosts_in(ops).await.unwrap();
     assert_eq!(attached.len(), 1);
 }
+
+/// A stand-in for Sun Cloud's policy endpoint answering `reply`.
+async fn cloud(reply: std::sync::Arc<std::sync::Mutex<(u16, Value)>>) -> String {
+    use axum::extract::Path;
+    let app = axum::Router::new().route(
+        "/api/v1/policy/{id}",
+        axum::routing::get(move |Path(id): Path<String>| {
+            let reply = reply.clone();
+            async move {
+                let (status, mut body) = reply.lock().unwrap().clone();
+                if body.is_object() {
+                    body["workspace_id"] = json!(id);
+                }
+                (StatusCode::from_u16(status).unwrap(), axum::Json(body))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    url
+}
+
+/// Through the real cloud client: a plan the cloud stops answering for
+/// (500 after a success) still holds, as `stale`; once the cloud says the
+/// workspace is unknown (404), it is on Free with no limits.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_cloud_plan_is_still_enforced() {
+    let k = common::kernel().await;
+    let reply = std::sync::Arc::new(std::sync::Mutex::new((
+        200,
+        json!({ "schema_version": 1, "policy_revision": 1, "plan": "pro", "paid": true,
+            "limits": { "seats": 1, "runtimes": null, "byo_keys": null, "agents": null,
+                "hosts": null }, "valid_for_seconds": 1 }),
+    )));
+    let policy = sun_api::CloudPolicy::new(&cloud(reply.clone()).await, "t0k").unwrap();
+    let app = &sun_api::router(k.api.clone().with_entitlements(std::sync::Arc::new(policy)));
+    let ops = workspace(app, common::TOKEN, "Ops").await;
+    let invite = |email: &str| Some(json!({ "email": email, "role": "member" }));
+    let invitations = format!("/api/v1/workspaces/{ops}/invitations");
+    let entitlement = format!("/api/v1/entitlement?workspace={ops}");
+    let limited = |value: &Value| value["error"]["code"] == "plan_limit";
+
+    // Its one member fills its one seat.
+    member_token_in(&k.store, "bo", &[(ops, Role::Owner)]).await;
+    let (status, value) = call(app, "POST", &invitations, invite("cat@corp.io")).await;
+    assert!(
+        status == StatusCode::FORBIDDEN && limited(&value),
+        "{status} {value}"
+    );
+    let (_, plan) = call(app, "GET", &entitlement, None).await;
+    assert_eq!(plan["status"], "cloud", "{plan}");
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    *reply.lock().unwrap() = (500, json!({}));
+    let (_, plan) = call(app, "GET", &entitlement, None).await;
+    assert_eq!(
+        (&plan["status"], &plan["limits"]["seats"]),
+        (&json!("stale"), &json!(1))
+    );
+    let (status, value) = call(app, "POST", &invitations, invite("cat@corp.io")).await;
+    assert!(
+        status == StatusCode::FORBIDDEN && limited(&value),
+        "a stale plan still limits: {status} {value}"
+    );
+
+    *reply.lock().unwrap() = (404, json!({ "error": "unknown workspace" }));
+    let (_, plan) = call(app, "GET", &entitlement, None).await;
+    assert_eq!(
+        (&plan["plan"], &plan["limits"]["seats"]),
+        (&json!("free"), &Value::Null)
+    );
+    let (status, value) = call(app, "POST", &invitations, invite("cat@corp.io")).await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+}
+
+/// Runtimes count up to the limit: one below is allowed, at it refused.
+#[tokio::test]
+async fn runtimes_count_up_to_the_limit() {
+    let k = common::kernel().await;
+    let app = &k.app;
+    let ops = workspace(app, common::TOKEN, "Ops").await;
+    let limits = Limits {
+        runtimes: Some(2),
+        ..Limits::default()
+    };
+    common::plan(&k, ops, limits);
+    let runtimes = format!("/api/v1/runtimes?workspace={ops}");
+    let byo = |name: &str| {
+        Some(json!({ "name": name, "source": "byo_key",
+            "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen" } }))
+    };
+    for name in ["one", "two"] {
+        let (status, value) = call(app, "POST", &runtimes, byo(name)).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {value}");
+    }
+    let (status, value) = call(app, "POST", &runtimes, byo("three")).await;
+    assert_eq!(
+        (status, &value["error"]["code"]),
+        (StatusCode::FORBIDDEN, &json!("plan_limit"))
+    );
+}
+
+/// A runtime row a chain name made doesn't count; turning it into a BYO key
+/// runtime with `PUT` is one more BYO key, so the plan applies there too.
+#[tokio::test]
+#[ignore = "bug: PUT /runtimes/{name} changes the source without the plan check"]
+async fn changing_a_runtime_into_a_byo_key_counts_against_the_plan() {
+    use sun_core::model::RuntimeSource;
+    use sun_store::RuntimeRepo;
+    let k = common::kernel().await;
+    let app = &k.app;
+    let ops = workspace(app, common::TOKEN, "Ops").await;
+    let limits = Limits {
+        runtimes: Some(1),
+        byo_keys: Some(1),
+        ..Limits::default()
+    };
+    common::plan(&k, ops, limits);
+    let byo = |name: &str| {
+        json!({ "name": name, "source": "byo_key",
+            "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen" } })
+    };
+    let runtimes = format!("/api/v1/runtimes?workspace={ops}");
+    let (status, value) = call(app, "POST", &runtimes, Some(byo("one"))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    // A run named `codex` in a chain: the row it makes is free.
+    let mut tx = k.store.begin().await.unwrap();
+    tx.upsert_runtime(ops, "codex", "codex", RuntimeSource::ByoRuntime)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let path = format!("/api/v1/runtimes/codex?workspace={ops}");
+    let (status, value) = call(app, "PUT", &path, Some(byo("codex"))).await;
+    assert_eq!(
+        (status, &value["error"]["code"]),
+        (StatusCode::FORBIDDEN, &json!("plan_limit")),
+        "{value}"
+    );
+}
+
+/// Two agents created at once when one slot is left: the plan holds.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "bug: the agent count and the insert are two transactions; both pass"]
+async fn the_last_agent_slot_goes_to_one_of_two_racing_creates() {
+    let k = common::kernel().await;
+    let app = &k.app;
+    let ops = workspace(app, common::TOKEN, "Ops").await;
+    let limits = Limits {
+        agents: Some(1),
+        ..Limits::default()
+    };
+    common::plan(&k, ops, limits);
+    let agents = format!("/api/v1/agents?workspace={ops}");
+    let agent = |name: &str| Some(json!({ "name": name, "runtime_chain": ["codex"] }));
+    let (a, b) = tokio::join!(
+        call(app, "POST", &agents, agent("Ada")),
+        call(app, "POST", &agents, agent("Bo")),
+    );
+    let (_, listed) = call(app, "GET", &agents, None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{} / {}", a.0, b.0);
+}
