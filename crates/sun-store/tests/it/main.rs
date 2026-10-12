@@ -4,6 +4,7 @@ mod acl;
 mod agent;
 mod export;
 mod migrations;
+mod multitenant_upgrade;
 mod permission_split;
 mod project;
 mod pull_request;

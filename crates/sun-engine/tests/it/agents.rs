@@ -824,3 +824,82 @@ async fn agents_and_their_runtimes_stay_in_their_workspace() {
     );
     k.host.finish.store(true, Ordering::SeqCst);
 }
+
+/// A run's context gets only its own workspace's memory: with an active
+/// rule in Main and another in Ops, an Ops task's session reads Ops' rule
+/// and never Main's, and the other way round.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_gets_only_its_workspaces_memory() {
+    use sun_core::model::{MemoryItem, MemoryScope, MemoryStatus};
+    use sun_store::MemoryRepo;
+
+    let k = kernel().await;
+    let policy = sun_core::model::SignupPolicy::default();
+    let ops = k
+        .engine
+        .create_workspace("Ops", None, None, &policy, "user:me")
+        .await
+        .unwrap()
+        .id;
+    k.engine
+        .import_to_workspace(ops, WorkspaceItem::Host(k.host_id), "user:me")
+        .await
+        .unwrap();
+    let mut tx = k.store.begin().await.unwrap();
+    for (workspace, body) in [
+        (WorkspaceId::MAIN, "Main rule: deploy with blue-green."),
+        (ops, "Ops rule: page the on-call lead."),
+    ] {
+        let item = MemoryItem {
+            id: sun_core::MemoryItemId::generate(),
+            workspace_id: workspace,
+            scope: MemoryScope::Ecosystem,
+            scope_id: None,
+            body: body.into(),
+            target: None,
+            reason: "r".into(),
+            source_run: None,
+            status: MemoryStatus::Active,
+            author: "sun".into(),
+            reviewed_by: None,
+            created_at: chrono::Utc::now(),
+        };
+        tx.insert_memory(&item, body).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    let fields = AgentFields {
+        name: Some("Ada".into()),
+        runtime_chain: Some(vec!["fake".into()]),
+        ..AgentFields::default()
+    };
+    let ops_ada = k
+        .engine
+        .create_agent(ops, fields, "user:me")
+        .await
+        .unwrap()
+        .id;
+    let new = NewTask {
+        workspace_id: Some(ops),
+        title: "Fix the login".into(),
+        body: String::new(),
+        workflow: WorkflowPick::Agent(ops_ada),
+        exec_env: None,
+        priority: Priority::None,
+        status: TaskStatus::Todo,
+        project_id: None,
+        actor: None,
+    };
+    let ops_task = k.engine.create_task(new).await.unwrap().id;
+    k.working(ops_task).await;
+    let main_ada = k.agent("Ada").await;
+    k.task(main_ada, TaskStatus::Todo).await;
+    eventually("both sessions", || async { k.host.envelopes().len() == 2 }).await;
+    // Ops' session started first (it was working before Main's task).
+    let envelopes = k.host.envelopes();
+    let (in_ops, in_main) = (&envelopes[0], &envelopes[1]);
+    assert!(in_ops.contains("Ops rule"), "{in_ops}");
+    assert!(!in_ops.contains("Main rule"), "{in_ops}");
+    assert!(in_main.contains("Main rule"), "{in_main}");
+    assert!(!in_main.contains("Ops rule"), "{in_main}");
+    k.host.finish.store(true, Ordering::SeqCst);
+}

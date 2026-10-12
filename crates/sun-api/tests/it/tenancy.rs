@@ -24,7 +24,7 @@ use sun_store::{InvitationRepo, LoginRepo, MemberRepo, MembershipRepo};
 const MAIN: WorkspaceId = WorkspaceId::MAIN;
 
 /// `method path` as the holder of `token` (`None`: nobody signed in).
-async fn call(
+pub(crate) async fn call(
     app: &Router,
     token: Option<&str>,
     method: &str,
@@ -60,20 +60,20 @@ async fn call(
     }
 }
 
-async fn as_token(app: &Router, method: &str, path: &str, body: Option<Value>) -> Value {
+pub(crate) async fn as_token(app: &Router, method: &str, path: &str, body: Option<Value>) -> Value {
     let (status, value) = call(app, Some(TOKEN), method, path, body).await;
     assert!(status.is_success(), "{method} {path}: {status} {value}");
     value
 }
 
-async fn smtp_on(app: &Router) {
+pub(crate) async fn smtp_on(app: &Router) {
     let smtp = json!({ "host": "smtp.corp.io", "port": 587, "from": "sun@corp.io",
         "tls": "starttls" });
     as_token(app, "PUT", "/api/v1/smtp", Some(smtp)).await;
 }
 
 /// The six-digit code in the last mail.
-fn code_in(k: &common::Kernel) -> String {
+pub(crate) fn code_in(k: &common::Kernel) -> String {
     k.mails
         .last()
         .body
@@ -85,7 +85,7 @@ fn code_in(k: &common::Kernel) -> String {
 
 /// Signs `email` up, verifies it with the mailed code and sets a password:
 /// their session token.
-async fn sign_up(k: &common::Kernel, app: &Router, email: &str) -> String {
+pub(crate) async fn sign_up(k: &common::Kernel, app: &Router, email: &str) -> String {
     let body = Some(json!({ "email": email }));
     let (status, value) = call(app, None, "POST", "/api/v1/signup", body).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{value}");
@@ -100,7 +100,7 @@ async fn sign_up(k: &common::Kernel, app: &Router, email: &str) -> String {
 }
 
 /// A session of a new verified member `name` with `roles` (in the store).
-async fn member(
+pub(crate) async fn member(
     store: &sun_store::Store,
     name: &str,
     roles: &[(WorkspaceId, Role)],
@@ -134,7 +134,7 @@ async fn member(
 }
 
 /// Workspace `name` made by `token`'s holder: its id.
-async fn workspace(app: &Router, token: &str, name: &str) -> String {
+pub(crate) async fn workspace(app: &Router, token: &str, name: &str) -> String {
     let body = Some(json!({ "name": name }));
     let (status, value) = call(app, Some(token), "POST", "/api/v1/workspaces", body).await;
     assert_eq!(status, StatusCode::CREATED, "{value}");
@@ -287,7 +287,7 @@ async fn tenancy_anyone_creates_a_workspace_unless_the_deployment_says_no() {
 }
 
 /// The link token in the last mail.
-fn link_token(link: &str) -> String {
+pub(crate) fn link_token(link: &str) -> String {
     link.split("#/invite/").nth(1).unwrap().trim().to_owned()
 }
 

@@ -96,7 +96,7 @@ impl RepoRepo for Tx {
 
     async fn repos(&mut self, workspace: WorkspaceId) -> Result<Vec<Repo>> {
         sqlx::query(&format!(
-            "SELECT {REPO_COLUMNS} FROM repo WHERE workspace_id = $1 ORDER BY id"
+            "SELECT {REPO_COLUMNS} FROM repo WHERE workspace_id = $1 ORDER BY rowid"
         ))
         .bind(workspace.to_string())
         .fetch_all(self.conn())
