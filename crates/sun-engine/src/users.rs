@@ -13,6 +13,7 @@
 //! password, which goes in and out of the sealed secret store.
 
 use serde_json::json;
+use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::{
     AuditAction, FIRST_ADMIN_EMAIL, LOCAL_ISSUER, Member, OWNER_ISSUER, Role, SignupPolicy,
     SmtpSettings, WorkspaceInvitation, WorkspaceMember, normalize_email,
@@ -123,6 +124,7 @@ impl Engine {
     /// `is_owner`) to `workspace` as `role`, signing in first with `first`
     /// (an invite code, or a password an admin set, which also counts as a
     /// verified email), audited as `actor`, in one transaction.
+    /// `PlanLimit` when `plan` has no seat left.
     #[allow(clippy::too_many_arguments)]
     pub async fn invite_member(
         &self,
@@ -133,9 +135,11 @@ impl Engine {
         role: Role,
         first: FirstSignIn<'_>,
         actor: &str,
+        plan: &Entitlement,
     ) -> Result<Member> {
         let mut tx = self.store.begin().await?;
         let name = tx.get_workspace(workspace).await?.name;
+        plan.check(Quota::Seats, tx.members_of(workspace).await?.len())?;
         let member = tx.invite_member(email, username, is_owner).await?;
         tx.add_member(workspace, member.id, role).await?;
         let how = match first {
@@ -299,11 +303,13 @@ impl Engine {
     /// is used up and they join its workspace with its role (or keep a
     /// higher role they already have there), audited. `Forbidden` unless
     /// it names their verified email; `InvalidInput` when it isn't pending
-    /// (used, declined, revoked or expired).
+    /// (used, declined, revoked or expired); `PlanLimit` when joining needs
+    /// a seat `plan` doesn't have (a member taking a new role keeps theirs).
     pub async fn accept_invitation(
         &self,
         invitation: InvitationId,
         id: MemberId,
+        plan: &Entitlement,
     ) -> Result<WorkspaceMember> {
         let mut tx = self.store.begin().await?;
         let found = tx.get_invitation(invitation).await?;
@@ -315,6 +321,7 @@ impl Engine {
         let workspace = found.workspace_id;
         match tx.role_of(workspace, id).await? {
             None => {
+                plan.check(Quota::Seats, tx.members_of(workspace).await?.len())?;
                 tx.add_member(workspace, id, found.role).await?;
             }
             Some(role) if !role.covers(found.role) => {

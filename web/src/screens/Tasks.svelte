@@ -11,7 +11,7 @@
   import Onboarding from './Onboarding.svelte';
   import TaskBoard, { type Lane } from './TaskBoard.svelte';
   import TaskRows, { type TableColumn } from './TaskRows.svelte';
-  import { app, current_workspace, error_text, local_get, local_set, toast } from '../lib/app_state.svelte';
+  import { app, can, current_workspace, error_text, local_get, local_set, toast } from '../lib/app_state.svelte';
   import { api } from '../lib/api/client';
   import { href } from '../lib/router.svelte';
   import { COLUMNS, PRIORITIES, PRIORITY_RANK, STATUS_BADGE, STATUS_ICON, assignee_of } from '../lib/format';
@@ -249,7 +249,7 @@
       />
       <Switch label="Show cancelled" checked={display.show_cancelled} onchange={(e: Event) => set({ show_cancelled: (e.currentTarget as HTMLInputElement).checked })} />
     </Menu>
-    <IconButton icon="plus" label="New task" variant="ice" size="sm" onclick={on_new} />
+    {#if can('run')}<IconButton icon="plus" label="New task" variant="ice" size="sm" onclick={on_new} />{/if}
   </div>
 </PageHeader>
 

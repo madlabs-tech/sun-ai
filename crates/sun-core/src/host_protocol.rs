@@ -812,7 +812,9 @@ impl From<&Error> for ReplyBody {
     fn from(error: &Error) -> Self {
         let (code, message) = match error {
             // The protocol has no `forbidden` code; hosts never authorize.
-            Error::InvalidInput(m) | Error::Forbidden(m) => ("invalid_input", m.clone()),
+            Error::InvalidInput(m) | Error::Forbidden(m) | Error::PlanLimit(m) => {
+                ("invalid_input", m.clone())
+            }
             Error::Refused { message, .. } => ("invalid_input", message.clone()),
             Error::NotFound(m) => ("not_found", m.clone()),
             Error::Unavailable(m) => ("unavailable", m.clone()),

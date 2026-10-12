@@ -86,7 +86,7 @@
   const tasks = (n: number) => (n === 1 ? '1 open task' : `${n} open tasks`);
 </script>
 
-<PageHeader title="Agents" subtitle="Shared by every workspace. Assign one to a task and it works with these instructions, runtimes and skills.">
+<PageHeader title="Agents" subtitle="The agents of this workspace. Assign one to a task and it works with these instructions, runtimes and skills.">
   {#if manage}<Button variant="ice" iconLeft="plus" onclick={() => start(null)}>New agent</Button>{/if}
 </PageHeader>
 

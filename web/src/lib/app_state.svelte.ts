@@ -139,8 +139,9 @@ function pick_workspace(): string {
   return workspace.id;
 }
 
-/** The current workspace's id ('' before the workspaces load). */
-export const current_workspace = () => workspace_by_ref(route.workspace)?.id ?? '';
+/** The current workspace's id ('' before the workspaces load). A link without `?workspace=` stays on the one
+ *  shown (the URL gets it back), so a page it opens never lists with no workspace (an owner's: every one's). */
+export const current_workspace = () => workspace_by_ref(route.workspace)?.id ?? (route.workspace ? '' : app.workspace);
 
 /** The current workspace, once the workspaces are loaded. */
 export const workspace_of = (id: string) => app.workspaces.find((b) => b.id === id);

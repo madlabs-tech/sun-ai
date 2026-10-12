@@ -228,7 +228,12 @@ impl Kernel {
             ..AgentFields::default()
         };
         self.engine
-            .create_agent(WorkspaceId::MAIN, fields, "user:me")
+            .create_agent(
+                WorkspaceId::MAIN,
+                fields,
+                "user:me",
+                &crate::support::unlimited(),
+            )
             .await
             .unwrap()
             .id
@@ -500,7 +505,12 @@ async fn system_workflows_are_hidden_and_follow_agent_edits() {
     };
     let err = k
         .engine
-        .create_agent(WorkspaceId::MAIN, twin, "user:me")
+        .create_agent(
+            WorkspaceId::MAIN,
+            twin,
+            "user:me",
+            &crate::support::unlimited(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
@@ -542,7 +552,12 @@ async fn the_prompt_is_the_instructions_then_the_task_then_the_waking_comment() 
     };
     let bob = k
         .engine
-        .create_agent(WorkspaceId::MAIN, fields, "user:me")
+        .create_agent(
+            WorkspaceId::MAIN,
+            fields,
+            "user:me",
+            &crate::support::unlimited(),
+        )
         .await
         .unwrap()
         .id;
@@ -584,7 +599,12 @@ async fn the_prompt_is_the_instructions_then_the_task_then_the_waking_comment() 
     };
     let cy = k
         .engine
-        .create_agent(WorkspaceId::MAIN, fields, "user:me")
+        .create_agent(
+            WorkspaceId::MAIN,
+            fields,
+            "user:me",
+            &crate::support::unlimited(),
+        )
         .await
         .unwrap()
         .id;
@@ -757,7 +777,7 @@ async fn agents_and_their_runtimes_stay_in_their_workspace() {
     let main_ada = k.agent("Ada").await;
     let ops_ada = k
         .engine
-        .create_agent(ops, fields(), "user:me")
+        .create_agent(ops, fields(), "user:me", &crate::support::unlimited())
         .await
         .unwrap();
     assert_eq!(ops_ada.workspace_id, ops, "one name per workspace");
@@ -804,7 +824,7 @@ async fn agents_and_their_runtimes_stay_in_their_workspace() {
     assert!(k.host.adapters.lock().unwrap().is_empty());
     let host = WorkspaceItem::Host(k.host_id);
     k.engine
-        .import_to_workspace(ops, host, "user:me")
+        .import_to_workspace(ops, host, "user:me", &crate::support::unlimited())
         .await
         .unwrap();
     k.queue.wake();
@@ -842,7 +862,12 @@ async fn a_run_gets_only_its_workspaces_memory() {
         .unwrap()
         .id;
     k.engine
-        .import_to_workspace(ops, WorkspaceItem::Host(k.host_id), "user:me")
+        .import_to_workspace(
+            ops,
+            WorkspaceItem::Host(k.host_id),
+            "user:me",
+            &crate::support::unlimited(),
+        )
         .await
         .unwrap();
     let mut tx = k.store.begin().await.unwrap();
@@ -874,7 +899,7 @@ async fn a_run_gets_only_its_workspaces_memory() {
     };
     let ops_ada = k
         .engine
-        .create_agent(ops, fields, "user:me")
+        .create_agent(ops, fields, "user:me", &crate::support::unlimited())
         .await
         .unwrap()
         .id;

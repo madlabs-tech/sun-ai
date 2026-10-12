@@ -7,7 +7,7 @@
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import { api } from '../lib/api/client';
   import type { Project } from '../lib/api/types';
-  import { app, current_workspace, error_text, load_workspace, toast } from '../lib/app_state.svelte';
+  import { app, can, current_workspace, error_text, load_workspace, toast } from '../lib/app_state.svelte';
   import { href } from '../lib/router.svelte';
 
   let projects = $state<Project[] | null>(null);
@@ -80,7 +80,7 @@
 </script>
 
 <PageHeader title="Projects" subtitle="Group related tasks and follow them together.">
-  <Button variant="ice" size="sm" iconLeft="plus" onclick={() => open_form(null)}>New project</Button>
+  {#if can('run')}<Button variant="ice" size="sm" iconLeft="plus" onclick={() => open_form(null)}>New project</Button>{/if}
 </PageHeader>
 
 <div class="sun-page">
@@ -98,7 +98,7 @@
         {#if p.description}<div class="sun-row__meta project__desc">{p.description}</div>{/if}
         <div class="sun-row__meta ml-mono">{c.open} open · {c.done} done</div>
       </div>
-      <span class="project__menu">
+      {#if can('run')}<span class="project__menu">
         <Menu
           label="Project actions"
           name="Actions for {p.name}"
@@ -108,7 +108,7 @@
             { label: 'Delete', icon: 'trash-2', danger: true, onselect: () => ((deleting = p), (delete_error = '')) },
           ]}
         />
-      </span>
+      </span>{/if}
     </article>
   {/each}
 </div>

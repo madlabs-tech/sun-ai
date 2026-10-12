@@ -3,7 +3,8 @@
      instead, for settings such as the Display options. With `text` the trigger is a labelled
      button, without it an icon button whose tooltip is `label`; `trigger` renders a custom one (the
      account menu's workspace button) and `header` content above the items. A `null` item is a separator;
-   an item whose `group` differs from the one before starts a labelled group. -->
+   an item whose `group` differs from the one before starts a labelled group. `readonly` shows
+     only the icon and `text`, for someone who may read the value but not change it. -->
 <script lang="ts" module>
   import type { Snippet } from 'svelte';
 
@@ -43,6 +44,7 @@
     variant = 'ghost',
     trigger: custom_trigger,
     header,
+    readonly = false,
   }: {
     label: string;
     /** The trigger's icon; not used with a custom `trigger`. */
@@ -57,6 +59,8 @@
     trigger?: Snippet<[attrs: Record<string, unknown>]>;
     /** Shown above the items, outside the role="menu" (e.g. who is signed in). */
     header?: Snippet;
+    /** Just the value: no trigger, no menu. */
+    readonly?: boolean;
   } = $props();
 
   const uid = $props.id();
@@ -137,7 +141,9 @@
   const attrs = $derived({ popovertarget: uid, 'aria-haspopup': children ? 'dialog' : 'menu', 'aria-expanded': open } as const);
 </script>
 
-{#if custom_trigger}
+{#if readonly}
+  <span class="menu__value">{#if icon}<Icon name={icon} size={16} />{/if}{text}</span>
+{:else if custom_trigger}
   {@render custom_trigger({ ...attrs, onkeydown: trigger_key })}
 {:else if text}
   <Button type="button" variant={variant} size="sm" iconLeft={icon} aria-label="{label}: {text}" {...attrs} onkeydown={trigger_key}>{text}</Button>
@@ -145,6 +151,7 @@
   <IconButton type="button" icon={icon ?? 'ellipsis'} {label} {variant} size="sm" aria-label={name ?? label} {...attrs} onkeydown={trigger_key} />
 {/if}
 
+{#if !readonly}
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions: arrow keys move between the items inside -->
 <div bind:this={panel} id={uid} popover="auto" class="menu" role="presentation" onbeforetoggle={place} ontoggle={toggled} onkeydown={panel_key}>
   {@render header?.()}
@@ -180,8 +187,17 @@
     </div>
   {/if}
 </div>
+{/if}
 
 <style>
+  .menu__value {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
+    color: var(--fg-1);
+    overflow-wrap: anywhere;
+  }
   /* Popover: fixed, placed by `place()` next to the trigger. */
   .menu {
     position: fixed;

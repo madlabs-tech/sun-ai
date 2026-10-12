@@ -35,3 +35,9 @@ pub fn systemone(body: &'static str) -> DecisionClient {
     });
     DecisionClient::new(&url, None).unwrap()
 }
+
+/// A plan without caps (Community), for writes that take one.
+pub fn unlimited() -> sun_core::entitlement::Entitlement {
+    use sun_core::entitlement::{Entitlement, EntitlementStatus};
+    Entitlement::community(EntitlementStatus::Community)
+}

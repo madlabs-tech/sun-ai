@@ -213,16 +213,25 @@ async fn invitations_accept_once_for_the_invited_email_and_expire() {
     );
     // Only the invited email takes it.
     assert!(forbidden(
-        engine.accept_invitation(invitation.id, eve).await
+        engine
+            .accept_invitation(invitation.id, eve, &crate::support::unlimited())
+            .await
     ));
     assert!(forbidden(
         engine.decline_invitation(invitation.id, eve).await
     ));
-    let joined = engine.accept_invitation(invitation.id, bob).await.unwrap();
+    let joined = engine
+        .accept_invitation(invitation.id, bob, &crate::support::unlimited())
+        .await
+        .unwrap();
     assert_eq!((joined.workspace_id, joined.role), (ops, Role::Admin));
     assert!(engine.member_access(bob).await.unwrap().sees(ops));
     // Used once: no reuse, no decline afterwards, no re-invite of a member.
-    assert!(invalid(engine.accept_invitation(invitation.id, bob).await));
+    assert!(invalid(
+        engine
+            .accept_invitation(invitation.id, bob, &crate::support::unlimited())
+            .await
+    ));
     assert!(invalid(engine.decline_invitation(invitation.id, bob).await));
     assert!(invalid(invite("bob@acme.io", Role::Viewer, "t2").await));
     assert!(engine.invitations(ops).await.unwrap().is_empty());
@@ -241,11 +250,19 @@ async fn invitations_accept_once_for_the_invited_email_and_expire() {
         .await
         .unwrap();
     assert!(engine.my_invitations(eve).await.unwrap().is_empty());
-    assert!(invalid(engine.accept_invitation(old.id, eve).await));
+    assert!(invalid(
+        engine
+            .accept_invitation(old.id, eve, &crate::support::unlimited())
+            .await
+    ));
     // Declined and revoked ones are done too.
     let declined = invite("eve@acme.io", Role::Member, "t4").await.unwrap();
     engine.decline_invitation(declined.id, eve).await.unwrap();
-    assert!(invalid(engine.accept_invitation(declined.id, eve).await));
+    assert!(invalid(
+        engine
+            .accept_invitation(declined.id, eve, &crate::support::unlimited())
+            .await
+    ));
     let revoked = invite("eve@acme.io", Role::Member, "t5").await.unwrap();
     engine
         .revoke_invitation(revoked.id, "user:ann")
@@ -254,7 +271,11 @@ async fn invitations_accept_once_for_the_invited_email_and_expire() {
     assert!(invalid(
         engine.revoke_invitation(revoked.id, "user:ann").await
     ));
-    assert!(invalid(engine.accept_invitation(revoked.id, eve).await));
+    assert!(invalid(
+        engine
+            .accept_invitation(revoked.id, eve, &crate::support::unlimited())
+            .await
+    ));
     assert_eq!(engine.member_access(eve).await.unwrap().role_in(ops), None);
 
     // An unverified account can't accept, even with the right email.
@@ -265,7 +286,9 @@ async fn invitations_accept_once_for_the_invited_email_and_expire() {
         .unwrap();
     let for_fay = invite("fay@acme.io", Role::Viewer, "t6").await.unwrap();
     assert!(forbidden(
-        engine.accept_invitation(for_fay.id, fay.id).await
+        engine
+            .accept_invitation(for_fay.id, fay.id, &crate::support::unlimited())
+            .await
     ));
 
     // Joined some other way while the invitation was pending: accepting
@@ -291,11 +314,19 @@ async fn invitations_accept_once_for_the_invited_email_and_expire() {
         .unwrap();
     tx.commit().await.unwrap();
     assert_eq!(
-        engine.accept_invitation(low.id, gus).await.unwrap().role,
+        engine
+            .accept_invitation(low.id, gus, &crate::support::unlimited())
+            .await
+            .unwrap()
+            .role,
         Role::Member
     );
     assert_eq!(
-        engine.accept_invitation(high.id, gus).await.unwrap().role,
+        engine
+            .accept_invitation(high.id, gus, &crate::support::unlimited())
+            .await
+            .unwrap()
+            .role,
         Role::Admin
     );
 }
@@ -333,7 +364,10 @@ async fn a_workspace_keeps_its_last_owner() {
         )
         .await
         .unwrap();
-    engine.accept_invitation(invitation.id, ann).await.unwrap();
+    engine
+        .accept_invitation(invitation.id, ann, &crate::support::unlimited())
+        .await
+        .unwrap();
     engine.leave(ops, bob).await.unwrap();
     let members = engine.workspace_members(ops).await.unwrap();
     assert_eq!(members.len(), 1);

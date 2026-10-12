@@ -161,9 +161,10 @@ pub(crate) async fn install(
     let Some(repo_id) = body.repo_id.as_deref() else {
         let workspace = named_workspace(&caller, query.workspace.as_deref())?;
         catalog.install(&id, runtimes)?;
+        let plan = api.entitlements.for_workspace(workspace).await;
         let item = WorkspaceItem::CatalogInstall(&id);
         api.engine
-            .import_to_workspace(workspace, item, &caller.actor())
+            .import_to_workspace(workspace, item, &caller.actor(), &plan)
             .await?;
         return Ok(StatusCode::NO_CONTENT.into_response());
     };

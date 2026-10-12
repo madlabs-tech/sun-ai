@@ -257,6 +257,7 @@
           <dt>Status</dt>
           <dd>
             <Menu
+              readonly={!can('run')}
               label="Status"
               icon={STATUS_ICON[t.status]}
               text={label}
@@ -271,6 +272,7 @@
           <dt>Priority</dt>
           <dd>
             <Menu
+              readonly={!can('run')}
               label="Priority"
               icon={priority_of(t.priority).icon}
               text={priority_of(t.priority).label}
@@ -280,6 +282,7 @@
           <dt>Assignee</dt>
           <dd>
             <Menu
+              readonly={!can('run')}
               label="Assignee"
               icon={!t.assignee ? 'minus' : t.assignee.kind === 'agent' ? 'bot' : 'workflow'}
               text={t.assignee ? runner : 'None'}
@@ -289,6 +292,7 @@
           <dt>Project</dt>
           <dd>
             <Menu
+              readonly={!can('run')}
               label="Project"
               icon="folder-kanban"
               text={project?.name ?? 'No project'}
