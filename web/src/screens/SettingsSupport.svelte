@@ -7,7 +7,7 @@
   import { error_text, toast } from '../lib/app_state.svelte';
   import { clock, day } from '../lib/format';
 
-  const PLAN_NAME = { community: 'Community', free: 'Free', individual: 'Individual', business: 'Business' };
+  const PLAN_NAME = { community: 'Community', free: 'Free', pro: 'Pro', business: 'Business' };
   const MAX_MESSAGE = 5000;
 
   let account = $state<Account | null>(null);
@@ -56,7 +56,7 @@
     </div>
     {#if unavailable || (account && !account.support.target_hours)}
       <p class="sun-row__meta support__copy">
-        Support from people comes with the Individual and Business plans (answers within 48 and 24 hours). Until then, the community
+        Support from people comes with the Pro and Business plans (answers within 48 and 24 hours). Until then, the community
         forum and the docs answer most questions.
       </p>
     {:else if account}
