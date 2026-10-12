@@ -10,14 +10,16 @@
 //!
 //! `GET /api/v1/auth/sso/{id}/login` → provider →
 //! `GET /api/v1/auth/sso/{id}/callback` → the member linked to this identity
-//! is found, or (invite only) the invited member whose email the provider
-//! verified is linked to it; the login is audited, a session starts and the
+//! is found, or the member whose email the provider verified is linked to
+//! it, or a new member with that email is made when the deployment's
+//! sign-up admits it or a pending invitation names it; the login is
+//! audited, a session starts and the
 //! browser lands on `/`, or on the `return_to` hash the login was started
 //! with (a notification's deep link, e.g. `#/approve/<run>/<step>`). The
 //! `state` is single use, lasts 10 minutes and is bound to the browser by a
 //! cookie. A failed callback lands on `/#/login/failed`
 //! (`/#/login/denied` for a disallowed email domain or a deactivated member,
-//! `/#/login/invite` for anyone nobody invited). SSO sign-ins skip Sun's
+//! `/#/login/invite` for anyone sign-up doesn't admit and nobody invited). SSO sign-ins skip Sun's
 //! 2-step check: the provider owns MFA for those people.
 
 use std::collections::HashMap;
@@ -394,8 +396,9 @@ async fn finish(
     {
         return Err(FAILED);
     }
-    // Invite only: a member already linked to this identity, or the
-    // invited member whose email the provider verified, is let in.
+    // A member already linked to this identity, the member whose email the
+    // provider verified, or (sign-up open, or a pending invitation) a new
+    // member with that email.
     let verified = identity
         .email
         .as_deref()
@@ -407,6 +410,7 @@ async fn finish(
             &identity.issuer,
             &identity.subject,
             verified.as_deref(),
+            &api.signup,
             &digest(&token),
             chrono::Utc::now() + SESSION_TTL,
             &format!("signed in with sso:{id}"),
@@ -527,7 +531,9 @@ pub(crate) fn redirect(location: &str, cookies: Vec<String>) -> Response {
 /// `GET /api/v1/auth`: what the login screen offers. Open. `providers`:
 /// one "Continue with {name}" each, only those with a stored secret (any
 /// other could only fail); `local`: members sign in with email and a
-/// password or emailed code.
+/// password or emailed code; `allow_signup`: anyone may sign up (`POST
+/// /signup`); `workspace_creation_disabled`: only deployment owners create
+/// workspaces.
 pub(crate) async fn providers(State(api): State<Api>) -> ApiResult<Json<Value>> {
     let providers: Vec<Value> = api
         .engine
@@ -537,10 +543,15 @@ pub(crate) async fn providers(State(api): State<Api>) -> ApiResult<Json<Value>> 
         .filter(|(_, has_secret)| *has_secret)
         .map(|(p, _)| json!({ "id": p.id, "name": p.name, "kind": p.kind }))
         .collect();
-    Ok(Json(json!({ "providers": providers, "local": true })))
+    Ok(Json(json!({
+        "providers": providers,
+        "local": true,
+        "allow_signup": api.signup.allow_signup,
+        "workspace_creation_disabled": api.signup.disable_workspace_creation,
+    })))
 }
 
-/// `GET /api/v1/settings/sso` (`manage_settings`): every provider with
+/// `GET /api/v1/settings/sso` (deployment owner): every provider with
 /// `has_secret` (the secret never comes back), and `redirect_url`, the
 /// callback to register at a provider with `{id}` in place of its id.
 pub(crate) async fn list(State(api): State<Api>) -> ApiResult<Json<Value>> {
@@ -575,7 +586,7 @@ pub(crate) struct ProviderInput {
 }
 
 /// `PUT /api/v1/settings/sso/{id} {kind, name, client_id, issuer_url?,
-/// allowed_domains?, client_secret?}` (`manage_settings`): adds or replaces
+/// allowed_domains?, client_secret?}` (deployment owner): adds or replaces
 /// the provider; the client secret is sealed as an ecosystem secret.
 pub(crate) async fn put(
     State(api): State<Api>,
@@ -604,7 +615,7 @@ pub(crate) async fn put(
     list(State(api)).await
 }
 
-/// `DELETE /api/v1/settings/sso/{id}` (`manage_settings`): removes the
+/// `DELETE /api/v1/settings/sso/{id}` (deployment owner): removes the
 /// provider and its secret. Members it linked keep their accounts.
 pub(crate) async fn delete(
     State(api): State<Api>,

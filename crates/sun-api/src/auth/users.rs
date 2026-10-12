@@ -1,8 +1,9 @@
-//! Invite-only members: admins invite members (an emailed code or
-//! a password they set), re-invite, set passwords, deactivate and reactivate
-//! them; members sign in with their password or the emailed code and set
-//! their own password (and email, for members from before invites and the
-//! first-run owner); admins configure SMTP.
+//! Accounts: people sign up with their email (an emailed code, as the
+//! deployment's sign-up policy allows); deployment owners add accounts (an
+//! emailed code or a password they set), re-invite, set passwords,
+//! deactivate and reactivate them; members sign in with their password or
+//! the emailed code and set their own password (and email, for members from
+//! before invites and the first-run owner); deployment owners configure SMTP.
 //! Passwords are hashed here with Argon2id (default params, PHC string) on
 //! the blocking pool; codes are 6 random digits stored as
 //! `sha256(email ':' code)`. No credential is logged, echoed or returned.
@@ -19,11 +20,11 @@ use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sun_core::entitlement::Quota;
-use sun_core::model::{Mail, Member, Permission, Role, SmtpSettings, SmtpTls, normalize_email};
+use sun_core::model::{Mail, Member, Role, SmtpSettings, SmtpTls, normalize_email};
 use sun_core::{MemberId, Timestamp, WorkspaceId};
 use sun_engine::FirstSignIn;
 
-use super::members::{may_act_on, may_grant, not_yourself, only_owner_touches_owner};
+use super::members::not_yourself;
 use super::{Caller, digest};
 use crate::Api;
 use crate::error::{ApiError, ApiResult};
@@ -313,23 +314,18 @@ fn viewer() -> Role {
 }
 
 /// `POST /api/v1/members {email, username, workspace_id?, role?, is_owner?,
-/// password?, must_change?}` (`invite_members`, or `create_members` with a
-/// password): adds the member to the workspace (default Main) as `role`
-/// (default viewer) and emails them a sign-in code, or, with `password`,
-/// sets it (no mail; `must_change`, default true, forces a change at their
-/// first sign-in). Only an owner invites an owner; anyone else grants only a
-/// role up to their own in that workspace. Without a password, 409 until
-/// SMTP is configured; a plan without a free seat is 403.
+/// password?, must_change?}` (deployment owner): adds an account straight
+/// into the workspace (default Main) as `role` (default viewer) and emails
+/// them a sign-in code, or, with `password`, sets it (no mail;
+/// `must_change`, default true, forces a change at their first sign-in).
+/// Workspace admins invite with `POST /workspaces/{id}/invitations`
+/// instead. Without a password, 409 until SMTP is configured; a plan
+/// without a free seat is 403.
 pub(crate) async fn invite_member(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Body(input): Body<Invite>,
 ) -> ApiResult<(StatusCode, Json<Member>)> {
-    let permission = match input.password {
-        Some(_) => Permission::CreateMembers,
-        None => Permission::InviteMembers,
-    };
-    caller.need(permission)?;
     let email = normalize_email(&input.email)?;
     let username = input.username.trim();
     let valid_name = (1..=64).contains(&username.len())
@@ -341,8 +337,6 @@ pub(crate) async fn invite_member(
             "Use a username of 1-64 letters, digits, - _ or .",
         ));
     }
-    only_owner_touches_owner(&caller, input.is_owner)?;
-    may_grant(&caller, input.workspace_id, input.role, permission)?;
     let members = api.engine.members().await?;
     within_plan(&api, Quota::Seats, "seats", members.len())?;
     if let Some(password) = input.password {
@@ -390,9 +384,9 @@ pub(crate) async fn invite_member(
     Ok((StatusCode::CREATED, Json(member)))
 }
 
-/// `POST /api/v1/members/{id}/invite` (`edit_members`): a new code for a lost invite
-/// or a forgotten password. Clears the password and ends their sessions.
-/// The member must pass `not_yourself` and `may_act_on`.
+/// `POST /api/v1/members/{id}/invite` (deployment owner): a new code for a
+/// lost invite or a forgotten password. Clears the password and ends their
+/// sessions. Not on yourself (`not_yourself`).
 pub(crate) async fn reinvite_member(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -400,7 +394,7 @@ pub(crate) async fn reinvite_member(
 ) -> ApiResult<Json<Member>> {
     let id = parse_id(&id)?;
     not_yourself(&caller, id)?;
-    let member = may_act_on(&api, &caller, id).await?;
+    let member = api.engine.member(id).await?;
     let Some(email) = member.email.clone() else {
         return Err(ApiError::invalid(format!(
             "{} has no email yet: they add it on their next sign-in.",
@@ -420,9 +414,9 @@ pub(crate) async fn reinvite_member(
     Ok(Json(member))
 }
 
-/// `POST /api/v1/members/{id}/deactivate` (`deactivate_members`): they can't sign in
-/// until reactivated, and their sessions end. Nobody deactivates
-/// themselves or the last active owner; the member must pass `may_act_on`.
+/// `POST /api/v1/members/{id}/deactivate` (deployment owner): they can't
+/// sign in until reactivated, and their sessions end. Nobody deactivates
+/// themselves or the last active owner.
 pub(crate) async fn deactivate_member(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -431,7 +425,7 @@ pub(crate) async fn deactivate_member(
     set_active(&api, &caller, &id, false).await
 }
 
-/// `POST /api/v1/members/{id}/activate` (`deactivate_members`): reactivates them.
+/// `POST /api/v1/members/{id}/activate` (deployment owner): reactivates them.
 pub(crate) async fn activate_member(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -445,7 +439,6 @@ async fn set_active(api: &Api, caller: &Caller, id: &str, active: bool) -> ApiRe
     if !active && caller.member_id == Some(id) {
         return Err(ApiError::invalid("You can't deactivate yourself."));
     }
-    may_act_on(api, caller, id).await?;
     let member = api
         .engine
         .set_member_active(id, active, &caller.actor())
@@ -462,10 +455,9 @@ pub(crate) struct AdminPassword {
 }
 
 /// `PUT /api/v1/members/{id}/password {password, must_change?}`
-/// (`edit_members`):
-/// sets the member's password (`must_change`, default true, forces a change
-/// at their next sign-in) and ends their sessions. The hash never comes
-/// back. The member must pass `not_yourself` and `may_act_on`.
+/// (deployment owner): sets the member's password (`must_change`, default
+/// true, forces a change at their next sign-in) and ends their sessions.
+/// The hash never comes back. Not on yourself (`not_yourself`).
 pub(crate) async fn set_member_password(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -475,7 +467,6 @@ pub(crate) async fn set_member_password(
     let id = parse_id(&id)?;
     not_yourself(&caller, id)?;
     check_password(&input.password)?;
-    may_act_on(&api, &caller, id).await?;
     let hash = hash_password_blocking(input.password).await?;
     let member = api
         .engine
@@ -614,7 +605,53 @@ pub(crate) async fn set_my_email(
     Ok(Json(json!({ "email": email })))
 }
 
-/// `GET /api/v1/smtp` (admin): `{smtp: settings|null, has_password}`; the
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Signup {
+    email: String,
+}
+
+/// `POST /api/v1/signup {email}` (open): a new account, signed in with the
+/// emailed code (`POST /session {email, password: code}`), which verifies
+/// the email and asks for a password. 202 once the code is mailed. As the
+/// deployment allows: 403 when sign-up is closed (or limited to other email
+/// domains) and no pending invitation names the email; 409 when an account
+/// with this email exists (sign in instead); 503 when the deployment can't
+/// send mail. Tries are rate-limited per email (429).
+pub(crate) async fn signup(
+    State(api): State<Api>,
+    Body(input): Body<Signup>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let email = normalize_email(&input.email)?;
+    // ponytail: per email only (one inbox can't be flooded); a per-IP cap
+    // would hit everyone behind one proxy. Add one keyed on a trusted
+    // forwarded-for header if sign-ups get scripted.
+    api.auth.signup.reserve(&email, "")?;
+    if api.engine.smtp_settings().await?.0.is_none() || api.mailer.is_none() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "This deployment can't send email yet, so nobody can sign up. Ask its owner.",
+        ));
+    }
+    let code = new_code()?;
+    let expires_at = chrono::Utc::now() + CODE_TTL;
+    let Some(member) = api
+        .engine
+        .signup(&email, &api.signup, &code_hash(&email, &code), expires_at)
+        .await?
+    else {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "account_exists",
+            "An account with this email exists. Sign in instead.",
+        ));
+    };
+    send(&api, &invite_mail(&api, &member, &email, &code)).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "email": email }))))
+}
+
+/// `GET /api/v1/smtp` (deployment owner): `{smtp: settings|null, has_password}`; the
 /// password itself never comes back.
 pub(crate) async fn get_smtp(State(api): State<Api>) -> ApiResult<Json<Value>> {
     let (smtp, has_password) = api.engine.smtp_settings().await?;
@@ -634,7 +671,8 @@ pub(crate) struct SmtpInput {
     password: Option<String>,
 }
 
-/// `PUT /api/v1/smtp {host, port, username, from, tls, password?}` (admin):
+/// `PUT /api/v1/smtp {host, port, username, from, tls, password?}`
+/// (deployment owner):
 /// saves the settings; the password is sealed as an ecosystem secret.
 pub(crate) async fn put_smtp(
     State(api): State<Api>,
@@ -656,7 +694,7 @@ pub(crate) async fn put_smtp(
     get_smtp(State(api)).await
 }
 
-/// `POST /api/v1/smtp/test` (admin): mails the caller through the saved
+/// `POST /api/v1/smtp/test` (deployment owner): mails the caller through the saved
 /// settings. 422 when the caller has no email.
 pub(crate) async fn test_smtp(
     State(api): State<Api>,

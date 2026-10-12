@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
-use sun_core::model::{SignupPolicy, Workspace};
+use sun_core::model::Workspace;
 use sun_core::{RepoId, WorkspaceId};
 use sun_engine::{ProfileChange, WorkspaceItem};
 
@@ -81,14 +81,13 @@ pub(crate) async fn create(
     Extension(caller): Extension<Caller>,
     Body(input): Body<NewWorkspace>,
 ) -> ApiResult<(StatusCode, Json<WorkspaceView>)> {
-    let policy = SignupPolicy::from_env(|name| std::env::var(name).ok());
     let workspace = api
         .engine
         .create_workspace(
             &input.name,
             input.slug.as_deref(),
             caller.member_id,
-            &policy,
+            &api.signup,
             &caller.actor(),
         )
         .await?;

@@ -626,17 +626,21 @@ impl Engine {
 
     /// An OIDC sign-in: the member already linked to `(issuer, subject)`, or
     /// else the invited (not yet linked) member whose email is the provider's
-    /// verified `email`, which is linked now. Their email counts as verified
-    /// (the first verified person becomes the deployment owner, see
-    /// [`Engine::verify_email`]). Starts session `session_hash`
-    /// until `expires_at` and audits the login (detail `how`, e.g. `signed in
-    /// with sso:google`), in one transaction. `None` (nothing written): nobody
-    /// invited them. A deactivated member is `Forbidden` (nothing written).
+    /// verified `email`, which is linked now, or else a new member with that
+    /// email, linked, when `policy` admits it or a pending invitation names
+    /// it (SSO sign-up). Their email counts as verified (the first verified
+    /// person becomes the deployment owner, see [`Engine::verify_email`]).
+    /// Starts session `session_hash` until `expires_at` and audits the login
+    /// (detail `how`, e.g. `signed in with sso:google`), in one transaction.
+    /// `None` (nothing written): nobody invited them and sign-up doesn't
+    /// admit them. A deactivated member is `Forbidden` (nothing written).
+    #[allow(clippy::too_many_arguments)]
     pub async fn sign_in_oidc(
         &self,
         issuer: &str,
         subject: &str,
         verified_email: Option<&str>,
+        policy: &SignupPolicy,
         session_hash: &str,
         expires_at: Timestamp,
         how: &str,
@@ -645,17 +649,31 @@ impl Engine {
         let member = match tx.member_by_identity(issuer, subject).await? {
             Some(member) => member,
             None => {
-                let invited = match verified_email {
-                    Some(email) => tx.member_by_email(email).await?,
-                    None => None,
+                let Some(email) = verified_email else {
+                    return Ok(None);
                 };
-                match invited.filter(|m| m.issuer == LOCAL_ISSUER) {
-                    Some(member) => {
-                        tx.link_identity(member.id, issuer, subject).await?;
+                let member = match tx.member_by_email(email).await? {
+                    Some(member) if member.issuer == LOCAL_ISSUER => member,
+                    Some(_) => return Ok(None),
+                    None => {
+                        let invited = !tx.invitations_by_email(email).await?.is_empty();
+                        if !invited && !policy.admits(email) {
+                            return Ok(None);
+                        }
+                        let member = tx.create_unverified(email).await?;
+                        let actor = format!("user:{}", member.username);
+                        audit(
+                            &mut tx,
+                            &actor,
+                            &member.username,
+                            &format!("signed up ({how})"),
+                        )
+                        .await?;
                         member
                     }
-                    None => return Ok(None),
-                }
+                };
+                tx.link_identity(member.id, issuer, subject).await?;
+                member
             }
         };
         if member.deactivated_at.is_some() {
