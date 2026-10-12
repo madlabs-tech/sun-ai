@@ -239,17 +239,7 @@ exit "${SUN_EXIT:-0}"
 
 /// A fresh dir with the fake `claude` script in it.
 fn sandbox(name: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("claude-{name}"));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let script = dir.join("claude");
-    std::fs::write(&script, FAKE_CLAUDE).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    dir
+    common::sandbox("claude", FAKE_CLAUDE, name)
 }
 
 fn spec(dir: &Path, env: &[(&str, &str)]) -> SessionSpec {

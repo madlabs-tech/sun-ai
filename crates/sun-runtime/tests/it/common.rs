@@ -81,7 +81,8 @@ pub fn replay_in(cli: &str, dir: &str, case: &str) -> Vec<SunEvent> {
     }
 }
 
-/// A fresh dir holding `script` as an executable named `bin`.
+/// A fresh dir holding `script` as an executable named `bin`. The script
+/// must exit at once on `--version`: [`warm`] runs it that way.
 pub fn sandbox(bin: &str, script: &str, name: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{bin}-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -93,7 +94,25 @@ pub fn sandbox(bin: &str, script: &str, name: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    warm(&path);
     dir
+}
+
+/// Runs `path --version` until exec stops failing with ETXTBSY.
+///
+/// ponytail: rust-lang/rust#114554. A fork in another test thread can inherit
+/// our write fd of the fresh script until its exec closes it (O_CLOEXEC), so
+/// an exec in that window fails with "Text file busy". Retrying here keeps the
+/// adapters' real exec out of the window; drop this once std closes the race.
+fn warm(path: &Path) {
+    for _ in 0..50 {
+        match std::process::Command::new(path).arg("--version").output() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => return,
+        }
+    }
 }
 
 /// A session spec in `dir`; `SUN_OUT` tells the fake CLI where to write.
