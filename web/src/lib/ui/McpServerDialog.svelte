@@ -1,5 +1,6 @@
-<!-- "Add MCP server": a URL with an optional bearer secret, or a command Sun runs sandboxed.
-     The kernel connects once before saving; then the dialog shows the tools it found. -->
+<!-- "Add MCP server" in `workspace` (manage_plugins there): a URL with an optional bearer secret, or a command Sun
+     runs sandboxed; its secrets are the workspace's. The kernel connects once before saving; then the dialog shows the
+     tools it found. -->
 <script lang="ts">
   import { Badge, Button, Dialog, Input, Tabs } from '@hryer/madlabs-design-system/svelte';
   import { api } from '../api/client';
@@ -7,7 +8,7 @@
   import { error_text } from '../app_state.svelte';
   import SecretPicker from './SecretPicker.svelte';
 
-  let { onclose, onadded }: { onclose: () => void; onadded: (added: McpServerAdded) => void } = $props();
+  let { workspace, onclose, onadded }: { workspace: string; onclose: () => void; onadded: (added: McpServerAdded) => void } = $props();
 
   let name = $state('');
   let how = $state('url');
@@ -62,7 +63,7 @@
     if (Object.keys(errors).length) return;
     busy = true;
     try {
-      added = await api.add_mcp_server(s);
+      added = await api.add_mcp_server(s, workspace);
       onadded(added);
     } catch (err) {
       const message = error_text(err);
@@ -97,12 +98,12 @@
       />
       {#if how === 'url'}
         <Input label="URL" mono type="url" placeholder="https://mcp.example.com/mcp" bind:value={url} error={errors.url} hint={errors.url ? undefined : 'Streamable HTTP endpoint.'} />
-        <SecretPicker label="Bearer token" none_label="No auth" hint="Sent as Authorization: Bearer. Sun keeps only its name." error={errors.bearer_secret} bind:value={bearer_secret} />
+        <SecretPicker scope={{ kind: 'workspace', id: workspace }} label="Bearer token" none_label="No auth" hint="Sent as Authorization: Bearer. Sun keeps only its name." error={errors.bearer_secret} bind:value={bearer_secret} />
       {:else}
         <Input label="Command" mono placeholder="npx" bind:value={command} error={errors.command} hint={errors.command ? undefined : 'Runs in Sun’s sandbox: no network except the hosts below.'} />
         <Input label="Arguments" mono placeholder="-y @acme/docs-mcp" bind:value={args} hint="Separated by spaces." />
         <Input label="Network hosts" mono placeholder="registry.npmjs.org" bind:value={network} error={errors.network} hint={errors.network ? undefined : 'Hosts it may reach, separated by commas.'} />
-        <Input label="Secrets" mono placeholder="DOCS_TOKEN" bind:value={secrets} error={errors.secrets} hint={errors.secrets ? undefined : 'Ecosystem secret names, passed as env vars of the same name.'} />
+        <Input label="Secrets" mono placeholder="DOCS_TOKEN" bind:value={secrets} error={errors.secrets} hint={errors.secrets ? undefined : 'This workspace’s secret names, passed as env vars of the same name.'} />
       {/if}
     </form>
   {/if}

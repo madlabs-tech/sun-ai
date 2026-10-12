@@ -7,7 +7,7 @@
   import type { McpGrant, McpServer, McpTool } from '../api/types';
   import { error_text, toast } from '../app_state.svelte';
 
-  let { task_id }: { task_id: string } = $props();
+  let { task_id, workspace }: { task_id: string; workspace: string } = $props();
 
   let servers = $state<McpServer[]>([]);
   let grants = $state<McpGrant[]>([]);
@@ -19,7 +19,7 @@
     const id = task_id;
     servers = [];
     // Advisory, like the context section: a kernel without the routes shows nothing.
-    Promise.all([api.list_mcp_servers(), api.task_mcp(id)]).then(([all, saved]) => {
+    Promise.all([api.list_mcp_servers(workspace), api.task_mcp(id)]).then(([all, saved]) => {
       if (id !== task_id) return;
       [servers, grants, status] = [all, saved, ''];
     }, () => {});
@@ -65,7 +65,7 @@
     if (!open[name] || Array.isArray(tools[name])) return;
     tools[name] = 'Connecting…';
     try {
-      tools[name] = await api.mcp_tools(name);
+      tools[name] = await api.mcp_tools(name, workspace);
     } catch (e) {
       tools[name] = error_text(e);
     }

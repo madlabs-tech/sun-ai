@@ -24,7 +24,7 @@
     (rows) => (runtimes = rows.map((r) => r.id)),
     () => {},
   );
-  api.list_catalog().then(
+  api.list_catalog('', '', workspace).then(
     (c) => (skills = c.entries.filter((e) => e.kind === 'skill' && e.installed).map((e) => e.id)),
     () => {},
   );

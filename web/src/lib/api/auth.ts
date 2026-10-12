@@ -462,7 +462,7 @@ const my_role = (workspace: string) => memberships.find((m) => m.workspace_id ==
 /** Like the kernel: a deployment owner may do everything; anyone else what their role there grants. */
 const may = (permission: Permission, workspace: string) => me_state.is_owner || PERMISSIONS_OF[my_role(workspace) ?? 'viewer'].includes(permission);
 /** The mock's signed-in person, for the workspace mock: a deployment owner, and the workspaces they are in. */
-export const mock_me = () => ({ is_owner: me_state.is_owner, workspaces: memberships.filter((m) => m.member_id === me_id()).map((m) => m.workspace_id) });
+export const mock_me = () => ({ id: me_id(), is_owner: me_state.is_owner, workspaces: memberships.filter((m) => m.member_id === me_id()).map((m) => m.workspace_id) });
 /** A workspace the mock created: its creator owns it. */
 export function mock_join(workspace: string, name: string) {
   workspace_names.set(workspace, name);
@@ -474,7 +474,7 @@ const LAST_OWNER = () => new ApiFailure(409, 'conflict', 'A workspace keeps at l
 function seen(workspace: string) {
   if (!workspace_names.has(workspace) || !(me_state.is_owner || my_role(workspace))) throw not_found();
 }
-function need(permission: Permission, workspace: string, what: string) {
+export function need(permission: Permission, workspace: string, what: string) {
   if (!may(permission, workspace))
     throw forbidden(`Your role in this workspace can't ${what}. Ask a workspace admin for a role with the \`${permission}\` permission.`);
 }
