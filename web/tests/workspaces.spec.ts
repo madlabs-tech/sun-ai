@@ -1,10 +1,7 @@
 // Workspaces against the in-memory API: each workspace has its own workflows and tasks, the
-// current workspace lives in the URL (by slug; id links redirect) and is remembered, and only admins
-// change workspaces. Rename, access and delete live in Settings → <workspace>.
+// current workspace lives in the URL (by slug; id links redirect) and is remembered, and anyone creates one
+// (they own it). Rename, members and delete live in Settings → <workspace>.
 import { expect, test, type Locator, type Page } from '@playwright/test';
-
-/** Madlabs checkboxes hide the input: click its label. */
-const tick = (scope: Locator, name: RegExp) => scope.getByRole('checkbox', { name }).locator('xpath=..').click();
 
 const MAIN = '00000000000000000000000001';
 
@@ -17,7 +14,7 @@ async function pick(scope: Locator, name: string) {
   await menu.getByRole('menuitemradio', { name, exact: true }).or(menu.getByRole('menuitem', { name, exact: true })).click();
 }
 /** Opens Settings → <workspace> → `page_name` in-app (the mock's data lives in the page, so no reload). */
-async function workspace_settings(page: Page, page_name: 'General' | 'Access' | 'Code') {
+async function workspace_settings(page: Page, page_name: 'General' | 'Members' | 'Code') {
   await page.getByRole('complementary', { name: 'Main' }).getByRole('link', { name: 'Settings' }).click();
   await page.getByRole('navigation', { name: 'Settings' }).getByRole('link', { name: page_name, exact: true }).click();
 }
@@ -40,7 +37,7 @@ test('workspaces: switch, create, rename, delete; workflows and tasks stay on th
   await expect(page.locator('.task-card').first()).toBeVisible();
 
   // Create a workspace: names are unique ignoring case.
-  await pick(sidebar, 'Create workspace');
+  await pick(sidebar, 'New workspace');
   let dialog = page.getByRole('dialog');
   await dialog.getByLabel('Name').fill('main');
   await dialog.getByRole('button', { name: 'Create workspace' }).click();
@@ -100,7 +97,7 @@ test('workspaces: switch, create, rename, delete; workflows and tasks stay on th
   await danger.getByRole('button', { name: 'Delete workspace' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Delete workspace' }).click();
   await expect(page.getByText('The workspace still has workflows')).toBeVisible();
-  await pick(sidebar, 'Create workspace');
+  await pick(sidebar, 'New workspace');
   dialog = page.getByRole('dialog');
   await dialog.getByLabel('Name').fill('Scratch');
   await dialog.getByRole('button', { name: 'Create workspace' }).click();
@@ -114,7 +111,7 @@ test('workspaces: switch, create, rename, delete; workflows and tasks stay on th
   await expect(danger).toContainText("Main is the default workspace and can't be deleted.");
   await switcher(sidebar).click();
   await expect(sidebar.getByRole('menuitemradio')).toHaveText([/Main/, /Growth/]);
-  await expect(sidebar.getByRole('menuitem')).toHaveText(['Create workspace', 'Log out']);
+  await expect(sidebar.getByRole('menuitem')).toHaveText(['New workspace', 'Log out']);
 });
 
 test('workspaces: the URL names the slug; an id link redirects to it', async ({ page }) => {
@@ -131,7 +128,7 @@ test('workspaces: create picks the slug from the name until edited, and previews
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/?mock=1#/tasks');
   const sidebar = page.getByRole('complementary', { name: 'Main' });
-  await pick(sidebar, 'Create workspace');
+  await pick(sidebar, 'New workspace');
   const dialog = page.getByRole('dialog');
   const slug = dialog.getByLabel('Workspace URL');
   await dialog.getByLabel('Name').fill('Growth & Ads');
@@ -153,45 +150,23 @@ test('workspaces: create picks the slug from the name until edited, and previews
   await expect(switcher(sidebar)).toHaveAccessibleName('Workspace: Paid ads');
 });
 
-test('workspaces: members switch workspaces but only admins change them', async ({ page }) => {
+test('workspaces: a member creates a workspace and owns it', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/?mock=1&mock_role=member#/tasks');
   const sidebar = page.getByRole('complementary', { name: 'Main' });
-  await expect(switcher(sidebar)).toBeVisible();
   await expect(page).toHaveURL(/workspace=main$/);
-  expect(await menu_items(sidebar)).toEqual(['Log out']);
-});
-
-test('workspaces: access picks the groups that see a workspace', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto('/?mock=1#/tasks');
-  const sidebar = page.getByRole('complementary', { name: 'Main' });
-
-  // The owner manages access, so every group is offered; none ticked means admins only.
-  await pick(sidebar, 'Create workspace');
-  let dialog = page.getByRole('dialog');
-  const access = dialog.getByRole('group', { name: 'Access' });
-  await expect(access.getByRole('checkbox')).toHaveCount(3);
-  await expect(access).toContainText('only they do');
-  await dialog.getByLabel('Name').fill('Ops');
-  await tick(access, /User/);
+  expect(await menu_items(sidebar)).toEqual(['New workspace', 'Log out']);
+  await pick(sidebar, 'New workspace');
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Name').fill('Side project');
   await dialog.getByRole('button', { name: 'Create workspace' }).click();
-  await expect(dialog).toBeHidden();
-  await expect(switcher(sidebar)).toHaveAccessibleName('Workspace: Ops');
-
-  // Settings → <workspace> → Access shows and changes who sees it.
-  await workspace_settings(page, 'Access');
-  const form = page.getByRole('form', { name: 'Access' });
-  await expect(form.getByRole('checkbox', { name: /User/ })).toBeChecked();
-  await expect(form.getByRole('checkbox', { name: /Viewer/ })).not.toBeChecked();
-  await tick(form, /User/);
-  await tick(form, /Viewer/);
-  await form.getByRole('button', { name: 'Save access' }).click();
-  await expect(page.getByText('Access saved')).toBeVisible();
-  await workspace_settings(page, 'General');
-  await workspace_settings(page, 'Access');
-  await expect(form.getByRole('checkbox', { name: /Viewer/ })).toBeChecked();
-  await expect(form.getByRole('checkbox', { name: /User/ })).not.toBeChecked();
+  await expect(switcher(sidebar)).toHaveAccessibleName('Workspace: Side project');
+  // Its owner: the workspace's admin pages show, and the members list has only them.
+  await workspace_settings(page, 'Members');
+  const people = page.getByRole('region', { name: 'People in Side project' });
+  await expect(people.getByRole('article')).toHaveCount(1);
+  await expect(people.getByRole('article', { name: 'me' })).toContainText('Owner');
+  await expect(page.getByRole('navigation', { name: 'Settings' }).getByRole('link', { name: 'Code' })).toBeVisible();
 });
 
 test('workspaces: the menu is on the phone More page', async ({ page }) => {
@@ -199,7 +174,7 @@ test('workspaces: the menu is on the phone More page', async ({ page }) => {
   await page.goto('/?mock=1#/more');
   const more = page.getByRole('navigation', { name: 'More' });
   await expect(switcher(more)).toHaveAccessibleName('Workspace: Main');
-  expect(await menu_items(more)).toEqual(['Create workspace', 'Log out']);
+  expect(await menu_items(more)).toEqual(['New workspace', 'Log out']);
 });
 
 test('workspaces: repos and knowledge are per workspace; admins import knowledge from another workspace', async ({ page }) => {
@@ -210,7 +185,7 @@ test('workspaces: repos and knowledge are per workspace; admins import knowledge
   await expect(sources).toHaveCount(3);
 
   // A new workspace starts with no sources and no repos, and its search sees nothing of Main's.
-  await pick(sidebar, 'Create workspace');
+  await pick(sidebar, 'New workspace');
   let dialog = page.getByRole('dialog');
   await dialog.getByLabel('Name').fill('Ops');
   await dialog.getByRole('button', { name: 'Create workspace' }).click();

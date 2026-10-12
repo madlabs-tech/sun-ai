@@ -15,7 +15,7 @@
 
   Promise.all([api.get_on_limit(), auth.me().catch(() => null)]).then(([view, me]) => {
     [saved, policy] = [view.on_limit, view.on_limit ?? 'switch'];
-    can_set = !!me?.permissions.includes('manage_runtimes');
+    can_set = !!me?.is_owner;
   }, (e) => (load_error = error_text(e)));
 
   async function save(e: SubmitEvent) {

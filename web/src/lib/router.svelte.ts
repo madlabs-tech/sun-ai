@@ -1,6 +1,6 @@
 // Hash router: #/<page>/<id>/<sub>. Hash routing keeps the static build servable from
 // rust-embed with no server-side fallback route.
-import { feature_on } from './app_state.svelte';
+import { feature_on, is_owner } from './app_state.svelte';
 
 /** The sidebar section an item sits in: none (above the groups), a named group, or the footer. */
 export type NavSection = '' | 'Work' | 'AI Team' | 'footer';
@@ -10,6 +10,8 @@ export interface NavItem {
   label: string;
   icon: string;
   section: NavSection;
+  /** The deployment's own page (its reads are owner-only until they are per workspace): deployment owners only. */
+  owner?: true;
 }
 
 /** The sidebar shows these by section, in this order within each. The first TAB_COUNT (Tasks, Approvals,
@@ -17,28 +19,32 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   { id: 'tasks', label: 'Tasks', icon: 'kanban', section: 'Work' },
   { id: 'approvals', label: 'Approvals', icon: 'user-check', section: '' },
-  { id: 'agents', label: 'Agents', icon: 'bot', section: 'AI Team' },
+  { id: 'agents', label: 'Agents', icon: 'bot', section: 'AI Team', owner: true },
   { id: 'projects', label: 'Projects', icon: 'folder-kanban', section: 'Work' },
   { id: 'workflows', label: 'Workflows', icon: 'workflow', section: 'Work' },
   { id: 'knowledge', label: 'Knowledge', icon: 'library', section: 'Work' },
-  { id: 'memory', label: 'Memory', icon: 'lightbulb', section: 'Work' },
+  { id: 'memory', label: 'Memory', icon: 'lightbulb', section: 'Work', owner: true },
   { id: 'evals', label: 'Evals', icon: 'flask-conical', section: 'Work' },
-  { id: 'runtimes', label: 'Runtimes', icon: 'cpu', section: 'AI Team' },
-  { id: 'hosts', label: 'Hosts', icon: 'server', section: 'AI Team' },
-  { id: 'catalog', label: 'Catalog', icon: 'sparkles', section: 'AI Team' },
-  { id: 'mods', label: 'Mods', icon: 'puzzle', section: 'AI Team' },
-  { id: 'market', label: 'Marketplace', icon: 'store', section: 'AI Team' },
+  { id: 'runtimes', label: 'Runtimes', icon: 'cpu', section: 'AI Team', owner: true },
+  { id: 'hosts', label: 'Hosts', icon: 'server', section: 'AI Team', owner: true },
+  { id: 'catalog', label: 'Catalog', icon: 'sparkles', section: 'AI Team', owner: true },
+  { id: 'mods', label: 'Mods', icon: 'puzzle', section: 'AI Team', owner: true },
+  { id: 'market', label: 'Marketplace', icon: 'store', section: 'AI Team', owner: true },
   { id: 'settings', label: 'Settings', icon: 'settings', section: 'footer' },
 ];
 
 export const TAB_COUNT = 3;
 
-/** NAV without the pages of features the kernel turned off (`knowledge`, `evals`, `market`, `catalog`). */
-export const visible_nav = () => NAV.filter((n) => feature_on(n.id));
+/** True when page `id` shows: its feature is on, and a deployment page only for deployment owners. */
+export const page_on = (id: string) => feature_on(id) && (!NAV.find((n) => n.id === id)?.owner || is_owner());
+
+/** NAV without the pages of features the kernel turned off (`knowledge`, `evals`, `market`, `catalog`), and
+ *  without the deployment's pages for anyone but its owners. */
+export const visible_nav = () => NAV.filter((n) => page_on(n.id));
 
 /** `approve` is the notification deep link: #/approve/<run_id>/<step_key>.
- *  `canvas` is a task's design canvas: #/canvas/<task_id>. */
-const PAGES = new Set([...NAV.map((n) => n.id), 'more', 'login', 'approve', 'canvas']);
+ *  `canvas` is a task's design canvas: #/canvas/<task_id>. `invite` is an invitation link: #/invite/<token>. */
+const PAGES = new Set([...NAV.map((n) => n.id), 'more', 'login', 'approve', 'canvas', 'invite']);
 
 /** How a git connect came back: `github_connected=1` / `github_error=<reason>` (same for `gitlab`), with
  *  `return_to=repositories` when the picker should open. Taken out of the URL here, shown and cleared by

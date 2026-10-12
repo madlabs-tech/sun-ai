@@ -65,12 +65,11 @@ test('agents: ready or why not, create, edit, archive', async ({ page }) => {
   await expect(row(page, 'Night Owl')).toHaveCount(0);
 });
 
-test('a member sees agents but no write controls', async ({ page }) => {
+test('agents are the deployment owner’s page until they are per workspace', async ({ page }) => {
   await open(page, '&mock_role=member');
-  await expect(row(page, 'Ada')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'New agent' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Edit Ada' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Archive Ada' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Tasks', level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Agents' })).toHaveCount(0);
+  await expect(row(page, 'Ada')).toHaveCount(0);
 });
 
 test('360 px: agent rows fit', async ({ page }) => {

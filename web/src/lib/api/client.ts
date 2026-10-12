@@ -151,8 +151,8 @@ const query = (params: Record<string, string | undefined>) => {
 export const api = {
   /** The workspaces the signed-in person sees. */
   list_workspaces: () => request<Workspace[]>('GET', '/workspaces'),
-  /** `create_workspace`: a workspace `group_ids` see (none: admins only); without `manage_groups`, only your own groups. */
-  create_workspace: (name: string, group_ids: string[], slug?: string) => request<Workspace>('POST', '/workspaces', { name, group_ids, slug }),
+  /** Any signed-in person (unless the deployment turned it off): you become its owner. */
+  create_workspace: (name: string, slug?: string) => request<Workspace>('POST', '/workspaces', { name, slug }),
   rename_workspace: (id: string, name: string) => request<Workspace>('PATCH', `/workspaces/${id_path(id)}`, { name }),
   /** `edit_workspace`: name, description, context and default workflow. */
   update_workspace: (id: string, change: WorkspaceProfileChange) => request<Workspace>('PATCH', `/workspaces/${id_path(id)}`, change),
@@ -168,8 +168,6 @@ export const api = {
     request<Project>('POST', `/workspaces/${id_path(workspace)}/projects`, { name, description }),
   update_project: (id: string, change: { name?: string; description?: string }) => request<Project>('PATCH', `/projects/${id_path(id)}`, change),
   delete_project: (id: string) => request<null>('DELETE', `/projects/${id_path(id)}`),
-  /** `edit_workspace`: exactly these groups see the workspace; without `manage_groups`, change only your own groups. */
-  set_workspace_groups: (id: string, group_ids: string[]) => request<Workspace>('PUT', `/workspaces/${id_path(id)}/groups`, { group_ids }),
   delete_workspace: (id: string) => request<null>('DELETE', `/workspaces/${id_path(id)}`),
   /** Tasks of `workspace` (every workspace when absent). */
   list_tasks: (workspace?: string, status?: TaskStatus) => request<TaskSummary[]>('GET', '/tasks' + query({ workspace, status })),

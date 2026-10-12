@@ -1,8 +1,11 @@
-// Sign-in, 2-step, members, groups and the audit log. Mirrors crates/sun-api/src/auth.
+// Sign-in, sign-up, 2-step, accounts, workspace members and invitations, and the audit log. Mirrors crates/sun-api/src/auth.
 // With ?mock=1 an in-memory fake answers instead of the kernel.
 import { ApiFailure, request, use_mock } from './client';
+import { MAIN_WORKSPACE } from './types';
+import { PERMISSIONS_OF, covers, type Role } from '../role';
 
-/** What a group may grant, per verb. An owner always has all of them. */
+/** What a workspace role grants, per verb (`Role::permissions` in sun-core; the table is in lib/role.ts). A
+ *  deployment owner has all of them, everywhere. */
 export type Permission =
   | 'run'
   | 'approve'
@@ -16,43 +19,10 @@ export type Permission =
   | 'view_members'
   | 'edit_members'
   | 'deactivate_members'
-  | 'manage_groups'
-  | 'create_workspace'
   | 'edit_workspace'
   | 'delete_workspace'
   | 'create_workflow'
-  | 'edit_workflow'
-  | 'access_all_workspaces';
-/** Every permission, in the kernel's order. */
-export const PERMISSIONS: Permission[] = [
-  'run',
-  'approve',
-  'manage_plugins',
-  'manage_extensions',
-  'manage_secrets',
-  'manage_runtimes',
-  'manage_settings',
-  'invite_members',
-  'create_members',
-  'view_members',
-  'edit_members',
-  'deactivate_members',
-  'manage_groups',
-  'create_workspace',
-  'edit_workspace',
-  'delete_workspace',
-  'create_workflow',
-  'edit_workflow',
-  'access_all_workspaces',
-];
-
-/** A role admins can rename and customize. `key` is what `who: role:<key>` matches; it never changes. */
-export interface Group {
-  id: string;
-  key: string;
-  name: string;
-  permissions: Permission[];
-}
+  | 'edit_workflow';
 
 export interface Member {
   id: string;
@@ -61,10 +31,8 @@ export interface Member {
   username: string;
   /** Lowercase; null only for a member from before invites who hasn't given one yet. */
   email: string | null;
-  /** Owners have every permission. */
+  /** A deployment owner: every permission in every workspace. */
   is_owner: boolean;
-  /** Ids of the groups they are in. */
-  groups: string[];
   /** False while an invite is pending (or after a reset code went out). */
   has_password: boolean;
   /** They must choose a new password at their next sign-in. */
@@ -147,10 +115,12 @@ export interface AuditEntry {
 
 export interface Me {
   user: string;
+  /** A deployment owner: sees and may do everything, and alone sees the deployment's settings. */
   is_owner: boolean;
-  groups: Group[];
-  /** The union of the groups' permissions; all of them for an owner. */
-  permissions: Permission[];
+  /** Their workspaces and role in each (none for the token holder). */
+  memberships: Membership[];
+  /** They proved their email (a code or SSO). */
+  email_verified?: boolean;
   /** `sso`: any sign-in provider (Google, GitHub, OIDC). */
   via: 'token' | 'sso' | 'local';
   email: string | null;
@@ -172,6 +142,10 @@ export interface Providers {
   providers: { id: string; name: string; kind: SsoKind }[];
   /** Members sign in with email + password (or an emailed code in the password box). */
   local?: boolean;
+  /** Anyone may create an account (`POST /signup`); a pending invitation admits an email either way. */
+  allow_signup?: boolean;
+  /** Only deployment owners create workspaces. */
+  workspace_creation_disabled?: boolean;
 }
 
 /** A sign-in provider in Settings → Sign-in; its client secret never comes back. */
@@ -207,6 +181,53 @@ export interface SmtpView {
   smtp: SmtpSettings | null;
   has_password: boolean;
 }
+
+// ---------- workspace members, invitations and sign-up ----------
+
+/** A member's role in one workspace (`GET /me` lists theirs). */
+export interface Membership {
+  workspace_id: string;
+  member_id: string;
+  role: Role;
+  /** When they joined it. */
+  created_at: string;
+}
+/** One member of a workspace, with who they are (`GET /workspaces/{id}/members`, oldest first). */
+export interface WorkspaceMember extends Membership {
+  username: string;
+  email: string | null;
+}
+/** A pending invitation, as the workspace's admins see it. */
+export interface Invitation {
+  id: string;
+  workspace_id: string;
+  email: string;
+  role: Role;
+  inviter_id: string | null;
+  created_at: string;
+  expires_at: string;
+  accepted_at: string | null;
+  declined_at: string | null;
+}
+/** An invitation as its invitee sees it: the link's page and `GET /me/invitations`. */
+export interface InvitationView {
+  id: string;
+  workspace_id: string;
+  workspace_name: string;
+  email: string;
+  role: Role;
+  /** The inviter's username; null for the kernel token holder or a removed member. */
+  inviter: string | null;
+  expires_at: string;
+}
+/** What inviting answers: `link` only when the deployment can't send mail, for the admin to pass on. */
+export interface Invited {
+  invitation: Invitation;
+  mailed: boolean;
+  link: string | null;
+}
+
+const path_of = (...parts: string[]) => parts.map(encodeURIComponent).join('/');
 
 /** Where the browser goes to sign in with provider `id`. */
 export const sso_login_url = (id: string) => `/api/v1/auth/sso/${encodeURIComponent(id)}/login`;
@@ -244,9 +265,10 @@ export const auth = {
   get_security: () => call<SecurityPolicy>('GET', '/settings/security'),
   set_security: (policy: SecurityPolicy) => call<SecurityPolicy>('PUT', '/settings/security', policy),
   set_email: (email: string) => call<{ email: string }>('PUT', '/me/email', { email }),
-  /** With `password`, no mail goes out (and SMTP isn't needed); `must_change` forces a change at first sign-in. */
-  invite: (email: string, username: string, group_ids: string[], password?: { password: string; must_change: boolean }) =>
-    call<Member>('POST', '/members', { email, username, group_ids, ...password }),
+  /** Deployment owner: an account in `workspace_id` as `role`. With `password`, no mail goes out (and SMTP isn't
+   *  needed); `must_change` forces a change at first sign-in. */
+  invite: (email: string, username: string, workspace_id: string, role: Role, password?: { password: string; must_change: boolean }) =>
+    call<Member>('POST', '/members', { email, username, workspace_id, role, ...password }),
   /** Emails a reset code: their password is cleared and their sessions end. */
   reinvite: (id: string) => call<Member>('POST', `/members/${encodeURIComponent(id)}/invite`),
   set_member_password: (id: string, password: string, must_change: boolean) =>
@@ -263,47 +285,76 @@ export const auth = {
   me: () => call<Me>('GET', '/me'),
   set_view_role: (view_role: string | null) => call<{ view_role: string | null }>('PUT', '/me/view_role', { view_role }),
   list_members: () => call<Member[]>('GET', '/members'),
-  set_member_groups: (id: string, group_ids: string[]) =>
-    call<Member>('PUT', `/members/${encodeURIComponent(id)}/groups`, { group_ids }),
   set_owner: (id: string, is_owner: boolean) => call<Member>('PUT', `/members/${encodeURIComponent(id)}/owner`, { is_owner }),
-  list_groups: () => call<Group[]>('GET', '/groups'),
-  create_group: (name: string, permissions: Permission[]) => call<Group>('POST', '/groups', { name, permissions }),
-  update_group: (id: string, change: { name?: string; permissions?: Permission[] }) =>
-    call<Group>('PATCH', `/groups/${encodeURIComponent(id)}`, change),
-  delete_group: (id: string) => call<null>('DELETE', `/groups/${encodeURIComponent(id)}`),
-  set_group_members: (id: string, member_ids: string[]) =>
-    call<Member[]>('PUT', `/groups/${encodeURIComponent(id)}/members`, { member_ids }),
   list_audit: () => call<AuditEntry[]>('GET', '/audit'),
+  /** Mails a sign-up code (then `sign_in(email, code)`); 409 when the email already has an account. */
+  signup: (email: string) => call<{ email: string }>('POST', '/signup', { email }),
+  workspace_members: (workspace: string) => call<WorkspaceMember[]>('GET', `/workspaces/${path_of(workspace)}/members`),
+  /** `edit_members`: never above your own role, nor on someone above it; 409 when it leaves no owner. */
+  set_role: (workspace: string, member: string, role: Role) =>
+    call<Membership>('PUT', `/workspaces/${path_of(workspace, 'members', member)}`, { role }),
+  remove_member: (workspace: string, member: string) => call<null>('DELETE', `/workspaces/${path_of(workspace, 'members', member)}`),
+  /** 409 for its last owner. */
+  leave: (workspace: string) => call<null>('POST', `/workspaces/${path_of(workspace)}/leave`),
+  /** `invite_members`: the pending ones, newest first. */
+  invitations: (workspace: string) => call<Invitation[]>('GET', `/workspaces/${path_of(workspace)}/invitations`),
+  /** `invite_members`, `role` at most your own; replaces a pending one to the same email. */
+  invite_to: (workspace: string, email: string, role: Role) =>
+    call<Invited>('POST', `/workspaces/${path_of(workspace)}/invitations`, { email, role }),
+  revoke_invitation: (workspace: string, id: string) => call<null>('DELETE', `/workspaces/${path_of(workspace, 'invitations', id)}`),
+  my_invitations: () => call<InvitationView[]>('GET', '/me/invitations'),
+  /** 403 unless it is to your verified email; 404 once used, declined, revoked or expired. */
+  accept_invitation: (id: string) => call<Membership>('POST', `/invitations/${path_of(id, 'accept')}`),
+  decline_invitation: (id: string) => call<null>('POST', `/invitations/${path_of(id, 'decline')}`),
+  /** No sign-in needed: the link's token is the credential. 404 when it no longer works. */
+  look_up_invitation: (token: string) => call<InvitationView>('GET', `/invitations/${path_of(token)}`),
 };
 
 // ---------- in-memory fake (?mock=1) ----------
 
 const ISSUER = 'https://sso.example.com/realms/acme';
-/** The seeded groups' ids, as the kernel's migration makes them. */
-export const VIEWER = '00000000000000000000000001';
-export const MEMBER = '00000000000000000000000002';
-export const ADMIN = '00000000000000000000000003';
-let groups: Group[] = [
-  // `?viewer_edits_members=1`: Viewer may see, edit and deactivate members (but not manage groups).
-  {
-    id: VIEWER,
-    key: 'viewer',
-    name: 'Viewer',
-    permissions:
-      new URLSearchParams(location.search).get('viewer_edits_members') === '1' ? ['view_members', 'edit_members', 'deactivate_members'] : [],
-  },
-  { id: MEMBER, key: 'member', name: 'User', permissions: ['run', 'approve', 'create_workflow', 'edit_workflow'] },
-  { id: ADMIN, key: 'admin', name: 'Admin', permissions: [...PERMISSIONS] },
-];
-/** The groups an old role became: each member is in every group their role covered. */
-const ROLE_GROUPS: Record<string, string[]> = { viewer: [VIEWER], member: [VIEWER, MEMBER], admin: [VIEWER, MEMBER, ADMIN] };
-const person = (id: string, subject: string, username: string, role: string): Member => ({
-  id, issuer: ISSUER, subject, username, email: `${username}@acme.io`, is_owner: false, groups: [...ROLE_GROUPS[role]], has_password: true, must_set_password: false,
+const person = (id: string, subject: string, username: string): Member => ({
+  id, issuer: ISSUER, subject, username, email: `${username}@acme.io`, is_owner: false, has_password: true, must_set_password: false,
 });
-let members: Member[] = [person('m_ana', 's1', 'ana', 'admin'), person('m_ben', 's2', 'ben', 'member'), person('m_cho', 's3', 'cho', 'viewer')];
 const mock_params = new URLSearchParams(location.search);
-// `?mock_role=<viewer|member|admin>`: sign in as someone in that old role's groups instead of the owner.
-const mock_role = mock_params.get('mock_role');
+// `?mock_role=<viewer|member|admin>`: sign in as someone with that role in Main instead of the deployment owner;
+// `none`: someone in no workspace yet (onboarding).
+const mock_role = mock_params.get('mock_role') as Role | 'none' | null;
+const me_owner = !mock_role || mock_role === 'owner';
+let members: Member[] = [
+  { ...person('m_me', 's0', 'me'), is_owner: me_owner, email: mock_params.get('owner_email') === '0' ? null : 'me@acme.io' },
+  person('m_ana', 's1', 'ana'),
+  person('m_ben', 's2', 'ben'),
+  person('m_cho', 's3', 'cho'),
+];
+/** Members who proved their email (everyone seeded; a sign-up once its code is used). */
+const verified = new Set(members.map((m) => m.id));
+const joined = (workspace_id: string, member_id: string, role: Role): Membership => ({ workspace_id, member_id, role, created_at: '2026-10-01T09:00:00Z' });
+let memberships: Membership[] = [
+  ...(mock_role === 'none' ? [] : [joined(MAIN_WORKSPACE, 'm_me', me_owner ? 'owner' : (mock_role as Role))]),
+  joined(MAIN_WORKSPACE, 'm_ana', 'admin'),
+  joined(MAIN_WORKSPACE, 'm_ben', 'member'),
+  joined(MAIN_WORKSPACE, 'm_cho', 'viewer'),
+];
+/** Workspace names for invitations; mock.ts registers the ones it creates. */
+const workspace_names = new Map([[MAIN_WORKSPACE, 'Main']]);
+/** `?invited=1`: a workspace "Design" (only in the mock) that me@acme.io is invited to as a member, and one
+ *  invitation into Main for someone else's email. The link tokens are `tok_design` and `tok_other`; `tok_expired`
+ *  is an expired one. */
+export const DESIGN_WORKSPACE = '0000000000000000000000000D';
+const MOCK_SIGNUP = mock_params.get('allow_signup') !== '0';
+const MOCK_CREATION_DISABLED = mock_params.get('creation_disabled') === '1';
+type MockInvitation = Invitation & { token: string };
+const invite_row = (id: string, workspace_id: string, email: string, role: Role, token: string, expires_at = '2099-01-01T00:00:00Z'): MockInvitation => ({
+  id, workspace_id, email, role, inviter_id: 'm_ana', created_at: '2026-10-01T09:00:00Z', expires_at, accepted_at: null, declined_at: null, token,
+});
+let invitations: MockInvitation[] = [invite_row('i_expired', MAIN_WORKSPACE, 'me@acme.io', 'admin', 'tok_expired', '2026-01-01T00:00:00Z')];
+if (mock_params.get('invited') === '1') {
+  workspace_names.set(DESIGN_WORKSPACE, 'Design');
+  memberships.push(joined(DESIGN_WORKSPACE, 'm_ana', 'owner'));
+  invitations.push(invite_row('i_design', DESIGN_WORKSPACE, 'me@acme.io', 'member', 'tok_design'), invite_row('i_other', MAIN_WORKSPACE, 'eve@acme.io', 'viewer', 'tok_other'));
+}
+let invitation_seq = 0;
 /** `?smtp=1`: the mail server is already set up. */
 let smtp: SmtpView = mock_params.get('smtp')
   ? { smtp: { host: 'smtp.acme.io', port: 587, username: 'sun', from: 'sun@acme.io', tls: 'starttls' }, has_password: true }
@@ -313,15 +364,17 @@ let sso: SsoProvider[] = [
   { id: 'keycloak', kind: 'oidc', name: 'Keycloak', client_id: 'sun', issuer_url: ISSUER, allowed_domains: ['acme.io'], has_secret: true },
 ];
 const sso_view = (): SsoView => ({ providers: structuredClone(sso), redirect_url: `${location.origin}/api/v1/auth/sso/{id}/callback` });
-/** The signed-in person. `?owner_email=0`: the owner hasn't given an email yet (first run). */
+/** The signed-in person (`m_me` at first). `?owner_email=0`: the owner hasn't given an email yet (first run).
+ *  `?signed_out=1`: nobody until a sign-in. */
 const me_state = {
   user: 'me',
-  is_owner: !mock_role || mock_role === 'owner',
-  groups: ROLE_GROUPS[mock_role ?? ''] ?? ([] as string[]),
+  is_owner: me_owner,
   via: 'local' as Me['via'],
-  email: mock_params.get('owner_email') === '0' ? null : ('me@acme.io' as string | null),
+  email: members[0].email,
   must_set_password: false,
+  signed_in: mock_params.get('signed_out') !== '1',
 };
+const me_id = () => members.find((m) => m.username === me_state.user)?.id ?? '';
 /** The mock's right password (unless an admin set another) and emailed code. */
 export const MOCK_PASSWORD = 'correct horse battery';
 export const MOCK_CODE = '123456';
@@ -393,45 +446,176 @@ const sign_in_as = (member: Member, by_code: boolean) =>
   Object.assign(me_state, {
     user: member.username,
     is_owner: member.is_owner,
-    groups: [...member.groups],
     via: 'local',
     email: member.email,
     must_set_password: by_code || member.must_set_password,
+    signed_in: true,
   });
 // `?member_view=<role>`: this member already picked a role view on another device.
 let view_role: string | null = new URLSearchParams(location.search).get('member_view');
-let group_seq = 0;
 function audit_entry(action: AuditAction, target: string, detail: string) {
   audit.unshift({ id: `a${++audit_seq}`, actor: `user:${me_state.user}`, action, target, detail, at: now() });
 }
-const group_names = (ids: string[]) => groups.filter((g) => ids.includes(g.id)).map((g) => g.name).join(', ') || 'no groups';
-const not_found = (what: string) => new ApiFailure(404, 'not_found', `not found: ${what}`);
-const slug = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/^_+|_+$/g, '') || 'group';
-function check_name(name: string, except?: string): string {
-  const clean = name.trim();
-  if (!clean || clean.length > 64) throw new ApiFailure(422, 'invalid_input', 'Give the group a name of 1 to 64 characters.');
-  if (groups.some((g) => g.id !== except && g.name.toLowerCase() === clean.toLowerCase())) {
-    throw new ApiFailure(422, 'invalid_input', `A group named \`${clean}\` already exists.`);
-  }
-  return clean;
+const not_found = () => new ApiFailure(404, 'not_found', 'Not found.');
+const forbidden = (message: string) => new ApiFailure(403, 'forbidden', message);
+const my_role = (workspace: string) => memberships.find((m) => m.workspace_id === workspace && m.member_id === me_id())?.role;
+/** Like the kernel: a deployment owner may do everything; anyone else what their role there grants. */
+const may = (permission: Permission, workspace: string) => me_state.is_owner || PERMISSIONS_OF[my_role(workspace) ?? 'viewer'].includes(permission);
+/** The mock's signed-in person, for the workspace mock: a deployment owner, and the workspaces they are in. */
+export const mock_me = () => ({ is_owner: me_state.is_owner, workspaces: memberships.filter((m) => m.member_id === me_id()).map((m) => m.workspace_id) });
+/** A workspace the mock created: its creator owns it. */
+export function mock_join(workspace: string, name: string) {
+  workspace_names.set(workspace, name);
+  if (me_id()) memberships.push(joined(workspace, me_id(), 'owner'));
 }
-/** Groups in their `PERMISSIONS` order, once each, like the kernel. */
-const ordered = (permissions: Permission[]) => PERMISSIONS.filter((p) => permissions.includes(p));
-const me_groups = () => groups.filter((g) => me_state.groups.includes(g.id));
-const my_permissions = () => (me_state.is_owner ? [...PERMISSIONS] : PERMISSIONS.filter((p) => me_groups().some((g) => g.permissions.includes(p))));
-/** The mock's signed-in person, for the workspace mock: their group ids and permissions. */
-export const mock_me = () => ({ groups: [...me_state.groups], permissions: my_permissions() });
+const owners = (workspace: string) => memberships.filter((m) => m.workspace_id === workspace && m.role === 'owner');
+const LAST_OWNER = () => new ApiFailure(409, 'conflict', 'A workspace keeps at least one owner: make someone else owner first.');
+/** 404 unless the caller sees `workspace` (a member, or a deployment owner). */
+function seen(workspace: string) {
+  if (!workspace_names.has(workspace) || !(me_state.is_owner || my_role(workspace))) throw not_found();
+}
+function need(permission: Permission, workspace: string, what: string) {
+  if (!may(permission, workspace))
+    throw forbidden(`Your role in this workspace can't ${what}. Ask a workspace admin for a role with the \`${permission}\` permission.`);
+}
+const view_of = (i: MockInvitation): InvitationView => ({
+  id: i.id, workspace_id: i.workspace_id, workspace_name: workspace_names.get(i.workspace_id) ?? '', email: i.email, role: i.role,
+  inviter: members.find((m) => m.id === i.inviter_id)?.username ?? null, expires_at: i.expires_at,
+});
+const pending = (i: MockInvitation) => !i.accepted_at && !i.declined_at && i.expires_at > now();
+const plain = ({ token: _, ...rest }: MockInvitation): Invitation => rest;
+const DEPLOYMENT_ONLY = /^\/(members|audit|smtp|settings\/(sso|security))(\/|$)/;
+
+/** The workspace members, invitations and sign-up routes, like crates/sun-api/src/auth/{members,invitations}.rs. */
+function membership_route(method: string, path: string, body: unknown): unknown {
+  const route = `${method} ${path}`;
+  const input = (body ?? {}) as { email?: string; role?: Role };
+  if (route === 'POST /signup') {
+    const email = (input.email ?? '').trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new ApiFailure(422, 'invalid_input', 'That is not an email address.');
+    if (!MOCK_SIGNUP && !invitations.some((i) => pending(i) && i.email === email)) {
+      throw forbidden('Sign-up is closed here. Ask a workspace admin for an invitation.');
+    }
+    if (!smtp.smtp) throw new ApiFailure(503, 'unavailable', 'This deployment can’t send email yet, so nobody can sign up. Ask its owner.');
+    const known = members.find((m) => m.email === email);
+    if (known && (known.has_password || verified.has(known.id) || known.issuer !== 'local')) {
+      throw new ApiFailure(409, 'account_exists', 'An account with this email exists. Sign in instead.');
+    }
+    if (!known) {
+      const username = email.split('@')[0].replace(/[^A-Za-z0-9._-]/g, '') || 'member';
+      members.push({ id: `m_${username}_${members.length}`, issuer: 'local', subject: email, username, email, is_owner: false, has_password: false, must_set_password: false });
+    }
+    return { email };
+  }
+  const look_up = path.match(/^\/invitations\/([^/]+)$/);
+  if (method === 'GET' && look_up) {
+    const found = invitations.find((i) => i.token === decodeURIComponent(look_up[1]) && pending(i));
+    if (!found) throw not_found();
+    return view_of(found);
+  }
+  const signed_in = () => {
+    if (!me_state.signed_in) throw new ApiFailure(401, 'unauthorized', 'Sign in first.');
+  };
+  if (route === 'GET /me/invitations') signed_in();
+  if (route === 'GET /me/invitations') return invitations.filter((i) => pending(i) && i.email === me_state.email).map(view_of);
+  const answer = path.match(/^\/invitations\/([^/]+)\/(accept|decline)$/);
+  if (method === 'POST' && answer) {
+    signed_in();
+    const found = invitations.find((i) => i.id === decodeURIComponent(answer[1]) && pending(i));
+    if (!found) throw not_found();
+    if (found.email !== me_state.email) throw forbidden('This invitation is for another email address.');
+    if (answer[2] === 'decline') {
+      found.declined_at = now();
+      return null;
+    }
+    found.accepted_at = now();
+    const existing = memberships.find((m) => m.workspace_id === found.workspace_id && m.member_id === me_id());
+    // Accepting never lowers a role they have there.
+    if (existing) existing.role = covers(existing.role, found.role) ? existing.role : found.role;
+    else memberships.push({ ...joined(found.workspace_id, me_id(), found.role), created_at: now() });
+    return { ...memberships.find((m) => m.workspace_id === found.workspace_id && m.member_id === me_id()) };
+  }
+  const scoped = path.match(/^\/workspaces\/([^/]+)\/(members|invitations|leave)(?:\/([^/]+))?$/);
+  if (!scoped) return undefined;
+  signed_in();
+  const [workspace, what, target] = [decodeURIComponent(scoped[1]), scoped[2], scoped[3] && decodeURIComponent(scoped[3])];
+  seen(workspace);
+  if (route.endsWith('/leave')) {
+    const mine = memberships.find((m) => m.workspace_id === workspace && m.member_id === me_id());
+    if (!mine) throw new ApiFailure(422, 'invalid_input', 'You are not a member of this workspace.');
+    if (mine.role === 'owner' && owners(workspace).length === 1) throw LAST_OWNER();
+    memberships = memberships.filter((m) => m !== mine);
+    return null;
+  }
+  if (what === 'members') {
+    if (method === 'GET') {
+      return memberships
+        .filter((m) => m.workspace_id === workspace)
+        .flatMap((m) => {
+          const who = members.find((p) => p.id === m.member_id);
+          return who ? [{ ...m, username: who.username, email: who.email }] : [];
+        });
+    }
+    need('edit_members', workspace, 'edit members');
+    const row = memberships.find((m) => m.workspace_id === workspace && m.member_id === target);
+    if (!row) throw not_found();
+    const mine = my_role(workspace);
+    if (!me_state.is_owner && (!covers(mine, row.role) || (input.role && !covers(mine, input.role)))) {
+      throw forbidden('You can’t change the role of someone above you, or give a role above your own.');
+    }
+    const last = row.role === 'owner' && owners(workspace).length === 1;
+    if (method === 'DELETE') {
+      if (last) throw LAST_OWNER();
+      memberships = memberships.filter((m) => m !== row);
+      return null;
+    }
+    if (last && input.role !== 'owner') throw LAST_OWNER();
+    row.role = input.role ?? row.role;
+    audit_entry('role_change', members.find((p) => p.id === row.member_id)?.username ?? '', `${workspace_names.get(workspace)}: ${row.role}`);
+    return { ...row };
+  }
+  need('invite_members', workspace, 'invite members');
+  if (method === 'GET') return invitations.filter((i) => i.workspace_id === workspace && pending(i)).reverse().map(plain);
+  if (method === 'DELETE') {
+    const found = invitations.find((i) => i.id === target && i.workspace_id === workspace && pending(i));
+    if (!found) throw not_found();
+    invitations = invitations.filter((i) => i !== found);
+    return null;
+  }
+  const email = (input.email ?? '').trim().toLowerCase();
+  const role = input.role ?? 'viewer';
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new ApiFailure(422, 'invalid_input', 'That is not an email address.');
+  if (!me_state.is_owner && !covers(my_role(workspace), role)) throw forbidden(`You can't add someone as ${role} in that workspace.`);
+  const already = members.find((m) => m.email === email);
+  if (already && memberships.some((m) => m.workspace_id === workspace && m.member_id === already.id)) {
+    throw new ApiFailure(422, 'invalid_input', `${email} is already a member of ${workspace_names.get(workspace)}.`);
+  }
+  invitations = invitations.filter((i) => !(i.workspace_id === workspace && i.email === email && pending(i)));
+  const id = `i_${++invitation_seq}`;
+  const created = invite_row(id, workspace, email, role, `tok_${invitation_seq}`, new Date(Date.now() + 7 * 864e5).toISOString());
+  created.inviter_id = me_id() || null;
+  created.created_at = now();
+  invitations.push(created);
+  const mailed = !!smtp.smtp;
+  return { invitation: plain(created), mailed, link: mailed ? null : `${location.origin}/#/invite/${created.token}` };
+}
 
 function fake(method: string, path: string, body: unknown): unknown {
   const route = `${method} ${path}`;
-  if (route === 'GET /auth') return { providers: sso.filter((p) => p.has_secret).map(({ id, name, kind }) => ({ id, name, kind })), local: true };
+  if (route === 'GET /auth') {
+    const providers = sso.filter((p) => p.has_secret).map(({ id, name, kind }) => ({ id, name, kind }));
+    return { providers, local: true, allow_signup: MOCK_SIGNUP, workspace_creation_disabled: MOCK_CREATION_DISABLED };
+  }
+  const answered = membership_route(method, path, body);
+  if (answered !== undefined) return answered;
+  if (DEPLOYMENT_ONLY.test(path) && !me_state.is_owner) throw forbidden('Only a deployment owner can do this.');
   if (route === 'GET /settings/sso') return sso_view();
   const sso_path = path.match(/^\/settings\/sso\/([^/]+)$/);
   if (sso_path) {
     const id = decodeURIComponent(sso_path[1]);
     const old = sso.find((p) => p.id === id);
     if (method === 'DELETE') {
-      if (!old) throw not_found(`sign-in provider ${id}`);
+      if (!old) throw not_found();
       sso = sso.filter((p) => p !== old);
       audit_entry('settings_change', 'sso_providers', `sso ${id} ${old.kind} removed`);
       return null;
@@ -453,10 +637,16 @@ function fake(method: string, path: string, body: unknown): unknown {
     audit_entry('settings_change', 'sso_providers', `sso ${id} ${input.kind} saved${client_secret ? ', secret set' : ''}`);
     return sso_view();
   }
-  if (route === 'DELETE /session') return null;
+  if (route === 'DELETE /session') {
+    me_state.signed_in = false;
+    return null;
+  }
   if (route === 'GET /me') {
+    if (!me_state.signed_in) throw new ApiFailure(401, 'unauthorized', 'Sign in first.');
     const must_enroll_two_step = policy.require_two_step && me_state.via === 'local' && !factors_of(me_state.user).length;
-    return { ...me_state, groups: structuredClone(me_groups()), permissions: my_permissions(), needs_email: !me_state.email, must_enroll_two_step, view_role };
+    const { signed_in: _, ...me } = me_state;
+    const memberships_of_me = memberships.filter((m) => m.member_id === me_id()).map((m) => ({ ...m }));
+    return { ...me, memberships: memberships_of_me, email_verified: verified.has(me_id()), needs_email: !me_state.email, must_enroll_two_step, view_role };
   }
   if (route === 'POST /session') {
     const input = body as { email?: string; password?: string };
@@ -470,6 +660,7 @@ function fake(method: string, path: string, body: unknown): unknown {
       pending_sign_in = member;
       return { two_step: { challenge: 'c_mock', methods } };
     }
+    if (by_code) verified.add(member.id);
     sign_in_as(member, by_code);
     return null;
   }
@@ -595,6 +786,8 @@ function fake(method: string, path: string, body: unknown): unknown {
     const email = (body as { email: string }).email.trim().toLowerCase();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new ApiFailure(422, 'invalid_input', 'That is not an email address.');
     me_state.email = email;
+    const mine = members.find((m) => m.id === me_id());
+    if (mine) mine.email = email;
     return { email };
   }
   if (route === 'GET /smtp') return structuredClone(smtp);
@@ -612,20 +805,21 @@ function fake(method: string, path: string, body: unknown): unknown {
     return { sent_to: me_state.email };
   }
   if (route === 'POST /members') {
-    const input = body as { email: string; username: string; group_ids?: string[]; password?: string; must_change?: boolean };
+    const input = body as { email: string; username: string; workspace_id?: string; role?: Role; password?: string; must_change?: boolean };
     if (input.password !== undefined) check_password(input.password);
     else if (!smtp.smtp) throw new ApiFailure(409, 'conflict', 'Configure email first: Settings → Email (SMTP).');
     const email = input.email.trim().toLowerCase();
     if (members.some((m) => m.email === email)) throw new ApiFailure(422, 'invalid_input', 'Someone with that email is already a member.');
-    const ids = input.group_ids ?? [];
+    const [workspace, role] = [input.workspace_id ?? MAIN_WORKSPACE, input.role ?? 'viewer'];
     const with_password = input.password !== undefined;
     const member: Member = {
-      id: `m_${input.username}`, issuer: 'local', subject: email, username: input.username, email, is_owner: false, groups: ids,
+      id: `m_${input.username}`, issuer: 'local', subject: email, username: input.username, email, is_owner: false,
       has_password: with_password, must_set_password: with_password && input.must_change !== false, deactivated_at: null,
     };
     members.push(member);
+    memberships.push({ ...joined(workspace, member.id, role), created_at: now() });
     if (input.password !== undefined) set_passwords.set(member.id, input.password);
-    audit_member(member.username, `${with_password ? 'created with a password' : 'invited'} ${email} into [${group_names(ids)}]`);
+    audit_member(member.username, `${with_password ? 'created with a password' : 'invited'} ${email} into ${workspace_names.get(workspace)} as ${role}`);
     return { ...member };
   }
   const member_path = path.match(/^\/members\/([^/]+)\/(invite|deactivate|activate|password)$/);
@@ -656,61 +850,14 @@ function fake(method: string, path: string, body: unknown): unknown {
     view_role = (body as { view_role: string | null }).view_role;
     return { view_role };
   }
-  if (route === 'GET /groups') return structuredClone(groups);
-  if (route === 'POST /groups') {
-    const input = body as { name: string; permissions?: Permission[] };
-    const name = check_name(input.name);
-    let key = slug(name);
-    for (let n = 2; groups.some((g) => g.key === key) || key === 'owner'; n++) key = `${slug(name)}_${n}`;
-    const group: Group = { id: `g_${++group_seq}`, key, name, permissions: ordered(input.permissions ?? []) };
-    groups.push(group);
-    audit_entry('group_change', name, `created as role:${key}; permissions: ${group.permissions.join(', ')}`);
-    return structuredClone(group);
-  }
-  const group_path = path.match(/^\/groups\/([^/]+)(\/members)?$/);
-  if (group_path) {
-    const group = groups.find((g) => g.id === decodeURIComponent(group_path[1]));
-    if (!group) throw not_found('group');
-    if (group_path[2]) {
-      const ids = (body as { member_ids: string[] }).member_ids;
-      for (const m of members) m.groups = m.groups.filter((g) => g !== group.id).concat(ids.includes(m.id) ? [group.id] : []);
-      const now_in = members.filter((m) => m.groups.includes(group.id));
-      audit_entry('group_change', group.name, `members: ${now_in.map((m) => m.username).join(', ')}`);
-      return now_in.map((m) => ({ ...m }));
-    }
-    if (method === 'DELETE') {
-      groups = groups.filter((g) => g !== group);
-      for (const m of members) m.groups = m.groups.filter((g) => g !== group.id);
-      me_state.groups = me_state.groups.filter((g) => g !== group.id);
-      audit_entry('group_change', group.name, `deleted (was role:${group.key})`);
-      return null;
-    }
-    const change = body as { name?: string; permissions?: Permission[] };
-    if (change.name !== undefined) {
-      const name = check_name(change.name, group.id);
-      audit_entry('group_change', name, `renamed from ${group.name}`);
-      group.name = name;
-    }
-    if (change.permissions) {
-      group.permissions = ordered(change.permissions);
-      audit_entry('group_change', group.name, `permissions: ${group.permissions.join(', ')}`);
-    }
-    return structuredClone(group);
-  }
   if (route === 'GET /members') return members.map((m) => ({ ...m, has_two_step: factors_of(m.username).length > 0 }));
   if (route === 'GET /audit') return audit.map((a) => ({ ...a }));
-  const access_path = path.match(/^\/members\/([^/]+)\/(groups|owner)$/);
-  if (method === 'PUT' && access_path) {
-    const member = members.find((m) => m.id === decodeURIComponent(access_path[1]));
-    if (!member) throw not_found('member');
-    if (access_path[2] === 'owner') {
-      member.is_owner = (body as { is_owner: boolean }).is_owner;
-      audit_entry('role_change', member.username, member.is_owner ? 'made owner' : 'no longer owner');
-      return { ...member };
-    }
-    const ids = (body as { group_ids: string[] }).group_ids;
-    audit_entry('role_change', member.username, `${group_names(member.groups)} -> ${group_names(ids)}`);
-    member.groups = groups.filter((g) => ids.includes(g.id)).map((g) => g.id);
+  const owner_path = path.match(/^\/members\/([^/]+)\/owner$/);
+  if (method === 'PUT' && owner_path) {
+    const member = member_by_id(owner_path[1]);
+    if (member.id === me_id()) throw new ApiFailure(422, 'invalid_input', 'You can’t change your own owner flag.');
+    member.is_owner = (body as { is_owner: boolean }).is_owner;
+    audit_entry('role_change', member.username, member.is_owner ? 'made deployment owner' : 'no longer deployment owner');
     return { ...member };
   }
   throw new ApiFailure(404, 'not_found', `No mock for ${route}`);

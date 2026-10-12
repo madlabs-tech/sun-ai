@@ -1,65 +1,31 @@
-<!-- Account and workspace menu (the shared Menu with a custom trigger): who is signed in, the workspaces
-     their groups see (the current one checked), and Log out. Whoever holds `create_workspace` creates
-     workspaces here: name, URL slug (from the name until edited), the task-key prefix it implies, and who
-     sees it. A workspace's own settings and delete live in Settings → <workspace>. -->
+<!-- Account and workspace menu (the shared Menu with a custom trigger): who is signed in, the workspaces they
+     belong to (the current one checked), their pending invitations (a count on the trigger; the dialog joins or
+     declines), "New workspace" (anyone, unless the deployment lets only its owners) and Log out. A workspace's
+     own settings and delete live in Settings → <workspace>. -->
 <script lang="ts">
-  import { Button, Dialog, Icon, Input } from '@hryer/madlabs-design-system/svelte';
-  import type { Group } from '../api/auth';
-  import { api } from '../api/client';
-  import { app, workspace_of, can, current_workspace, error_text, load_workspace, sign_out } from '../app_state.svelte';
-  import { SLUG, prefix_from_slug, slug_from_name } from '../format';
+  import { Badge, Button, Dialog, Icon } from '@hryer/madlabs-design-system/svelte';
+  import { app, workspace_of, can_create_workspace, current_workspace, sign_out } from '../app_state.svelte';
   import { show_workspace } from '../router.svelte';
+  import Invitations from './Invitations.svelte';
   import Menu, { type MenuItem } from './Menu.svelte';
-  import WorkspaceAccess, { access_choices } from './WorkspaceAccess.svelte';
+  import WorkspaceForm from './WorkspaceForm.svelte';
   import WorkspaceLogo from './WorkspaceLogo.svelte';
 
   const workspace = $derived(workspace_of(current_workspace()));
   const initial = (name: string | undefined) => (name?.trim()[0] ?? '?').toUpperCase();
+  const invites = $derived(app.invitations.length);
 
   const items = $derived<(MenuItem | null)[]>([
     ...app.workspaces.map((w) => ({ id: w.id, lead: logo, label: w.name, checked: w.id === workspace?.id, onselect: () => show_workspace(w.slug) })),
-    ...(can('create_workspace') ? [{ label: 'Create workspace', icon: 'plus', onselect: open_create }] : []),
+    ...(invites ? [{ label: 'Invitations', icon: 'mail', badge: String(invites), onselect: () => (answering = true) }] : []),
+    ...(can_create_workspace() ? [{ label: 'New workspace', icon: 'plus', onselect: () => (creating = true) }] : []),
     null,
     { label: 'Log out', icon: 'log-out', danger: true, onselect: sign_out },
   ]);
 
   let creating = $state(false);
-  let name = $state('');
-  /** The slug as typed; `null` until then, while it follows the name. */
-  let slug_typed = $state<string | null>(null);
-  const slug = $derived(slug_typed ?? (name.trim() ? slug_from_name(name) : ''));
-  let errors = $state<{ name?: string; slug?: string }>({});
-  /** The groups this person may give or take access for, and the ticked ones. */
-  let choices = $state<Group[]>([]);
-  let picked = $state<string[]>([]);
+  let answering = $state(false);
   let busy = $state(false);
-
-  async function open_create() {
-    creating = true;
-    [name, slug_typed, errors] = ['', null, {}];
-    choices = await access_choices();
-    picked = app.groups.map((g) => g.id).filter((g) => choices.some((c) => c.id === g));
-  }
-
-  async function create(e?: Event) {
-    e?.preventDefault();
-    errors = {
-      name: name.trim() ? undefined : 'Give the workspace a name.',
-      slug: SLUG.test(slug) ? undefined : 'Use lowercase letters and digits, in words joined by single hyphens.',
-    };
-    if (errors.name || errors.slug) return;
-    busy = true;
-    try {
-      const created = await api.create_workspace(name.trim(), [...picked], slug);
-      creating = false;
-      await load_workspace();
-      show_workspace(created.slug);
-    } catch (err) {
-      const text = error_text(err);
-      errors = /slug/i.test(text) ? { slug: text } : { name: text };
-    }
-    busy = false;
-  }
 </script>
 
 {#snippet logo(item: MenuItem)}<WorkspaceLogo workspace={workspace_of(item.id ?? '')} size={20} />{/snippet}
@@ -70,6 +36,7 @@
       <button type="button" class="switcher__trigger" aria-label="Workspace: {workspace?.name ?? 'none'}" {...attrs}>
         <WorkspaceLogo {workspace} size={28} />
         <span class="switcher__name">{workspace?.name ?? 'Workspace'}</span>
+        {#if invites}<Badge tone="warning" count aria-label="{invites} pending {invites === 1 ? 'invitation' : 'invitations'}">{invites}</Badge>{/if}
         <Icon name="chevrons-up-down" size={16} />
       </button>
     {/snippet}
@@ -89,27 +56,17 @@
 </div>
 
 <Dialog open={creating} onclose={() => (creating = false)} title="New workspace">
-  <form id="workspace-form" class="workspace-form" onsubmit={create} novalidate>
-    <Input label="Name" placeholder="e.g. Marketing" maxlength={64} bind:value={name} error={errors.name} hint="Each workspace has its own workflows, tasks, repos and knowledge." />
-    <Input
-      label="Workspace URL"
-      mono
-      maxlength={48}
-      autocomplete="off"
-      spellcheck={false}
-      value={slug}
-      oninput={(e: Event) => (slug_typed = (e.currentTarget as HTMLInputElement).value.trim().toLowerCase())}
-      error={errors.slug}
-      hint="Links use ?workspace={slug || '…'}. It can't be changed later."
-    />
-    <p class="workspace-form__prefix" aria-live="polite">
-      Task keys: <span class="ml-mono">{prefix_from_slug(slug) || '…'}-1</span>, <span class="ml-mono">{prefix_from_slug(slug) || '…'}-2</span>, … The prefix can be changed in Settings.
-    </p>
-    <WorkspaceAccess {choices} bind:picked />
-  </form>
+  {#if creating}<WorkspaceForm id="workspace-form" bind:busy oncreated={() => (creating = false)} />{/if}
   {#snippet footer()}
     <Button variant="secondary" onclick={() => (creating = false)}>Cancel</Button>
     <Button variant="ice" type="submit" form="workspace-form" loading={busy}>Create workspace</Button>
+  {/snippet}
+</Dialog>
+
+<Dialog open={answering} onclose={() => (answering = false)} title="Invitations">
+  <Invitations ondone={() => (answering = !!app.invitations.length)} />
+  {#snippet footer()}
+    <Button variant="secondary" onclick={() => (answering = false)}>Close</Button>
   {/snippet}
 </Dialog>
 
@@ -189,16 +146,5 @@
     padding: var(--space-1) var(--space-2);
     font-size: var(--size-xs);
     color: var(--fg-2);
-  }
-  .workspace-form {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-  }
-  .workspace-form__prefix {
-    margin: calc(-1 * var(--space-2)) 0 0;
-    color: var(--fg-2);
-    font-size: var(--size-sm);
-    line-height: 1.5;
   }
 </style>

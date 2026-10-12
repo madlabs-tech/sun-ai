@@ -1,5 +1,6 @@
-<!-- Settings shell, multica-style: a sub-nav ("My Account", then a group named after the open workspace,
-     then "Ecosystem": Overview and the ecosystem pages, then Security / Agents sub-headings) and one page per entry at #/settings/<id>. Pages the signed-in person can't use are hidden;
+<!-- Settings shell: a sub-nav ("My Account", then a group named after the open workspace: its General, Members
+     and Code, then "Deployment": Overview and the deployment's own pages with Security / Agents sub-headings, for
+     deployment owners only) and one page per entry at #/settings/<id>. Pages the signed-in person can't use are hidden;
      an unknown or hidden id opens the first visible page. Phones (< 768 px): #/settings is the list, a page has a
      back link to it. The section components own their cards; this file only picks and frames them. -->
 <script lang="ts">
@@ -21,12 +22,12 @@
   import SettingsSpend from './SettingsSpend.svelte';
   import SettingsEmbeddings from './SettingsEmbeddings.svelte';
   import SettingsWorkspace from './SettingsWorkspace.svelte';
-  import SettingsAccess from './SettingsAccess.svelte';
   import SettingsCode from './SettingsCode.svelte';
-  import { can, current_workspace, feature_on, workspace_of } from '../lib/app_state.svelte';
+  import SettingsAccounts from './SettingsAccounts.svelte';
+  import { can, current_workspace, feature_on, is_owner, workspace_of } from '../lib/app_state.svelte';
   import { href, route } from '../lib/router.svelte';
 
-  type Group = 'account' | 'workspace' | 'ecosystem';
+  type Group = 'account' | 'workspace' | 'deployment';
   interface SettingsPage {
     id: string;
     label: string;
@@ -38,7 +39,8 @@
   }
 
   const always = () => true;
-  const admin = () => can('manage_settings');
+  /** The deployment's own settings: its owners only (the kernel answers 403 to anyone else). */
+  const owner = is_owner;
   const workspace = $derived(workspace_of(current_workspace()));
   /** The open workspace's pages: only with a workspace, and `edit_workspace` for all but General. */
   const in_workspace = (permission?: 'edit_workspace') => () => !!workspace && (!permission || can(permission));
@@ -46,25 +48,25 @@
   const PAGES: SettingsPage[] = [
     { id: 'account', label: 'Account', icon: 'user', group: 'account', show: always, parts: [SettingsAccount] },
     { id: 'workspace', label: 'General', icon: 'settings', group: 'workspace', show: in_workspace(), parts: [SettingsWorkspace] },
-    { id: 'access', label: 'Access', icon: 'users', group: 'workspace', show: in_workspace('edit_workspace'), parts: [SettingsAccess] },
+    { id: 'members', label: 'Members', icon: 'users', group: 'workspace', show: in_workspace(), parts: [Members] },
     { id: 'code', label: 'Code', icon: 'git-branch', group: 'workspace', show: in_workspace('edit_workspace'), parts: [SettingsCode] },
-    { id: 'overview', label: 'Overview', icon: 'settings', group: 'ecosystem', show: always, parts: [SettingsGeneral] },
-    { id: 'members', label: 'Members', icon: 'users', group: 'ecosystem', show: () => can('view_members') || can('manage_groups'), parts: [Members] },
-    { id: 'audit', label: 'Audit log', icon: 'scroll-text', group: 'ecosystem', show: admin, parts: [SettingsAudit] },
-    { id: 'billing', label: 'Plan & billing', icon: 'credit-card', group: 'ecosystem', show: always, parts: [SettingsPlan, SettingsBilling] },
-    { id: 'support', label: 'Support', icon: 'life-buoy', group: 'ecosystem', show: always, parts: [SettingsSupport] },
-    { id: 'sign-in', label: 'Sign-in & 2-step', icon: 'shield-check', group: 'ecosystem', subgroup: 'Security', show: admin, parts: [SettingsSignIn, SettingsTwoStep] },
-    { id: 'email', label: 'Email', icon: 'mail', group: 'ecosystem', subgroup: 'Security', show: admin, parts: [SettingsEmail] },
-    { id: 'secrets', label: 'Secrets', icon: 'key-round', group: 'ecosystem', subgroup: 'Security', show: () => can('manage_secrets'), parts: [SettingsSecrets] },
-    { id: 'usage', label: 'Usage limits', icon: 'gauge', group: 'ecosystem', subgroup: 'Agents', show: () => can('manage_runtimes'), parts: [SettingsLimit, SettingsSpend] },
-    { id: 'embeddings', label: 'Embeddings', icon: 'sparkles', group: 'ecosystem', subgroup: 'Agents', show: () => feature_on('knowledge') && admin(), parts: [SettingsEmbeddings] },
+    { id: 'overview', label: 'Overview', icon: 'settings', group: 'deployment', show: owner, parts: [SettingsGeneral] },
+    { id: 'users', label: 'Users', icon: 'user-cog', group: 'deployment', show: owner, parts: [SettingsAccounts] },
+    { id: 'audit', label: 'Audit log', icon: 'scroll-text', group: 'deployment', show: owner, parts: [SettingsAudit] },
+    { id: 'billing', label: 'Plan & billing', icon: 'credit-card', group: 'deployment', show: owner, parts: [SettingsPlan, SettingsBilling] },
+    { id: 'support', label: 'Support', icon: 'life-buoy', group: 'deployment', show: owner, parts: [SettingsSupport] },
+    { id: 'sign-in', label: 'Sign-in & 2-step', icon: 'shield-check', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSignIn, SettingsTwoStep] },
+    { id: 'email', label: 'Email', icon: 'mail', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsEmail] },
+    { id: 'secrets', label: 'Secrets', icon: 'key-round', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSecrets] },
+    { id: 'usage', label: 'Usage limits', icon: 'gauge', group: 'deployment', subgroup: 'Agents', show: owner, parts: [SettingsLimit, SettingsSpend] },
+    { id: 'embeddings', label: 'Embeddings', icon: 'sparkles', group: 'deployment', subgroup: 'Agents', show: () => feature_on('knowledge') && owner(), parts: [SettingsEmbeddings] },
   ];
 
-  /** Nav groups and the scope badge their pages carry (multica's SettingsScopeBadge). */
+  /** Nav groups and the scope badge their pages carry. */
   const GROUPS: { id: Group; label: string; scope: string; scope_icon: string }[] = $derived([
     { id: 'account', label: 'My Account', scope: 'Account', scope_icon: 'user' },
     { id: 'workspace', label: workspace?.name ?? 'Workspace', scope: 'Workspace', scope_icon: 'layers' },
-    { id: 'ecosystem', label: 'Ecosystem', scope: 'Ecosystem', scope_icon: 'building-2' },
+    { id: 'deployment', label: 'Deployment', scope: 'Deployment', scope_icon: 'building-2' },
   ]);
 
   // Derived: /me (and so can()) may arrive after this page opens.

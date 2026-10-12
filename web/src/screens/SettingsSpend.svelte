@@ -24,7 +24,7 @@
 
   Promise.all([api.get_spend(), auth.me().catch(() => null)]).then(([view, me]) => {
     fill(view);
-    can_set = !!me?.permissions.includes('manage_runtimes');
+    can_set = !!me?.is_owner;
   }, (e) => (load_error = error_text(e)));
 
   async function save(value: number | null) {

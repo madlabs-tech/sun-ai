@@ -53,7 +53,7 @@ test('menu: account, workspaces with the current one checked, switching, keyboar
   await expect(page.getByText('me@acme.io')).toBeVisible();
   await expect(menu(page).getByRole('menuitemradio')).toHaveText([/Main/]);
   await expect(menu(page).getByRole('menuitemradio', { name: 'Main' })).toHaveAttribute('aria-checked', 'true');
-  await menu(page).getByRole('menuitem', { name: 'Create workspace' }).click();
+  await menu(page).getByRole('menuitem', { name: 'New workspace' }).click();
   await expect(menu(page)).toBeHidden();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Name').fill('Growth');
@@ -102,10 +102,13 @@ test('menu: Esc closes only the menu, not the task panel behind it', async ({ pa
   await expect(panel).toBeVisible();
 });
 
-test('menu: members see no workspace changes', async ({ page }) => {
+test('menu: anyone creates a workspace, unless the deployment lets only its owners', async ({ page }) => {
   await open(page, 'tasks', '&mock_role=member');
   await trigger(page).click();
   await expect(menu(page).getByRole('menuitemradio')).not.toHaveCount(0);
+  await expect(menu(page).getByRole('menuitem')).toHaveText(['New workspace', 'Log out']);
+  await open(page, 'tasks', '&mock_role=member&creation_disabled=1');
+  await trigger(page).click();
   await expect(menu(page).getByRole('menuitem')).toHaveText(['Log out']);
 });
 

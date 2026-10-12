@@ -48,7 +48,7 @@ import type { OutboxItem,
 } from './types';
 import { BYO_KEY_ADAPTERS, MAIN_WORKSPACE, TASK_MOVES } from './types';
 import { LineCounter, isMap, isSeq, parse, parseDocument, stringify } from 'yaml';
-import { ADMIN, MEMBER, mock_me, VIEWER } from './auth';
+import { DESIGN_WORKSPACE, mock_join, mock_me } from './auth';
 import { eval_route } from './mock_evals';
 import { market_route } from './mock_market';
 import { account_route, sun_cloud } from './mock_account';
@@ -789,13 +789,15 @@ function save_source(id: string | null, source: string, workspace = MAIN_WORKSPA
 export const clone = <T>(v: T): T => structuredClone(v);
 
 // Workspaces (workspace = workspace): Main holds the seed workflows.
-const new_workspace = (id: string, name: string, slug: string, created_at: string, group_ids: string[]): Workspace => ({
+const new_workspace = (id: string, name: string, slug: string, created_at: string, created_by: string | null = null): Workspace => ({
   id, name, slug, description: '', context: '', logo_url: null,
-  issue_prefix: slug.replace(/-/g, '').slice(0, 4).toUpperCase(), issue_counter: 0, default_workflow_id: null, created_at, group_ids,
+  issue_prefix: slug.replace(/-/g, '').slice(0, 4).toUpperCase(), issue_counter: 0, default_workflow_id: null, created_at, created_by,
   git_settings: { github_enabled: true, pr_sidebar: true, auto_link: true, move_on_merge: true },
 });
 const WORKSPACES: Workspace[] = [
-  { ...new_workspace(MAIN_WORKSPACE, 'Main', 'main', '2026-10-01T09:00:00Z', [VIEWER, MEMBER, ADMIN]), issue_prefix: 'SUN', issue_counter: 151 },
+  { ...new_workspace(MAIN_WORKSPACE, 'Main', 'main', '2026-10-01T09:00:00Z'), issue_prefix: 'SUN', issue_counter: 151 },
+  // `?invited=1`: a workspace the signed-in person is only invited to (see auth.ts).
+  ...(new URLSearchParams(location.search).get('invited') === '1' ? [new_workspace(DESIGN_WORKSPACE, 'Design', 'design', '2026-10-02T09:00:00Z', 'm_ana')] : []),
 ];
 
 /** Like the kernel: a given slug must be valid and free; the default comes from the name, made unique with `-2`, …. */
@@ -837,23 +839,16 @@ function workspace_text(raw: unknown, max: number, what: string): string {
   return text;
 }
 
-/** Like the kernel: a workspace is seen by its groups, and by owners and `access_all_workspaces`. */
+/** Like the kernel: a workspace is seen by its members, and by deployment owners. */
 const sees = (workspace: Workspace) => {
   const me = mock_me();
-  return me.permissions.includes('access_all_workspaces') || workspace.group_ids.some((g) => me.groups.includes(g));
+  return me.is_owner || me.workspaces.includes(workspace.id);
 };
 
-/** Without `manage_groups`, only your own groups' access changes (422 otherwise). */
-function only_own_groups(changed: string[]) {
-  const me = mock_me();
-  if (!me.permissions.includes('manage_groups') && changed.some((g) => !me.groups.includes(g))) {
-    throw invalid('You can give or take workspace access only for your own groups.');
-  }
-}
-
+/** 404 for a workspace that doesn't exist or that the caller doesn't see. */
 export function find_workspace(id: string): Workspace {
   const workspace = WORKSPACES.find((b) => b.id === id);
-  if (!workspace) throw not_found('Workspace');
+  if (!workspace || !sees(workspace)) throw not_found('Workspace');
   return workspace;
 }
 
@@ -901,20 +896,15 @@ function route(method: string, full_path: string, body: unknown): unknown {
     case 'GET /workspaces':
       return clone(WORKSPACES.filter(sees));
     case 'POST /workspaces': {
-      const group_ids = (input.group_ids as string[] | undefined) ?? [];
-      only_own_groups(group_ids);
+      if (new URLSearchParams(location.search).get('creation_disabled') === '1' && !mock_me().is_owner) {
+        throw new MockError(403, { error: { code: 'forbidden', message: 'Only the deployment’s owners can create workspaces here.' } });
+      }
       const name = workspace_name(input.name);
-      const workspace = new_workspace(fake_id('B', WORKSPACES.length + 1), name, workspace_slug(input.slug, name), new Date().toISOString(), group_ids);
+      const workspace = new_workspace(fake_id('B', WORKSPACES.length + 1), name, workspace_slug(input.slug, name), new Date().toISOString(), 'm_me');
       const base = workspace.issue_prefix;
       for (let n = 2; WORKSPACES.some((w) => w.issue_prefix === workspace.issue_prefix); n++) workspace.issue_prefix = `${base.slice(0, 10 - String(n).length)}${n}`;
       WORKSPACES.push(workspace);
-      return clone(workspace);
-    }
-    case 'PUT /workspaces/:id/groups': {
-      const workspace = find_workspace(parts[1]);
-      const next = (input.group_ids as string[] | undefined) ?? [];
-      only_own_groups([...workspace.group_ids.filter((g) => !next.includes(g)), ...next.filter((g) => !workspace.group_ids.includes(g))]);
-      workspace.group_ids = next;
+      mock_join(workspace.id, workspace.name);
       return clone(workspace);
     }
     case 'PATCH /workspaces/:id': {

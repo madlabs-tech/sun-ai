@@ -2,7 +2,7 @@
 <script lang="ts">
   import { Badge, Icon, Toast } from '@hryer/madlabs-design-system/svelte';
   import { app, dismiss, feature_on, load_workspace, toasts, toggle_sidebar, workspace_of } from './lib/app_state.svelte';
-  import { NAV, TAB_COUNT, href, route } from './lib/router.svelte';
+  import { TAB_COUNT, href, page_on, route, visible_nav } from './lib/router.svelte';
   import { needs_approval } from './lib/format';
   import Sidebar from './screens/Sidebar.svelte';
   import Tasks from './screens/Tasks.svelte';
@@ -41,15 +41,15 @@
   });
 
   const PAGES = { projects: Projects, agents: Agents, approvals: Approvals, runtimes: Runtimes, hosts: Hosts, workflows: Workflows, mods: Mods, catalog: Catalog, knowledge: Knowledge, memory: Memory, evals: Evals, market: Market, settings: Settings, more: More };
-  // A turned-off feature's page (an old link) falls back to Tasks.
-  const Page = $derived(feature_on(route.page) ? PAGES[route.page as keyof typeof PAGES] : undefined);
+  // A turned-off feature's page, or a deployment page for someone who isn't its owner (an old link), falls back to Tasks.
+  const Page = $derived(page_on(route.page) ? PAGES[route.page as keyof typeof PAGES] : undefined);
+  const tabs = $derived([...visible_nav().slice(0, TAB_COUNT), { id: 'more', label: 'More', icon: 'ellipsis' }]);
   const tab_active = $derived(
-    route.page === 'tasks' || route.page === 'approve' || route.page === 'canvas' ? 'tasks' : NAV.slice(0, TAB_COUNT).some((n) => n.id === route.page) ? route.page : 'more',
+    route.page === 'tasks' || route.page === 'approve' || route.page === 'canvas' ? 'tasks' : tabs.some((n) => n.id === route.page) ? route.page : 'more',
   );
   const waiting = $derived(app.tasks.filter(needs_approval).length);
   /** The open task: #/tasks/<key>, or #/projects/<project>/<key> inside a project. */
   const task_ref = $derived(route.page === 'tasks' ? route.id : route.page === 'projects' ? route.sub : null);
-  const tabs = [...NAV.slice(0, TAB_COUNT), { id: 'more', label: 'More', icon: 'ellipsis' }];
 
   /** ⌘B / Ctrl+B shows or hides the sidebar, except while typing. */
   function shortcut(e: KeyboardEvent) {
