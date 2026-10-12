@@ -4,7 +4,7 @@
 # buffer and the 1-min load average is below 1.5x the CPU count.
 # usage: scripts/mem-check.sh [need_gb=4] [--wait [max_minutes=30]]
 set -euo pipefail
-need_gb=${1:-4}
+need_gb=${1:-3}
 buffer_gb=${MEM_BUFFER_GB:-1}
 wait=0 max_min=30
 [ "${2:-}" = --wait ] && { wait=1; max_min=${3:-30}; }

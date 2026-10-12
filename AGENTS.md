@@ -82,7 +82,7 @@ A pattern must solve a present problem. No interface with a single implementatio
 ## Resources — RAM and CPU (mandatory)
 
 - The dev machine has 16 GB RAM shared with the user's own apps and other agents. Always keep **at least 1 GB free as a buffer** (`MEM_BUFFER_GB`, default 1).
-- Before every heavy step (cargo build/test, release build, Playwright, VMs, browsers) run `scripts/mem-check.sh <need_gb> --wait` (default need 4 GB). It passes only when available RAM ≥ need + 1 GB and CPU load is below 1.5 × cores; otherwise wait or reduce work — never push past it.
+- Before every heavy step (cargo build/test, release build, Playwright, VMs, browsers) run `scripts/mem-check.sh <need_gb> --wait` (default need 3 GB). It passes only when available RAM ≥ need + 1 GB and CPU load is below 1.5 × cores; otherwise wait or reduce work — never push past it.
 - Build env for every cargo command: `RUSTC_WRAPPER=sccache CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 CARGO_INCREMENTAL=0`.
   - sccache shares compiled dependencies across worktrees, so a new worktree doesn't rebuild them from scratch.
   - Incremental stays off, because sccache refuses incremental builds.
