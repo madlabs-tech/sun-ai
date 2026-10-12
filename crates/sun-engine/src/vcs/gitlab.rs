@@ -1,6 +1,6 @@
 //! GitLab **Adapter**: OAuth (authorize, code exchange, refresh), the user,
-//! the project picker and project hooks. The OAuth app is ecosystem-wide
-//!; a self-hosted GitLab without one uses an access token.
+//! the project picker and project hooks. The OAuth app is ecosystem-wide;
+//! a self-hosted GitLab without one uses an access token.
 
 use serde_json::{Value, json};
 use sun_core::{Error, Result, Timestamp};
