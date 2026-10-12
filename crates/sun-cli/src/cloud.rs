@@ -177,8 +177,7 @@ impl SessionKeys {
 }
 
 /// The ecosystem's account at Sun (**Adapter** over Sun Cloud's `/account`
-/// API): with the kernel token under Sun Cloud, or with a paid license token
-/// on a self-hosted install (plan and support only).
+/// API), with the kernel token under Sun Cloud.
 pub struct Account(Arc<CloudClient>);
 
 impl Account {
@@ -188,20 +187,9 @@ impl Account {
     }
 
     /// Under Sun Cloud ([`CLOUD_URL_ENV`] + [`CLOUD_TOKEN_ENV`]) the kernel's
-    /// account; else, with a Sun URL (`registry_url`) and a license file in
-    /// `data_dir`, the license's. `None` otherwise.
-    // ponytail: the license token is read at boot; a renewed license file
-    // reaches support after a restart.
-    pub fn connect(
-        get: impl Fn(&str) -> Option<String>,
-        sun_url: Option<&str>,
-        data_dir: &std::path::Path,
-    ) -> Option<Self> {
-        if let Some(client) = CloudClient::from_env(get) {
-            return Some(Self::new(client));
-        }
-        let token = std::fs::read_to_string(data_dir.join(crate::license::LICENSE_FILE)).ok()?;
-        Some(Self::new(CloudClient::new(sun_url?, token.trim())))
+    /// account; `None` otherwise.
+    pub fn connect(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
+        CloudClient::from_env(get).map(Self::new)
     }
 }
 

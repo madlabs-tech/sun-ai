@@ -47,8 +47,8 @@ pub struct Config {
     /// with a `public_url` deep link, e.g. `[slack:#eng]`. Default: nowhere.
     #[serde(default)]
     pub notify_to: Vec<String>,
-    /// Sun Cloud's URL for a self-hosted license account, e.g.
-    /// `https://sun.example.com`. `SUN_REGISTRY_URL` overrides it.
+    /// Deprecated and ignored (the self-hosted license account is gone);
+    /// still read so an older `sun.yaml` loads.
     pub registry_url: Option<String>,
     /// Stall detection for every workflow without its own `watchdog:`:
     /// `{stall_after: 15m, on_stall: nudge | restart | fail}`.

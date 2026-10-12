@@ -29,7 +29,6 @@ pub mod config;
 pub mod eval;
 pub mod installer;
 pub mod knowledge;
-pub mod license;
 pub mod log;
 pub mod mail;
 pub mod market;

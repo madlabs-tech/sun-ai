@@ -216,7 +216,7 @@ impl HostKey {
             crate::config::write_private(&path, crate::config::random_hex()?.as_bytes())?;
             eprintln!("created host key {} (back it up)", path.display());
         }
-        let seed = crate::license::parse_hex32(&std::fs::read_to_string(&path)?)?;
+        let seed = crate::mods::parse_key(&std::fs::read_to_string(&path)?)?;
         Ok(Self::from_seed(&seed))
     }
 

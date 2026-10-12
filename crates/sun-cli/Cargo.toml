@@ -55,7 +55,6 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls", "jso
 
 [dev-dependencies]
 chrono.workspace = true
-sun-core = { workspace = true, features = ["dev-license"] }
 tempfile = "3.23.0"
 
 [lints]
