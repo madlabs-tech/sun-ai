@@ -1,4 +1,4 @@
-// Against the real sun-api (see playwright.config.ts): the plan from a verified license file,
+// Against the real sun-api (see playwright.config.ts): the plan from the (stubbed) cloud policy,
 // and a secret that goes in but never comes back — not in the DOM, not in any response.
 import { expect, test } from '@playwright/test';
 
@@ -19,7 +19,7 @@ test('plan badge and write-only secrets on the real kernel', async ({ page }) =>
 
   const plan = page.getByRole('region', { name: /Plan/ });
   await expect(plan.getByText('Business')).toBeVisible();
-  await expect(plan.getByText(/Licensed to UI Test Co/)).toBeVisible();
+  await expect(plan.getByText(/From Sun Cloud, paid/)).toBeVisible();
 
   await page.goto('/#/settings/secrets');
   const secrets = page.getByRole('region', { name: 'Secrets' });

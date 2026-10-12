@@ -1,20 +1,20 @@
-//! Plans and signed entitlements.
+//! Plans and what a workspace may use.
 //!
-//! A license is a token issued and signed (ed25519) by Sun Cloud:
-//! `sunlic1.<hex payload json>.<hex signature>`. The engine only holds Sun's
-//! public key; verifying needs no network. A license keeps working offline for
-//! [`License::offline_grace_days`] after `expires_at`, then the ecosystem falls
-//! back to the [`Plan::Community`] tier. No license, a bad license or an
-//! expired one never blocks free features: [`Entitlement::resolve`] always
-//! returns a usable entitlement.
+//! The effective [`Entitlement`] of a workspace comes from an
+//! [`EntitlementProvider`]: Sun Cloud's per-workspace policy, or
+//! [`Community`] (self-hosted, no limits). A provider never fails: anything
+//! wrong falls back to an unlimited Community entitlement, so free features
+//! keep working.
 //!
-//! Pure functions only: the caller passes the token, the public key and `now`.
+//! The signed [`License`] ([`verify_license`], [`issuer`]) is kept for the
+//! cloud's license tooling only; the engine no longer reads a license.
 
+use async_trait::async_trait;
 use chrono::Duration;
 use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, Timestamp};
+use crate::{Error, Result, Timestamp, WorkspaceId};
 
 /// Token prefix; bump the version when the payload or encoding changes.
 pub const LICENSE_PREFIX: &str = "sunlic1";
@@ -27,72 +27,43 @@ const SIGNING_CONTEXT: &[u8] = b"sun-license-v1\n";
 /// Upper bound on token size; anything larger is rejected before decoding.
 const MAX_TOKEN_LEN: usize = 16 * 1024;
 
-/// Allowed clock skew before `issued_at` counts as "in the future".
-const CLOCK_SKEW_MINUTES: i64 = 5;
-
 string_enum! {
-    /// Sun plans (business.md).
+    /// Sun plans.
     pub enum Plan {
-        /// Self-hosted, no license: the full engine, no seat or run limits.
+        /// Self-hosted: the full engine, no limits.
         Community => "community",
-        /// Sun Cloud Free: ecosystem hosted, agents run on the user's machine.
+        /// Sun Cloud Free.
         Free => "free",
-        /// Sun Cloud Individual (paid).
-        Individual => "individual",
+        /// Sun Cloud Pro (paid).
+        Pro => "pro",
         /// Sun Cloud Business (paid).
         Business => "business",
-    }
-}
-
-impl Plan {
-    /// Paid plans unlock exclusive mods, in the cloud or self-hosted.
-    pub fn is_paid(self) -> bool {
-        match self {
-            Self::Community | Self::Free => false,
-            Self::Individual | Self::Business => true,
-        }
-    }
-
-    /// The Sun Cloud caps from business.md, for an issuer that has no
-    /// per-customer override. Community has none. Paid plans inherit Free's
-    /// caps ("everything in Free"); the license may carry different ones.
-    pub fn cloud_limits(self) -> Limits {
-        match self {
-            Self::Community => Limits::default(),
-            Self::Free | Self::Individual | Self::Business => Limits {
-                ecosystems: Some(1),
-                runtimes: Some(2),
-                byo_keys: Some(2),
-                agents: Some(5),
-                seats: None,
-            },
-        }
     }
 }
 
 string_enum! {
     /// A countable resource a plan may cap.
     pub enum Quota {
-        /// Ecosystems.
-        Ecosystems => "ecosystems",
+        /// Member seats.
+        Seats => "seats",
         /// Registered runtimes.
         Runtimes => "runtimes",
         /// Bring-your-own API keys.
         ByoKeys => "byo_keys",
         /// Agents.
         Agents => "agents",
-        /// Member seats.
-        Seats => "seats",
+        /// Runtime hosts.
+        Hosts => "hosts",
     }
 }
 
-/// Caps per [`Quota`]; `None` means unlimited.
+/// Caps per [`Quota`]; `None` (JSON `null` or missing) means unlimited.
+/// Unknown keys are ignored, so a newer policy still reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Limits {
-    /// Max ecosystems (`workspaces` in licenses issued before the rename).
+    /// Max seats.
     #[serde(default)]
-    #[serde(alias = "workspaces")]
-    pub ecosystems: Option<u32>,
+    pub seats: Option<u32>,
     /// Max runtimes.
     #[serde(default)]
     pub runtimes: Option<u32>,
@@ -102,20 +73,20 @@ pub struct Limits {
     /// Max agents.
     #[serde(default)]
     pub agents: Option<u32>,
-    /// Max seats.
+    /// Max hosts.
     #[serde(default)]
-    pub seats: Option<u32>,
+    pub hosts: Option<u32>,
 }
 
 impl Limits {
     /// The cap for `quota`, `None` when unlimited.
     pub fn max(&self, quota: Quota) -> Option<u32> {
         match quota {
-            Quota::Ecosystems => self.ecosystems,
+            Quota::Seats => self.seats,
             Quota::Runtimes => self.runtimes,
             Quota::ByoKeys => self.byo_keys,
             Quota::Agents => self.agents,
-            Quota::Seats => self.seats,
+            Quota::Hosts => self.hosts,
         }
     }
 
@@ -127,6 +98,91 @@ impl Limits {
             ))),
             _ => Ok(()),
         }
+    }
+}
+
+/// Where a workspace's entitlement comes from right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntitlementStatus {
+    /// Sun Cloud's policy, fresh until `valid_until`.
+    Cloud {
+        /// When the policy must be fetched again.
+        valid_until: Timestamp,
+    },
+    /// Sun Cloud's last policy, past its validity: refreshes are failing.
+    Stale,
+    /// Sun Cloud is configured but unreachable and nothing usable is cached:
+    /// Community (no limits) until it answers.
+    Unavailable,
+    /// Self-hosted, no Sun Cloud: Community.
+    Community,
+}
+
+impl EntitlementStatus {
+    /// The snake_case name on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cloud { .. } => "cloud",
+            Self::Stale => "stale",
+            Self::Unavailable => "unavailable",
+            Self::Community => "community",
+        }
+    }
+
+    /// Until when a cloud policy is fresh; `None` otherwise.
+    pub fn valid_until(self) -> Option<Timestamp> {
+        match self {
+            Self::Cloud { valid_until } => Some(valid_until),
+            Self::Stale | Self::Unavailable | Self::Community => None,
+        }
+    }
+}
+
+/// What a workspace may use right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entitlement {
+    /// Effective plan.
+    pub plan: Plan,
+    /// A paid plan: unlocks exclusive mods.
+    pub paid: bool,
+    /// Effective caps.
+    pub limits: Limits,
+    /// Why this is the effective plan.
+    pub status: EntitlementStatus,
+}
+
+impl Entitlement {
+    /// Community: full engine, no limits, unpaid.
+    pub fn community(status: EntitlementStatus) -> Self {
+        Self {
+            plan: Plan::Community,
+            paid: false,
+            limits: Limits::default(),
+            status,
+        }
+    }
+}
+
+/// Where each workspace's [`Entitlement`] comes from (**Strategy**: Sun
+/// Cloud's policy, or [`Community`]).
+///
+/// Contract: never fails and never blocks long; anything wrong (unreachable,
+/// bad answer) falls back to the last good value or to an unlimited
+/// Community entitlement.
+#[async_trait]
+pub trait EntitlementProvider: Send + Sync {
+    /// The entitlement of `workspace` now.
+    async fn for_workspace(&self, workspace: WorkspaceId) -> Entitlement;
+}
+
+/// Self-hosted without Sun Cloud: every workspace is Community, unlimited.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Community;
+
+#[async_trait]
+impl EntitlementProvider for Community {
+    async fn for_workspace(&self, _workspace: WorkspaceId) -> Entitlement {
+        Entitlement::community(EntitlementStatus::Community)
     }
 }
 
@@ -192,98 +248,6 @@ pub fn verify_license(token: &str, public_key: &[u8; 32]) -> Result<License> {
         return Err(invalid("expires before it was issued"));
     }
     Ok(license)
-}
-
-/// Where the current entitlement comes from; drives the plan badge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum EntitlementStatus {
-    /// No license installed: Community tier.
-    Unlicensed,
-    /// License valid.
-    Active,
-    /// Past `expires_at`, still honoured until `ends_at` (offline grace).
-    Grace {
-        /// When the grace period ends.
-        ends_at: Timestamp,
-    },
-    /// Grace ran out: back on Community until a new license is installed.
-    Expired {
-        /// When the grace period ended.
-        ended_at: Timestamp,
-    },
-    /// The token failed to verify: back on Community.
-    Invalid {
-        /// Why (safe to show; contains no secret).
-        reason: String,
-    },
-}
-
-/// What this ecosystem may use right now.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Entitlement {
-    /// Effective plan.
-    pub plan: Plan,
-    /// Effective caps.
-    pub limits: Limits,
-    /// Why this is the effective plan.
-    pub status: EntitlementStatus,
-    /// The installed license, when it verified.
-    pub license: Option<License>,
-}
-
-impl Entitlement {
-    /// Self-hosted with no license: full engine, no limits, no exclusive mods.
-    pub fn community(status: EntitlementStatus) -> Self {
-        Self {
-            plan: Plan::Community,
-            limits: Limits::default(),
-            status,
-            license: None,
-        }
-    }
-
-    /// Resolve the effective entitlement. Never fails: anything wrong with the
-    /// license falls back to Community, so free features keep working.
-    pub fn resolve(token: Option<&str>, public_key: &[u8; 32], now: Timestamp) -> Self {
-        let Some(token) = token.filter(|t| !t.trim().is_empty()) else {
-            return Self::community(EntitlementStatus::Unlicensed);
-        };
-        let license = match verify_license(token, public_key) {
-            Ok(license) => license,
-            Err(e) => {
-                return Self::community(EntitlementStatus::Invalid {
-                    reason: e.to_string(),
-                });
-            }
-        };
-        if now < license.issued_at - Duration::minutes(CLOCK_SKEW_MINUTES) {
-            return Self::community(EntitlementStatus::Invalid {
-                reason: "license: issued in the future, check the system clock".into(),
-            });
-        }
-        let ends_at = license.grace_ends_at();
-        let status = if now <= license.expires_at {
-            EntitlementStatus::Active
-        } else if now <= ends_at {
-            EntitlementStatus::Grace { ends_at }
-        } else {
-            let mut expired = Self::community(EntitlementStatus::Expired { ended_at: ends_at });
-            expired.license = Some(license);
-            return expired;
-        };
-        Self {
-            plan: license.plan,
-            limits: license.limits,
-            status,
-            license: Some(license),
-        }
-    }
-
-    /// Exclusive mods install only on a paid plan.
-    pub fn allows_exclusive_mods(&self) -> bool {
-        self.plan.is_paid()
-    }
 }
 
 fn signed_message(payload: &[u8]) -> Vec<u8> {
@@ -386,89 +350,82 @@ mod tests {
             issued_at: at(1),
             expires_at: at(10),
             offline_grace_days: 7,
-            limits: plan.cloud_limits(),
+            limits: Limits {
+                agents: Some(5),
+                ..Limits::default()
+            },
         }
     }
 
-    fn token(plan: Plan) -> String {
-        dev::sign(&license(plan), &SEED).unwrap()
-    }
-
-    fn resolve(token: Option<&str>, now: Timestamp) -> Entitlement {
-        Entitlement::resolve(token, &dev::public_key(&SEED), now)
+    #[test]
+    fn community_is_unlimited_and_unpaid() {
+        use std::task::{Context, Poll, Waker};
+        let mut future = Community.for_workspace(WorkspaceId::MAIN);
+        let Poll::Ready(e) = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        else {
+            panic!("Community answers at once");
+        };
+        assert_eq!(e.plan, Plan::Community);
+        assert_eq!(e.status, EntitlementStatus::Community);
+        assert!(!e.paid);
+        assert_eq!(e.limits, Limits::default());
+        assert!(e.limits.check(Quota::Hosts, u32::MAX - 1).is_ok());
     }
 
     #[test]
-    fn no_license_is_community_without_limits() {
-        for token in [None, Some(""), Some("  \n")] {
-            let e = resolve(token, at(5));
-            assert_eq!(e.plan, Plan::Community);
-            assert_eq!(e.status, EntitlementStatus::Unlicensed);
-            assert_eq!(e.limits, Limits::default());
-            assert!(!e.allows_exclusive_mods());
-            assert!(e.limits.check(Quota::Runtimes, u32::MAX - 1).is_ok());
-        }
-    }
-
-    /// A license signed before the rename says `workspaces`: its signed bytes
-    /// are untouched and the cap still reads.
-    #[test]
-    fn a_license_issued_with_workspaces_still_verifies() {
-        use ed25519_dalek::{Signer, SigningKey};
-        let json = serde_json::to_string(&license(Plan::Business)).unwrap();
-        assert!(json.contains("\"ecosystems\":1"), "{json}");
-        let payload = json
-            .replace("\"ecosystems\"", "\"workspaces\"")
-            .into_bytes();
-        let signature = SigningKey::from_bytes(&SEED).sign(&signed_message(&payload));
-        let token = format!(
-            "{LICENSE_PREFIX}.{}.{}",
-            issuer::hex_encode(&payload),
-            issuer::hex_encode(&signature.to_bytes())
-        );
-        let verified = verify_license(&token, &dev::public_key(&SEED)).unwrap();
-        assert_eq!(verified, license(Plan::Business));
-        assert_eq!(verified.limits.max(Quota::Ecosystems), Some(1));
-    }
-
-    #[test]
-    fn valid_license_round_trips_and_grants_plan() {
-        let t = token(Plan::Business);
+    fn plans_and_limits_read_the_policy_json() {
+        let plans: Vec<Plan> = serde_json::from_str(r#"["free","pro","business"]"#).unwrap();
+        assert_eq!(plans, [Plan::Free, Plan::Pro, Plan::Business]);
+        assert!(serde_json::from_str::<Plan>(r#""individual""#).is_err());
+        let limits: Limits = serde_json::from_str(
+            r#"{"seats": 3, "runtimes": null, "agents": 5, "hosts": 1, "future_cap": 9}"#,
+        )
+        .unwrap();
         assert_eq!(
-            verify_license(&t, &dev::public_key(&SEED)).unwrap(),
+            limits,
+            Limits {
+                seats: Some(3),
+                agents: Some(5),
+                hosts: Some(1),
+                ..Limits::default()
+            }
+        );
+        assert!(limits.check(Quota::Agents, 4).is_ok());
+        assert!(limits.check(Quota::Agents, 5).is_err());
+        assert!(limits.check(Quota::Hosts, 1).is_err());
+        assert!(limits.check(Quota::Runtimes, 1_000).is_ok());
+    }
+
+    #[test]
+    fn status_names_and_validity() {
+        let cloud = EntitlementStatus::Cloud { valid_until: at(2) };
+        assert_eq!(cloud.as_str(), "cloud");
+        assert_eq!(cloud.valid_until(), Some(at(2)));
+        for (status, name) in [
+            (EntitlementStatus::Stale, "stale"),
+            (EntitlementStatus::Unavailable, "unavailable"),
+            (EntitlementStatus::Community, "community"),
+        ] {
+            assert_eq!((status.as_str(), status.valid_until()), (name, None));
+        }
+    }
+
+    #[test]
+    fn valid_license_round_trips() {
+        let token = dev::sign(&license(Plan::Business), &SEED).unwrap();
+        assert_eq!(
+            verify_license(&token, &dev::public_key(&SEED)).unwrap(),
             license(Plan::Business)
         );
-        let e = resolve(Some(&t), at(10));
-        assert_eq!(e.plan, Plan::Business);
-        assert_eq!(e.status, EntitlementStatus::Active);
-        assert!(e.allows_exclusive_mods());
+        assert_eq!(license(Plan::Pro).grace_ends_at(), at(17));
     }
 
     #[test]
-    fn offline_grace_then_falls_back_to_community() {
-        let t = token(Plan::Individual);
-        let ends_at = at(17);
-        let grace = resolve(Some(&t), at(11));
-        assert_eq!(grace.plan, Plan::Individual);
-        assert_eq!(grace.status, EntitlementStatus::Grace { ends_at });
-        assert_eq!(resolve(Some(&t), ends_at).plan, Plan::Individual);
-
-        let expired = resolve(Some(&t), at(18));
-        assert_eq!(expired.plan, Plan::Community);
-        assert_eq!(
-            expired.status,
-            EntitlementStatus::Expired { ended_at: ends_at }
-        );
-        assert!(!expired.allows_exclusive_mods());
-        assert!(expired.license.is_some());
-    }
-
-    #[test]
-    fn tampered_or_foreign_tokens_are_invalid_but_harmless() {
-        let t = token(Plan::Free);
+    fn tampered_or_foreign_tokens_do_not_verify() {
+        let t = dev::sign(&license(Plan::Free), &SEED).unwrap();
         let (head, sig) = t.rsplit_once('.').unwrap();
-        // Re-sign a Business payload with another key, swap the plan in place,
-        // break the encoding: all must fall back to Community.
         let other_key = dev::sign(&license(Plan::Business), &[9; 32]).unwrap();
         let swapped = t.replacen(
             &issuer::hex_encode(b"\"free\""),
@@ -489,31 +446,10 @@ mod tests {
             "garbage",
             &"a".repeat(MAX_TOKEN_LEN + 1),
         ] {
-            let e = resolve(Some(bad), at(5));
-            assert_eq!(e.plan, Plan::Community, "{bad:.40}");
-            assert!(matches!(e.status, EntitlementStatus::Invalid { .. }));
+            assert!(
+                verify_license(bad, &dev::public_key(&SEED)).is_err(),
+                "{bad:.40}"
+            );
         }
-    }
-
-    #[test]
-    fn clock_before_issue_is_invalid() {
-        let e = resolve(Some(&token(Plan::Business)), at(1) - Duration::hours(1));
-        assert!(matches!(e.status, EntitlementStatus::Invalid { .. }));
-    }
-
-    #[test]
-    fn limits_check_counts_against_cap() {
-        let limits = Plan::Free.cloud_limits();
-        assert!(limits.check(Quota::Agents, 4).is_ok());
-        assert!(limits.check(Quota::Agents, 5).is_err());
-        assert!(limits.check(Quota::Seats, 1_000).is_ok());
-    }
-
-    #[test]
-    fn entitlement_status_serializes_for_the_badge() {
-        let json = serde_json::to_value(EntitlementStatus::Grace { ends_at: at(17) }).unwrap();
-        assert_eq!(json["state"], "grace");
-        let plan: Plan = serde_json::from_value("business".into()).unwrap();
-        assert!(plan.is_paid());
     }
 }

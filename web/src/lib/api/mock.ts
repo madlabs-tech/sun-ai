@@ -875,7 +875,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
   const params = new URLSearchParams(query);
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
   const input = (body ?? {}) as Record<string, unknown>;
-  if (['entitlement', 'license', 'secrets'].includes(parts[0])) return settings_route(method, parts, params, input);
+  if (['entitlement', 'secrets'].includes(parts[0])) return settings_route(method, parts, params, input);
   if (parts.at(-1) === 'on_limit') return on_limit_route(method, parts, input);
   if (parts.at(-1) === 'budget') return budget_route(method, parts, input);
   if (parts[0] === 'knowledge' || parts[0] === 'settings' || (parts[0] === 'tasks' && parts[2] === 'context')) return knowledge_route(method, parts, params, input);

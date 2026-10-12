@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use sun_api::{Api, ApiConfig, HostHub};
-use sun_core::entitlement::Entitlement;
+use sun_core::entitlement::EntitlementProvider;
 use sun_core::model::Host;
 use sun_core::{HostId, RuntimeAdapter};
 use sun_engine::{
@@ -20,6 +20,7 @@ use sun_engine::{
 use sun_mod::ModHost;
 use sun_store::{HostRepo, SecretRepo, SettingRepo, Store};
 
+use crate::cloud::{CLOUD_TOKEN_ENV, CLOUD_URL_ENV};
 use crate::config::{Config, KernelSecrets, write_private};
 use crate::installer::KernelInstaller;
 use crate::mods;
@@ -308,16 +309,13 @@ pub async fn start(
             .save_workflow(None, sun_workflow::DEFAULT_WORKFLOW)
             .await?;
     }
-    let licensing = crate::license::licensing(data_dir)?;
-    let entitlement = licensing.resolve();
-    tracing::info!("plan {}", crate::license::describe(&entitlement));
     let (queue, queue_task) = Queue::start(
         store.clone(),
         engine.clone(),
         QueueConfig {
             slot: Slot { runtime, host },
             caps: Caps {
-                per_ecosystem: active_runs_cap(config.max_active_runs, &entitlement),
+                per_ecosystem: config.max_active_runs,
                 per_runtime: config.caps.per_runtime.clone(),
                 per_host: config.caps.per_host.clone(),
             },
@@ -375,24 +373,19 @@ pub async fn start(
         }
         None => api,
     };
-    // Self-hosted, Sun Cloud is reached at `registry_url` (license account).
-    let sun_url = std::env::var("SUN_REGISTRY_URL")
-        .ok()
-        .filter(|url| !url.is_empty())
-        .or_else(|| config.registry_url.clone());
-    let api = match crate::cloud::Account::connect(
-        |name| std::env::var(name).ok(),
-        sun_url.as_deref(),
-        data_dir,
-    ) {
+    if config.registry_url.is_some() {
+        tracing::warn!("sun.yaml `registry_url` is ignored: plans come from Sun Cloud only");
+    }
+    let api = match crate::cloud::Account::connect(|name| std::env::var(name).ok()) {
         Some(account) => api.with_account(Arc::new(account)),
         None => api,
     };
+    let entitlements = entitlements(|name| std::env::var(name).ok())?;
     let api = api
         .with_mods(mods.clone())
         .with_preview_host(host)
         .with_features(features)
-        .with_license(licensing)
+        .with_entitlements(entitlements)
         .with_allow_bypass(config.runtimes.allow_bypass)
         .with_sun_cloud(sun_cloud)
         .with_mod_installer(installer)
@@ -620,25 +613,37 @@ async fn import_oidc(config: &Config, engine: &Engine) -> Result<()> {
     Ok(())
 }
 
-/// Runs active at once: `max_active_runs`, capped by the plan's agents
-/// (one agent = one active run).
-// ponytail: read at boot; a new license applies to the queue after a restart.
-fn active_runs_cap(configured: Option<usize>, entitlement: &Entitlement) -> Option<usize> {
-    let plan = entitlement
-        .limits
-        .agents
-        .map(|n| usize::try_from(n).unwrap_or(usize::MAX));
-    match (configured, plan) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
+/// Each workspace's plan: Sun Cloud's policy under Sun Cloud
+/// (`SUN_CLOUD_URL` and `SUN_CLOUD_TOKEN`), else Community.
+fn entitlements(get: impl Fn(&str) -> Option<String>) -> Result<Arc<dyn EntitlementProvider>> {
+    let source = entitlement_source(&get);
+    tracing::info!("plans: {source}");
+    match (get(CLOUD_URL_ENV), get(CLOUD_TOKEN_ENV)) {
+        (Some(url), Some(token)) => Ok(Arc::new(sun_api::CloudPolicy::new(&url, &token)?)),
+        _ => Ok(Arc::new(sun_core::entitlement::Community)),
+    }
+}
+
+/// Where the deployment's plans come from: `cloud` or `community`.
+pub fn entitlement_source(get: impl Fn(&str) -> Option<String>) -> &'static str {
+    match get(CLOUD_URL_ENV).is_some() && get(CLOUD_TOKEN_ENV).is_some() {
+        true => "cloud",
+        false => "community",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use sun_core::entitlement::{EntitlementStatus, Limits};
-
     use super::*;
+
+    #[test]
+    fn plans_come_from_the_cloud_only_with_its_url_and_token() {
+        let only = |key: &'static str| move |name: &str| (name == key).then(|| "x".to_owned());
+        assert_eq!(entitlement_source(|_| Some("x".into())), "cloud");
+        assert_eq!(entitlement_source(only(CLOUD_URL_ENV)), "community");
+        assert_eq!(entitlement_source(only(CLOUD_TOKEN_ENV)), "community");
+        assert_eq!(entitlement_source(|_| None), "community");
+    }
 
     #[test]
     fn decision_sidecar_runs_until_serve_ends_and_a_plugin_needs_no_url() {
@@ -667,19 +672,5 @@ mod tests {
         assert_eq!(client.url(), None);
         let both = load("decisions: {url: http://x, plugin: jev}");
         assert!(decisions(&both, mods).is_err());
-    }
-
-    #[test]
-    fn plan_agents_cap_active_runs() {
-        let mut plan = Entitlement::community(EntitlementStatus::Unlicensed);
-        assert_eq!(active_runs_cap(None, &plan), None);
-        assert_eq!(active_runs_cap(Some(8), &plan), Some(8));
-        plan.limits = Limits {
-            agents: Some(5),
-            ..Limits::default()
-        };
-        assert_eq!(active_runs_cap(None, &plan), Some(5));
-        assert_eq!(active_runs_cap(Some(8), &plan), Some(5));
-        assert_eq!(active_runs_cap(Some(2), &plan), Some(2));
     }
 }

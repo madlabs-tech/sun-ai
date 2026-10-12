@@ -53,9 +53,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// The plan license (Sun Cloud plans; none = self-hosted Community).
-    #[command(subcommand)]
-    License(LicenseCommand),
     /// Move a whole ecosystem between data dirs (one archive file).
     #[command(subcommand)]
     Ecosystem(EcosystemCommand),
@@ -634,19 +631,6 @@ enum MarketCommand {
 }
 
 #[derive(Subcommand)]
-enum LicenseCommand {
-    /// Verify a license token and install it (`-` reads stdin).
-    Install {
-        /// The license file, or `-`.
-        file: String,
-    },
-    /// The effective plan and the license's state.
-    Show,
-    /// Remove the license (back to Community).
-    Remove,
-}
-
-#[derive(Subcommand)]
 enum EcosystemCommand {
     /// Write the whole ecosystem (store, blobs, sealed secrets, sun.yaml,
     /// mods, skills, MCP servers, catalog installs) to a new file.
@@ -803,7 +787,6 @@ fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::License(command) => license(&data_dir, command),
         Command::Ecosystem(command) => runtime()?.block_on(ecosystem_archive(&data_dir, command)),
         Command::Host(command) => runtime()?.block_on(host(&data_dir, command)),
         Command::Repo(command) => repo(&data_dir, command),
@@ -1751,34 +1734,6 @@ fn with_port(listen: &str, port: u16) -> String {
         .rsplit_once(':')
         .map_or("127.0.0.1", |(host, _)| host);
     format!("{host}:{port}")
-}
-
-fn license(data_dir: &Path, command: LicenseCommand) -> Result<()> {
-    use sun_cli::license::{describe, install, licensing};
-    match command {
-        LicenseCommand::Install { file } => {
-            let token = match file.as_str() {
-                "-" => {
-                    let mut token = String::new();
-                    std::io::stdin().read_to_string(&mut token)?;
-                    token
-                }
-                path => std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?,
-            };
-            std::fs::create_dir_all(data_dir)?;
-            println!("installed: {}", describe(&install(data_dir, &token)?));
-        }
-        LicenseCommand::Show => println!("{}", describe(&licensing(data_dir)?.resolve())),
-        LicenseCommand::Remove => {
-            let path = licensing(data_dir)?.path;
-            if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("removing {}", path.display()))?;
-            }
-            println!("removed: back on community");
-        }
-    }
-    Ok(())
 }
 
 async fn ecosystem_archive(data_dir: &Path, command: EcosystemCommand) -> Result<()> {

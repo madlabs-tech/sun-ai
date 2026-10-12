@@ -10,8 +10,8 @@
 
   const PLANS: { id: PaidPlan; name: string; points: number; includes: string[] }[] = [
     {
-      id: 'individual',
-      name: 'Individual',
+      id: 'pro',
+      name: 'Pro',
       points: 1_000_000,
       includes: ['Open models on Sun credits (DeepSeek, Kimi, Qwen)', 'Exclusive mods', 'Support from people within 48 hours'],
     },
@@ -19,7 +19,7 @@
       id: 'business',
       name: 'Business',
       points: 2_000_000,
-      includes: ['Everything in Individual', 'Premium models: Claude and GPT through Claude Code and Codex', 'Seats for your team', 'Support from people within 24 hours'],
+      includes: ['Everything in Pro', 'Premium models: Claude and GPT through Claude Code and Codex', 'Seats for your team', 'Support from people within 24 hours'],
     },
   ];
   const METHODS: Record<Currency, { value: PayMethod; label: string }[]> = {
@@ -161,7 +161,7 @@
                 </ul>
                 {#if !current(plan.id) && can('manage_settings')}
                   <Button variant={plan.id === 'business' ? 'ice' : 'secondary'} block onclick={() => choose(plan.id)}>
-                    {account.plan === 'individual' && plan.id === 'business' ? 'Upgrade to Business' : `Choose ${plan.name}`}
+                    {account.plan === 'pro' && plan.id === 'business' ? 'Upgrade to Business' : `Choose ${plan.name}`}
                   </Button>
                 {/if}
               </Card>

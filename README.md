@@ -149,7 +149,7 @@ sun task list
 | `sun knowledge …` · `sun eval …` | Manage knowledge sources and search, or replay past tasks against a changed instruction. |
 | `sun upgrade [--check]` · `rollback` · `backup` | Upgrade (wait for a checkpoint, back up, swap, migrate, restart), undo the last upgrade, or back up the store. |
 | `sun ecosystem export\|import` | Move a whole ecosystem as one archive. |
-| `sun license install\|show\|remove` · `sun market …` | Sun Cloud plans and the marketplace. These need `SUN_CLOUD_URL` and `SUN_CLOUD_TOKEN`. |
+| `sun market …` | The marketplace. It needs `SUN_CLOUD_URL` and `SUN_CLOUD_TOKEN`, which also make each workspace's plan come from Sun Cloud. |
 
 Run `sun <command> --help` for every flag.
 
@@ -349,7 +349,6 @@ The code side of every story is done; what follows is still unproven.
 
 **Placeholders:**
 - No public release yet: `get-sun.madlabs.tech` redirects to GitHub Releases, which stay empty until the first `v*` tag.
-- The license signing key.
 
 **Never run:**
 - The GitHub Actions workflows (`ci`, `footprint`, `release`, `cli-matrix`). Nothing has been pushed.

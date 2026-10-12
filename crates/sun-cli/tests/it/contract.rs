@@ -1,7 +1,7 @@
 //! The real `sun` binary's kernel contract (Sun Cloud's driver) and the
 //! operator commands: `serve --port 0` + `<data_dir>/address`,
-//! `GET /healthz`, `status --json`, the license file read on boot, the
-//! secrets API (no value ever leaves), `license`, `secret` and
+//! `GET /healthz`, `status --json` (with where plans come from), Main's
+//! plan, the secrets API (no value ever leaves), `secret` and
 //! `ecosystem export|import`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -11,21 +11,16 @@ use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use sun_core::entitlement::{License, Limits, Plan, dev};
 
-const SEED: [u8; 32] = [7; 32];
 const SECRET: &str = "s3cret-value-xyz";
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 fn sun(data_dir: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_sun"));
     command
         .arg("--data-dir")
         .arg(data_dir)
-        .env("SUN_LICENSE_PUBLIC_KEY", hex(&dev::public_key(&SEED)))
+        .env_remove("SUN_CLOUD_URL")
+        .env_remove("SUN_CLOUD_TOKEN")
         .env_remove("SUN_MASTER_KEY")
         .env_remove("SUN_DATABASE_URL");
     command
@@ -57,23 +52,6 @@ fn ok(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
 
-fn license(plan: Plan) -> String {
-    let now = chrono::Utc::now();
-    dev::sign(
-        &License {
-            license_id: "lic_1".into(),
-            licensee: "Acme".into(),
-            plan,
-            issued_at: now,
-            expires_at: now + chrono::Duration::days(30),
-            offline_grace_days: 7,
-            limits: Limits::default(),
-        },
-        &SEED,
-    )
-    .unwrap()
-}
-
 /// Kills the kernel even when an assert fails.
 struct Kernel(std::process::Child);
 
@@ -85,11 +63,10 @@ impl Drop for Kernel {
 }
 
 #[test]
-fn kernel_contract_license_secrets_and_ecosystem_moves() {
+fn kernel_contract_secrets_and_ecosystem_moves() {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("a");
     std::fs::create_dir_all(&data).unwrap();
-    std::fs::write(data.join("license"), license(Plan::Business)).unwrap();
 
     // serve --port 0: the bound address lands in <data_dir>/address.
     let kernel = Kernel(
@@ -125,6 +102,7 @@ fn kernel_contract_license_secrets_and_ecosystem_moves() {
     let status: Value = serde_json::from_str(&ok(&run(&data, &["status", "--json"], ""))).unwrap();
     assert_eq!(status["kernel"], "running");
     assert_eq!(status["url"], base);
+    assert_eq!(status["entitlement"], "community", "no Sun Cloud here");
     assert!(status.get("sign_in_url").is_none(), "no login links");
 
     let token: Value =
@@ -145,15 +123,14 @@ fn kernel_contract_license_secrets_and_ecosystem_moves() {
         (response.status().as_u16(), text)
     };
 
-    // The license file was read: plan badge data.
+    // Off Sun Cloud, Main is on Community: no limits.
     let (code, body) = call("GET", "/entitlement", None);
     assert_eq!(code, 200);
     let entitlement: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(entitlement["plan"], "business");
-    assert_eq!(entitlement["status"]["state"], "active");
-    let (code, body) = call("PUT", "/license", Some(json!({"token": "sunlic1.zz.zz"})));
-    assert_eq!(code, 422, "{body}");
-    assert!(body.contains("license"), "{body}");
+    assert_eq!(
+        (&entitlement["plan"], &entitlement["status"]),
+        (&json!("community"), &json!("community"))
+    );
 
     // Secrets: set, listed without the value, audited, deleted.
     let path = "/secrets/ecosystem/00000000000000000000000000/API_TOKEN";
@@ -177,18 +154,6 @@ fn kernel_contract_license_secrets_and_ecosystem_moves() {
         422
     );
     drop(kernel);
-
-    // CLI: a bad license is refused with its reason and changes nothing.
-    let bad = run(&data, &["license", "install", "-"], "sunlic1.00.00");
-    assert!(!bad.status.success());
-    assert!(String::from_utf8_lossy(&bad.stderr).contains("license"));
-    assert!(ok(&run(&data, &["license", "show"], "")).contains("business"));
-    let installed = ok(&run(
-        &data,
-        &["license", "install", "-"],
-        &license(Plan::Individual),
-    ));
-    assert!(installed.contains("individual"), "{installed}");
 
     // CLI secrets: the ecosystem by default, or a mod's.
     ok(&run(&data, &["secret", "set", "WS_KEY"], SECRET));

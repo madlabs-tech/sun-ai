@@ -1,12 +1,21 @@
-// In-memory plan and secrets for the mock: `entitlement`, `license`, `secrets/**`.
+// In-memory plan and secrets for the mock: `entitlement`, `secrets/**`.
 // Like the kernel, no answer ever carries a secret value.
-import type { Entitlement, OnLimit, Secret, SecretScope, Spend } from './types';
+import { MAIN_WORKSPACE, type Entitlement, type OnLimit, type Secret, type SecretScope, type Spend } from './types';
 import { MockError, clone, not_found } from './mock';
 
 const invalid = (message: string) => new MockError(422, { error: { code: 'invalid_input', message } });
 const NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
-let entitlement: Entitlement = { plan: 'community', limits: {}, status: { state: 'unlicensed' }, license: null };
+const UNLIMITED = { seats: null, runtimes: null, byo_keys: null, agents: null, hosts: null };
+// Main is on Pro from Sun Cloud; every other workspace is Community.
+const pro: Entitlement = {
+  plan: 'pro',
+  paid: true,
+  limits: { ...UNLIMITED, seats: 5, byo_keys: 2, hosts: 2 },
+  status: 'cloud',
+  valid_until: new Date(Date.now() + 5 * 60_000).toISOString(),
+};
+const community: Entitlement = { plan: 'community', paid: false, limits: UNLIMITED, status: 'community', valid_until: null };
 const secrets: (Secret & { value: string })[] = [
   { id: 'sec_1', scope: { kind: 'mod', id: 'github' }, name: 'GITHUB_TOKEN', updated_at: '2026-10-01T09:00:00Z', value: 'ghp_sample' },
 ];
@@ -61,14 +70,7 @@ const view = ({ value: _, ...meta }: Secret & { value: string }): Secret => clon
 
 export function settings_route(method: string, parts: string[], params: URLSearchParams, input: Record<string, unknown>): unknown {
   const [head, kind, id, name] = parts;
-  if (head === 'entitlement' && method === 'GET') return clone(entitlement);
-  if (head === 'license' && method === 'PUT') {
-    const token = String(input.token ?? '').trim();
-    // The mock's only "valid" license; the kernel checks the ed25519 signature.
-    if (token !== 'sunlic1.sample') throw invalid('license: not a Sun license token');
-    entitlement = { plan: 'business', limits: { seats: 10, runtimes: 2, agents: 5 }, status: { state: 'active' }, license: { licensee: 'Sample Co', expires_at: '2027-01-01T00:00:00Z' } };
-    return clone(entitlement);
-  }
+  if (head === 'entitlement' && method === 'GET') return clone((params.get('workspace') ?? MAIN_WORKSPACE) === MAIN_WORKSPACE ? pro : community);
   if (head !== 'secrets') throw not_found(`${method} /${parts.join('/')}`);
   if (method === 'GET') {
     const [k, i] = [params.get('scope_kind'), params.get('scope_id')];

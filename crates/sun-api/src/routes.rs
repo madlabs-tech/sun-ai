@@ -89,6 +89,7 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/workflows/{id}", get(get_workflow))
         .route("/workflows/{id}/trigger", post(trigger_workflow))
         .route("/templates", get(list_templates))
+        .route("/entitlement", get(crate::entitlement::get))
         .route("/workspaces/{id}/repos", get(crate::vcs::list_repos))
         .route("/workspaces/{id}/vcs", get(crate::vcs::list))
         .route("/tasks/{id}/artifacts", get(list_artifacts))
@@ -310,10 +311,6 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/account/subscription", post(crate::account::subscribe))
         .route("/account/top-ups", post(crate::account::top_up))
         .route(
-            "/license",
-            put(crate::license::put).delete(crate::license::remove),
-        )
-        .route(
             "/runtimes/{id}/policy",
             put(crate::hosts::set_runtime_policy),
         )
@@ -378,7 +375,6 @@ pub(crate) fn router(api: Api) -> Router {
         // Deployment-wide reads, until they are per workspace.
         .route("/usage", get(usage))
         .route("/quality/metrics", get(crate::quality::metrics))
-        .route("/entitlement", get(crate::license::get))
         .route("/corrections", get(crate::corrections::list))
         .route("/outbox", get(list_outbox))
         .route_layer(middleware::from_fn(auth::require_owner));
