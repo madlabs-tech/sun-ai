@@ -316,9 +316,11 @@ impl Executor {
             return Ok(runtime);
         }
         let mut chain = chain(&*self.workflow(tx, &run).await?, &self.config.adapter);
-        // A `route` decision puts its runtime first, if it is a known one.
+        let workspace = tx.workspace_of_run(run.id).await?;
+        // A `route` decision puts its runtime first, if it is one of the
+        // workspace's.
         if let Some(to) = super::decision::routed(tx, run.id).await?
-            && (chain.contains(&to) || tx.runtime_by_name(&to).await?.is_some())
+            && (chain.contains(&to) || tx.runtime_by_name(workspace, &to).await?.is_some())
         {
             chain.retain(|r| *r != to);
             chain.insert(0, to);
@@ -362,9 +364,10 @@ impl Executor {
             }
         }
         if let Some(capabilities) = &capabilities {
+            let workspace = tx.workspace_of_run(step.run_id).await?;
             // A `market:` runtime runs on the seller's host, not this one.
             for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
-                let adapter = match tx.runtime_by_name(name).await? {
+                let adapter = match tx.runtime_by_name(workspace, name).await? {
                     Some(row) => row.adapter,
                     None => name.clone(),
                 };
@@ -429,8 +432,9 @@ impl Executor {
             Utc::now() + chrono::Duration::from_std(DEFAULT_COOLDOWN).unwrap_or_default()
         });
         self.failover.cooling.insert(from.clone(), until);
+        let workspace = tx.workspace_of_run(step.run_id).await?;
         let runtime = tx
-            .upsert_runtime(&from, &from, RuntimeSource::ByoRuntime)
+            .upsert_runtime(workspace, &from, &from, RuntimeSource::ByoRuntime)
             .await?;
         tx.set_cooldown(runtime.id, Some(until)).await?;
         append(

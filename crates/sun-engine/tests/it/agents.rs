@@ -25,7 +25,7 @@ use sun_engine::{
     AgentFields, Engine, EngineConfig, NewTask, Queue, QueueConfig, Slot, WatchdogConfig,
     WorkflowPick,
 };
-use sun_store::{HostRepo, RunRepo, Store, TaskRepo, WorkflowRepo};
+use sun_store::{HostRepo, RunRepo, RuntimeRepo, Store, TaskRepo, WorkflowRepo};
 use tokio::sync::mpsc;
 
 /// Agent sessions that say they work, then wait until `finish` is set to
@@ -34,6 +34,8 @@ use tokio::sync::mpsc;
 struct HoldHost {
     finish: Arc<AtomicBool>,
     envelopes: Mutex<Vec<String>>,
+    /// The adapter each session started with.
+    adapters: Mutex<Vec<String>>,
     steers: Mutex<Vec<String>>,
     alive: Arc<Mutex<HashSet<SessionId>>>,
     sink: Arc<Mutex<Option<mpsc::UnboundedSender<HostEvent>>>>,
@@ -55,8 +57,14 @@ impl HostLink for HoldHost {
         Ok(std::env::temp_dir())
     }
 
-    async fn start_session(&self, _: HostId, _: &str, spec: SessionSpec) -> Result<SessionHandle> {
+    async fn start_session(
+        &self,
+        _: HostId,
+        adapter: &str,
+        spec: SessionSpec,
+    ) -> Result<SessionHandle> {
         let id = spec.session_id;
+        self.adapters.lock().unwrap().push(adapter.to_owned());
         self.envelopes.lock().unwrap().push(spec.envelope);
         self.alive.lock().unwrap().insert(id);
         let (finish, alive, sink) = (self.finish.clone(), self.alive.clone(), self.sink.clone());
@@ -206,7 +214,7 @@ impl Kernel {
             ..AgentFields::default()
         };
         self.engine
-            .create_agent(fields, "user:me")
+            .create_agent(WorkspaceId::MAIN, fields, "user:me")
             .await
             .unwrap()
             .id
@@ -476,7 +484,11 @@ async fn system_workflows_are_hidden_and_follow_agent_edits() {
         runtime_chain: Some(vec!["fake".into()]),
         ..AgentFields::default()
     };
-    let err = k.engine.create_agent(twin, "user:me").await.unwrap_err();
+    let err = k
+        .engine
+        .create_agent(WorkspaceId::MAIN, twin, "user:me")
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
 }
 
@@ -514,7 +526,12 @@ async fn the_prompt_is_the_instructions_then_the_task_then_the_waking_comment() 
         runtime_chain: Some(vec!["fake".into()]),
         ..AgentFields::default()
     };
-    let bob = k.engine.create_agent(fields, "user:me").await.unwrap().id;
+    let bob = k
+        .engine
+        .create_agent(WorkspaceId::MAIN, fields, "user:me")
+        .await
+        .unwrap()
+        .id;
     let plain = k.task(bob, TaskStatus::Todo).await;
     k.until(plain, TaskStatus::InProgress).await;
     eventually("Bob's session", || async { k.host.envelopes().len() == 3 }).await;
@@ -551,7 +568,12 @@ async fn the_prompt_is_the_instructions_then_the_task_then_the_waking_comment() 
         runtime_chain: Some(vec!["fake".into()]),
         ..AgentFields::default()
     };
-    let cy = k.engine.create_agent(fields, "user:me").await.unwrap().id;
+    let cy = k
+        .engine
+        .create_agent(WorkspaceId::MAIN, fields, "user:me")
+        .await
+        .unwrap()
+        .id;
     let literal = k.task(cy, TaskStatus::Todo).await;
     k.until(literal, TaskStatus::InProgress).await;
     eventually("Cy's session", || async { k.host.envelopes().len() == 4 }).await;
@@ -687,4 +709,81 @@ async fn a_comment_storm_racing_a_move_to_todo_queues_one_run() {
     assert!(live_runs(&k, task).await <= 1);
     k.until(task, TaskStatus::InProgress).await;
     assert_eq!(live_runs(&k, task).await, 1);
+}
+
+/// An agent and the runtimes its chain names belong to its workspace: the
+/// same chain name is the workspace's own runtime (never Main's row of that
+/// name), and no other workspace's task can be assigned to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn agents_and_their_runtimes_stay_in_their_workspace() {
+    let k = kernel().await;
+    let policy = sun_core::model::SignupPolicy::default();
+    let ops = k
+        .engine
+        .create_workspace("Ops", None, None, &policy, "user:me")
+        .await
+        .unwrap()
+        .id;
+    // Main's `fake` runs another adapter; Ops' chain must not resolve to it.
+    let mut tx = k.store.begin().await.unwrap();
+    tx.upsert_runtime(
+        WorkspaceId::MAIN,
+        "fake",
+        "other-adapter",
+        sun_core::model::RuntimeSource::ByoRuntime,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let fields = || AgentFields {
+        name: Some("Ada".into()),
+        runtime_chain: Some(vec!["fake".into()]),
+        ..AgentFields::default()
+    };
+    let main_ada = k.agent("Ada").await;
+    let ops_ada = k
+        .engine
+        .create_agent(ops, fields(), "user:me")
+        .await
+        .unwrap();
+    assert_eq!(ops_ada.workspace_id, ops, "one name per workspace");
+    assert_eq!(
+        k.engine.agents(Some(ops)).await.unwrap(),
+        std::slice::from_ref(&ops_ada)
+    );
+
+    // A Main task can't take Ops' agent, on create or reassignment.
+    let mut new = NewTask {
+        workspace_id: Some(WorkspaceId::MAIN),
+        title: "Fix the login".into(),
+        body: String::new(),
+        workflow: WorkflowPick::Agent(ops_ada.id),
+        exec_env: None,
+        priority: Priority::None,
+        status: TaskStatus::Backlog,
+        project_id: None,
+        actor: None,
+    };
+    let err = k.engine.create_task(new.clone()).await.unwrap_err();
+    assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+    let main_task = k.task(main_ada, TaskStatus::Backlog).await;
+    let to = Some(Assignee::Agent { id: ops_ada.id });
+    let err = k.engine.assign_task(main_task, to, None).await.unwrap_err();
+    assert!(matches!(err, Error::NotFound(_)), "{err:?}");
+
+    // Ops' task runs on Ops' own `fake`.
+    new.workspace_id = Some(ops);
+    new.status = TaskStatus::Todo;
+    let task = k.engine.create_task(new).await.unwrap().id;
+    k.working(task).await;
+    assert_eq!(*k.host.adapters.lock().unwrap(), ["fake"]);
+    let run = k.runs(task).await.pop().unwrap();
+    let mut read = k.store.read().await.unwrap();
+    let step = read.steps_of_run(run.id).await.unwrap().pop().unwrap();
+    let runtime = read.get_runtime(step.runtime_id.unwrap()).await.unwrap();
+    assert_eq!(
+        (runtime.workspace_id, runtime.adapter.as_str()),
+        (ops, "fake")
+    );
+    k.host.finish.store(true, Ordering::SeqCst);
 }

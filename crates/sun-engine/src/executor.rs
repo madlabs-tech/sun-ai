@@ -44,7 +44,7 @@ use sun_core::host_protocol::{
     Capabilities, DeviceFlowRequest, DeviceInput, DeviceResult, DeviceScreen, PreviewSide, Worktree,
 };
 use sun_core::model::{
-    AuditAction, EventRecord, Note, NoteKind, OutboxStatus, Run, RuntimeSource, Step,
+    AuditAction, EventRecord, Note, NoteKind, OutboxStatus, Run, RuntimeSource, SecretScope, Step,
 };
 use sun_core::{
     BoxStream, EngineHandle, Error, ExecEnvSpec, HostEvent, HostId, HostLink, IdemKey, ModLink,
@@ -2030,8 +2030,10 @@ impl Executor {
         effects: &mut Vec<Effect>,
     ) -> Result<SessionId> {
         let session_id = SessionId::generate();
+        // A chain name means the task's workspace's runtime of that name.
+        let workspace = tx.workspace_of_run(step.run_id).await?;
         let row = tx
-            .upsert_runtime(runtime, runtime, RuntimeSource::ByoRuntime)
+            .upsert_runtime(workspace, runtime, runtime, RuntimeSource::ByoRuntime)
             .await?;
         tx.insert_session(session_id, self.host(step.run_id))
             .await?;
@@ -2652,17 +2654,18 @@ fn repo_exec_env_key(task_id: TaskId) -> String {
     format!("repo_exec_env.{task_id}")
 }
 
-/// Puts a `byo_key` runtime's key (its ecosystem secret) into
-/// `spec.env[BYO_KEY_ENV]`. A missing secret fails the start (retried, then
-/// the step fails) with a message naming it, and so does one the buyer
-/// didn't allow a marketplace lease: it never leaves the kernel.
+/// Puts a `byo_key` runtime's key (the secret of that name in the run's
+/// workspace, where the runtime is) into `spec.env[BYO_KEY_ENV]`. A missing
+/// secret fails the start (retried, then the step fails) with a message
+/// naming it, and so does one the buyer didn't allow a marketplace lease: it
+/// never leaves the kernel.
 async fn with_byo_key(store: &Store, mut spec: SessionSpec) -> Result<SessionSpec> {
     let Some(name) = spec.byo_key.as_ref().and_then(|b| b.key_secret.clone()) else {
         return Ok(spec);
     };
-    let scope = crate::ecosystem_scope()?;
     let mut read = store.read().await?;
     let task = read.get_run(spec.run_id).await?.task_id;
+    let scope = SecretScope::Workspace(read.workspace_of_run(spec.run_id).await?);
     if crate::market::secret_withheld(&mut read, task, &name).await? {
         return Err(Error::Forbidden(format!(
             "the secret `{name}` is withheld from the marketplace runtime; \
@@ -2674,8 +2677,8 @@ async fn with_byo_key(store: &Store, mut spec: SessionSpec) -> Result<SessionSpe
         Err(e) => {
             return Err(match Error::from(e) {
                 Error::NotFound(_) => Error::InvalidInput(format!(
-                    "the BYO key secret `{name}` is not set; set it with \
-                     `sun secret set {name}` or on the Secrets page"
+                    "the BYO key secret `{name}` is not set in this workspace; set it on \
+                     its Secrets page or with `sun secret set {name} --workspace <workspace>`"
                 )),
                 e => e,
             });
@@ -3084,7 +3087,7 @@ mod byo_key_tests {
         let store = Store::open(dir.path()).await.unwrap();
         let (task, run) = queued(&store).await;
         let mut tx = store.begin().await.unwrap();
-        let scope = crate::ecosystem_scope().unwrap();
+        let scope = SecretScope::Workspace(sun_core::WorkspaceId::MAIN);
         tx.set_secret(&scope, "OR_KEY", "sk-or-0123456789")
             .await
             .unwrap();
@@ -3120,8 +3123,10 @@ mod byo_key_tests {
         );
     }
 
+    /// The key is the secret of that name in the run's workspace (Main
+    /// here): never the ecosystem's, nor another workspace's.
     #[tokio::test]
-    async fn byo_key_start_gets_the_key_from_the_ecosystem_secret() {
+    async fn byo_key_start_gets_the_key_from_its_workspace_secret() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let (_, run) = queued(&store).await;
@@ -3136,7 +3141,18 @@ mod byo_key_tests {
         assert!(why.contains("`OR_KEY` is not set"), "{why}");
 
         let mut tx = store.begin().await.unwrap();
-        let scope = crate::ecosystem_scope().unwrap();
+        let other = SecretScope::Workspace(sun_core::WorkspaceId::generate());
+        for scope in [crate::ecosystem_scope().unwrap(), other] {
+            tx.set_secret(&scope, "OR_KEY", "sk-or-not-this-one")
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+        let Err(Error::InvalidInput(_)) = with_byo_key(&store, spec(Some("OR_KEY"))).await else {
+            panic!("another scope's key never reaches this run");
+        };
+        let mut tx = store.begin().await.unwrap();
+        let scope = SecretScope::Workspace(sun_core::WorkspaceId::MAIN);
         tx.set_secret(&scope, "OR_KEY", "sk-or-0123456789")
             .await
             .unwrap();

@@ -598,10 +598,11 @@ async fn connection_of_call(
 
 /// The secret names of a GitLab connection `id`.
 fn secret_names(id: VcsConnectionId) -> (String, String, String) {
+    let prefix = sun_core::model::Secret::CONNECTION_PREFIX;
     (
-        format!("VCS_{id}_TOKEN"),
-        format!("VCS_{id}_REFRESH"),
-        format!("VCS_{id}_WEBHOOK"),
+        format!("{prefix}{id}_TOKEN"),
+        format!("{prefix}{id}_REFRESH"),
+        format!("{prefix}{id}_WEBHOOK"),
     )
 }
 
@@ -1623,6 +1624,33 @@ mod tests {
             "git@host:a b",
         ] {
             assert!(check_repo_url(bad).is_err(), "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod deployment_secrets {
+    use super::{github, gitlab};
+    use sun_core::model::Secret;
+
+    /// The secrets the kernel reads from the ecosystem scope are the ones
+    /// `Secret::is_deployment` keeps there.
+    #[test]
+    fn deployment_secrets_the_kernel_reads_stay_in_the_ecosystem() {
+        let names = [
+            crate::users::SMTP_PASSWORD,
+            crate::knowledge::EMBEDDING_API_KEY,
+            github::APP_ID,
+            github::APP_SLUG,
+            github::APP_PRIVATE_KEY,
+            github::APP_WEBHOOK_SECRET,
+            github::APP_API_URL,
+            gitlab::OAUTH_URL,
+            gitlab::OAUTH_CLIENT_ID,
+            gitlab::OAUTH_CLIENT_SECRET,
+        ];
+        for name in names {
+            assert!(Secret::is_deployment(name), "{name}");
         }
     }
 }

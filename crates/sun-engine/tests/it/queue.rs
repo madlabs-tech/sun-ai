@@ -1057,7 +1057,12 @@ async fn lagged_queue_reloads_cooldowns_from_the_store() {
     // queue's receiver holds.
     let mut tx = store.begin().await.unwrap();
     let fake = tx
-        .upsert_runtime("fake", "fake", RuntimeSource::ByoRuntime)
+        .upsert_runtime(
+            sun_core::WorkspaceId::MAIN,
+            "fake",
+            "fake",
+            RuntimeSource::ByoRuntime,
+        )
         .await
         .unwrap();
     let until = chrono::Utc::now() + chrono::Duration::minutes(10);
@@ -1190,7 +1195,12 @@ async fn cooling_runtime_never_starts_a_run_under_random_interleavings() {
         let mut tx = store.begin().await.unwrap();
         if in_store {
             let fake = tx
-                .upsert_runtime("fake", "fake", RuntimeSource::ByoRuntime)
+                .upsert_runtime(
+                    sun_core::WorkspaceId::MAIN,
+                    "fake",
+                    "fake",
+                    RuntimeSource::ByoRuntime,
+                )
                 .await
                 .unwrap();
             tx.set_cooldown(fake.id, Some(until)).await.unwrap();
