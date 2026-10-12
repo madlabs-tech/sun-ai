@@ -108,6 +108,8 @@ test('a viewer of a workspace sees it read-only and no deployment page', async (
     ['agents', 'Agents', 'New agent'],
     ['runtimes', 'Runtimes', 'Add runtime'],
     ['workflows', 'Workflows', 'New workflow'],
+    // The workspace's hosts read for any member (no 422 for a missing ?workspace=).
+    ['hosts', 'Hosts', 'Add host'],
   ]) {
     await page.goto(`/#/${route}?workspace=${ws.slug}`);
     await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
@@ -115,6 +117,17 @@ test('a viewer of a workspace sees it read-only and no deployment page', async (
     await expect(main(page).getByRole('alert'), route).toHaveCount(0);
     await expect(main(page).getByRole('button', { name: button }), route).toHaveCount(0);
   }
+  // Its catalog and MCP servers too.
+  const servers = page.waitForResponse((r) => r.url().includes(`/api/v1/mcp_servers?workspace=${ws.id}`));
+  const catalog = page.waitForResponse((r) => r.url().includes('/api/v1/catalog?') && r.url().includes(`workspace=${ws.id}`));
+  await page.goto(`/#/catalog?workspace=${ws.slug}`);
+  expect((await catalog).status()).toBe(200);
+  expect((await servers).status()).toBe(200);
+  await expect(main(page).getByRole('alert')).toHaveCount(0);
+  await expect(main(page).getByRole('button', { name: /^(Remove|Install)$/ })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'MCP servers' }).click();
+  await expect(main(page).getByRole('alert')).toHaveCount(0);
+  await expect(main(page).getByRole('button', { name: 'Add MCP server' })).toHaveCount(0);
   await page.goto(`/#/settings/members?workspace=${ws.slug}`);
   await expect(page.getByRole('region', { name: `People in ${ws.name}` }).getByRole('article')).toHaveCount(2);
   await expect(page.getByRole('combobox')).toHaveCount(0);
