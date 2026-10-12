@@ -14,5 +14,6 @@ mod straight_upgrade;
 mod task;
 mod upgrade;
 mod workspace;
+mod workspace_hosts;
 mod workspace_member;
 mod workspace_scoped;

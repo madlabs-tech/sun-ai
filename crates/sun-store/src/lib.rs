@@ -296,7 +296,7 @@ async fn open_sqlite(
         std::fs::create_dir_all(&dir)?;
         vacuum_into(&writer, &dir.join(name)).await?;
     }
-    migrate(&writer, key, blobs).await?;
+    migrate(&writer, key, blobs, data_dir).await?;
     let reader = PoolOptions::<Sqlite>::new()
         .max_connections(READERS)
         .after_connect(|conn, _| {
@@ -307,16 +307,17 @@ async fn open_sqlite(
     Ok((writer, reader))
 }
 
-/// What a data step gets: the migration's transaction, the master key and
-/// the blob store.
+/// What a data step gets: the migration's transaction, the master key, the
+/// blob store and the data dir.
 type DataStep = for<'a> fn(
     &'a mut sqlx::SqliteConnection,
     &'a MasterKey,
     &'a BlobStore,
+    &'a Path,
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
 /// Rust data steps by migration version: work SQL can't do (open a sealed
-/// secret, read a blob file). A step runs in its migration's transaction,
+/// secret, read a blob or data-dir file). A step runs in its migration's transaction,
 /// before the migration's SQL, so the data it reads is still there and the
 /// step, the SQL and the bookkeeping row commit together or not at all. It
 /// runs once, when its migration does: never at a later open.
@@ -324,6 +325,7 @@ pub(crate) const DATA_STEPS: &[(i64, DataStep)] = &[
     (20261022100000, finish_old_data),
     (20261102090100, copy_agents),
     (20261102090300, move_secrets),
+    (20261103090200, seed_catalog_installs),
 ];
 
 /// `20261022100000_drop_logo_blob`: re-seal what `secret_to_reseal` lists
@@ -332,6 +334,7 @@ fn finish_old_data<'a>(
     conn: &'a mut sqlx::SqliteConnection,
     key: &'a MasterKey,
     blobs: &'a BlobStore,
+    _: &'a Path,
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
         secret::reseal_old_ecosystem_secrets(&mut *conn, key).await?;
@@ -344,6 +347,7 @@ fn copy_agents<'a>(
     conn: &'a mut sqlx::SqliteConnection,
     _: &'a MasterKey,
     _: &'a BlobStore,
+    _: &'a Path,
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(agent::copy_agents_into_their_workspaces(conn))
 }
@@ -353,8 +357,19 @@ fn move_secrets<'a>(
     conn: &'a mut sqlx::SqliteConnection,
     key: &'a MasterKey,
     _: &'a BlobStore,
+    _: &'a Path,
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(secret::move_ecosystem_secrets_to_main(conn, key))
+}
+
+/// `20261103090200_catalog_install_main`: see [`workspace::seed_main_catalog_installs`].
+fn seed_catalog_installs<'a>(
+    conn: &'a mut sqlx::SqliteConnection,
+    _: &'a MasterKey,
+    _: &'a BlobStore,
+    data_dir: &'a Path,
+) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(workspace::seed_main_catalog_installs(conn, data_dir))
 }
 
 /// Applies the pending migrations in order. sqlx 0.8's SQLite driver runs
@@ -365,7 +380,12 @@ fn move_secrets<'a>(
 /// foreign_key_check` (a violation rolls it all back) and commit; a
 /// `-- no-transaction` one with foreign keys off around it. Then sqlx checks
 /// every applied migration's checksum as usual.
-async fn migrate(pool: &SqlitePool, key: &MasterKey, blobs: &BlobStore) -> Result<()> {
+async fn migrate(
+    pool: &SqlitePool,
+    key: &MasterKey,
+    blobs: &BlobStore,
+    data_dir: &Path,
+) -> Result<()> {
     use sqlx::migrate::{Migrate, MigrateError};
     let mut conn = pool.acquire().await?;
     conn.ensure_migrations_table().await?;
@@ -393,7 +413,7 @@ async fn migrate(pool: &SqlitePool, key: &MasterKey, blobs: &BlobStore) -> Resul
         if migration.no_tx {
             conn.execute("PRAGMA foreign_keys = OFF").await?;
         }
-        let applied = apply_here(&mut conn, migration, step, key, blobs).await;
+        let applied = apply_here(&mut conn, migration, step, key, blobs, data_dir).await;
         // Back on even when it failed: the connection goes back to the pool.
         conn.execute("PRAGMA foreign_keys = ON").await?;
         applied?;
@@ -409,10 +429,11 @@ async fn apply_here(
     step: Option<DataStep>,
     key: &MasterKey,
     blobs: &BlobStore,
+    data_dir: &Path,
 ) -> Result<()> {
     let mut tx = sqlx::Connection::begin(&mut *conn).await?;
     if let Some(step) = step {
-        step(&mut tx, key, blobs).await?;
+        step(&mut tx, key, blobs, data_dir).await?;
     }
     tx.execute(&*migration.sql)
         .await
