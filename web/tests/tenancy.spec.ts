@@ -54,11 +54,8 @@ test.describe('a viewer', () => {
     await expect(main(page).getByRole('button', { name: 'Stop' })).toHaveCount(0);
   });
 
-  // ponytail: these controls render for a viewer today and only fail at the API (403); each `test.fail` turns
-  // red once its screen gates the control on `run`, then drop the `test.fail`.
-  const BUG = 'bug: shown to viewers, refused by the API';
+  // These would only be refused by the API (403): a viewer doesn't get them.
   test('finds no New task', async ({ page }) => {
-    test.fail(true, BUG);
     await open(page, 'tasks', '&mock_role=viewer');
     await expect(page.getByRole('heading', { name: 'Tasks', level: 1 })).toBeVisible();
     await expect(page.getByRole('button', { name: 'New task' })).toHaveCount(0, { timeout: 1_000 });
@@ -66,8 +63,7 @@ test.describe('a viewer', () => {
 
   for (const name of ['Status', 'Priority', 'Assignee', 'Project']) {
     test(`finds no ${name} menu on a task`, async ({ page }) => {
-      test.fail(true, BUG);
-      await open(page, 'tasks/SUN-147', '&mock_role=viewer');
+        await open(page, 'tasks/SUN-147', '&mock_role=viewer');
       const details = page.getByRole('complementary', { name: 'Task details' });
       await expect(details).toBeVisible();
       await expect(details.getByRole('button', { name: new RegExp(`^${name}`) })).toHaveCount(0, { timeout: 1_000 });
@@ -75,14 +71,12 @@ test.describe('a viewer', () => {
   }
 
   test('finds no New project', async ({ page }) => {
-    test.fail(true, BUG);
     await open(page, 'projects', '&mock_role=viewer');
     await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
     await expect(page.getByRole('button', { name: 'New project' })).toHaveCount(0, { timeout: 1_000 });
   });
 
   test('finds no knowledge source write', async ({ page }) => {
-    test.fail(true, BUG);
     await open(page, 'knowledge', '&mock_role=viewer');
     await expect(page.getByRole('heading', { name: 'Knowledge', level: 1 })).toBeVisible();
     await loaded(page);

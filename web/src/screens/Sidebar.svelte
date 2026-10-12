@@ -4,7 +4,7 @@
   import { Button, Icon } from '@hryer/madlabs-design-system/svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
   import WorkspaceSwitcher from '../lib/ui/WorkspaceSwitcher.svelte';
-  import { SIDEBAR_SHORTCUT, app, toggle_sidebar } from '../lib/app_state.svelte';
+  import { SIDEBAR_SHORTCUT, app, can, toggle_sidebar } from '../lib/app_state.svelte';
   import { href, route, visible_nav, type NavSection } from '../lib/router.svelte';
   import { money, needs_approval } from '../lib/format';
 
@@ -46,7 +46,7 @@
     />
   </div>
   <WorkspaceSwitcher />
-  <Button variant="ice" iconLeft="plus" block onclick={on_new}>New task</Button>
+  {#if can('run')}<Button variant="ice" iconLeft="plus" block onclick={on_new}>New task</Button>{/if}
 
   <nav class="sun-nav sidebar__pages" aria-label="Pages">
     {@render links('')}
