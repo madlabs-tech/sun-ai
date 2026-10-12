@@ -7,7 +7,23 @@
       "description": "Opens pull requests, comments, reports CI status and follows labeled issues on GitHub.",
       "repo": "https://github.com/madlabs-tech/sun-plugin-github",
       "tier": "official",
-      "permissions": ["network:api.github.com", "secret:GITHUB_TOKEN"]
+      "permissions": [
+        "network:api.github.com",
+        "secret:GITHUB_TOKEN"
+      ]
+    },
+    {
+      "name": "slack",
+      "kind": "plugin",
+      "version": "0.1.0",
+      "description": "Slack as Sun's control surface: start tasks from slash commands, DMs and mentions, post notifications that update in place, and approve, reject or steer runs from buttons and thread replies.",
+      "repo": "https://github.com/madlabs-tech/sun-plugin-slack",
+      "tier": "official",
+      "permissions": [
+        "network:slack.com",
+        "secret:SLACK_BOT_TOKEN",
+        "secret:SLACK_SIGNING_SECRET"
+      ]
     }
   ]
 }
