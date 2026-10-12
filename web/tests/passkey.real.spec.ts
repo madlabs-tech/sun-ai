@@ -3,7 +3,7 @@
 // 127.0.0.1), so this test opens it there, as a member of its own (the owner's sign-in stays one step).
 import { expect, test } from '@playwright/test';
 
-const MEMBER_GROUP = '00000000000000000000000002';
+const MAIN = '00000000000000000000000001';
 
 test('a member adds a passkey, then signs in with password and passkey', async ({ page, playwright }, info) => {
   const url = new URL(info.project.use.baseURL!);
@@ -15,7 +15,7 @@ test('a member adds a passkey, then signs in with password and passkey', async (
   const owner = await playwright.request.newContext({ baseURL: url.origin });
   expect((await owner.post('/api/v1/session', { data: { email: 'me@example.com', password: 'test-token' } })).status()).toBe(204);
   const created = await owner.post('/api/v1/members', {
-    data: { email, username: `pat${Date.now()}`, group_ids: [MEMBER_GROUP], password, must_change: false },
+    data: { email, username: `pat${Date.now()}`, workspace_id: MAIN, role: 'member', password, must_change: false },
   });
   expect(created.status()).toBe(201);
   await owner.dispose();
