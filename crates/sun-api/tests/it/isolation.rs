@@ -361,7 +361,7 @@ async fn isolation_beta_is_404_to_alphas_owner_by_path_query_and_body() {
         ("GET", format!("/catalog?workspace={w}")),
         ("GET", format!("/mcp_servers?workspace={w}")),
         ("GET", format!("/entitlement?workspace={w}")),
-        ("POST", format!("/templates/ship/install?workspace={w}")),
+        ("POST", format!("/templates/bug-fix/install?workspace={w}")),
         ("POST", format!("/catalog/tdd/install?workspace={w}")),
     ] {
         let path = format!("/api/v1{path}");

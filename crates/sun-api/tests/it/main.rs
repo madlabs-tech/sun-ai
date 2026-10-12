@@ -18,6 +18,7 @@ mod no_secret_leaks;
 mod preview;
 mod projects;
 mod pull_requests;
+mod roles;
 mod route_matrix;
 mod task_lifecycle;
 mod tenancy;
