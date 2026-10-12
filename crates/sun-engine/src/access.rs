@@ -1,4 +1,4 @@
-//! Members (their groups are in `groups.rs`), runtime permission modes and configured runtimes
+//! Members (their workspace roles are in `roles.rs`), runtime permission modes and configured runtimes
 //! (`byo_key`), installed mods and the audit
 //! log, and sign-in sessions, for the API,
 //! part of the read **Facade** (`sun-api` may not reach `sun-store`). Each

@@ -1575,6 +1575,7 @@ mod tests {
             issue_counter: 0,
             default_workflow_id: Option::None,
             git_settings: GitSettings::default(),
+            created_by: None,
             created_at: chrono::Utc::now(),
         };
         tx.insert_workspace(&workspace).await.unwrap();

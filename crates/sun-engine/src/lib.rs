@@ -60,7 +60,6 @@ mod dry_run;
 mod eval;
 mod executor;
 mod gates;
-mod groups;
 mod knowledge;
 mod market;
 mod mcp;
@@ -77,6 +76,7 @@ mod queue;
 mod queued;
 mod repo_resolve;
 mod retention;
+mod roles;
 mod screenshot;
 mod secrets;
 mod skill_pr;
@@ -106,7 +106,6 @@ pub use executor::{
     Resolution, ScreenPath, SessionMcp, StallPolicy, Tally, WORKTREE_RETENTION, WatchdogConfig,
 };
 pub use gates::GateResult;
-pub use groups::Access;
 pub use knowledge::{
     ContextPreview, EMBEDDING_API_KEY, EmbeddingProvider, EmbeddingSettings, SuggestedSource,
     SyncReport, ecosystem_scope,
@@ -127,6 +126,7 @@ pub use pull_requests::{
 pub use quality::{DEFAULT_WINDOW_DAYS, MERGED_TRIGGER, Merge, QualityMetrics};
 pub use query::{DryRun, DryStep, ModNeed, Plan, PlannedStep, check_workflow};
 pub use queue::{Caps, HostCap, Queue, QueueConfig, Slot};
+pub use roles::Access;
 pub use secrets::{audit_secret_read, delete_secret, set_secret};
 pub use skill_pr::SkillPr;
 pub use sun_context::McpSessions;
