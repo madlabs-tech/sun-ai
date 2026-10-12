@@ -50,6 +50,7 @@ impl From<Error> for ApiError {
             }
             Error::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
             Error::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            Error::PlanLimit(_) => (StatusCode::FORBIDDEN, "plan_limit"),
             Error::InvalidTransition { .. } => (StatusCode::CONFLICT, "conflict"),
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             Error::Protocol(_) => (StatusCode::BAD_GATEWAY, "protocol"),

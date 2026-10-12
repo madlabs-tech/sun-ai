@@ -89,16 +89,6 @@ impl Limits {
             Quota::Hosts => self.hosts,
         }
     }
-
-    /// May one more `quota` be added when `current` already exist?
-    pub fn check(&self, quota: Quota, current: u32) -> Result<()> {
-        match self.max(quota) {
-            Some(max) if current >= max => Err(Error::InvalidInput(format!(
-                "plan limit reached: {max} {quota}"
-            ))),
-            _ => Ok(()),
-        }
-    }
 }
 
 /// Where a workspace's entitlement comes from right now.
@@ -159,6 +149,24 @@ impl Entitlement {
             paid: false,
             limits: Limits::default(),
             status,
+        }
+    }
+
+    /// May one more `quota` be added when `current` already exist?
+    /// [`Error::PlanLimit`] says which cap it hit, on which plan.
+    pub fn check(&self, quota: Quota, current: usize) -> Result<()> {
+        match self.limits.max(quota) {
+            Some(max) if current >= usize::try_from(max).unwrap_or(usize::MAX) => {
+                let what = match quota {
+                    Quota::ByoKeys => "BYO keys",
+                    other => other.as_str(),
+                };
+                Err(Error::PlanLimit(format!(
+                    "Plan limit reached ({what}: {max} on the {} plan). Remove one or upgrade the plan.",
+                    self.plan
+                )))
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -371,7 +379,7 @@ mod tests {
         assert_eq!(e.status, EntitlementStatus::Community);
         assert!(!e.paid);
         assert_eq!(e.limits, Limits::default());
-        assert!(e.limits.check(Quota::Hosts, u32::MAX - 1).is_ok());
+        assert!(e.check(Quota::Hosts, usize::MAX - 1).is_ok());
     }
 
     #[test]
@@ -392,10 +400,21 @@ mod tests {
                 ..Limits::default()
             }
         );
-        assert!(limits.check(Quota::Agents, 4).is_ok());
-        assert!(limits.check(Quota::Agents, 5).is_err());
-        assert!(limits.check(Quota::Hosts, 1).is_err());
-        assert!(limits.check(Quota::Runtimes, 1_000).is_ok());
+        let e = Entitlement {
+            plan: Plan::Pro,
+            limits,
+            ..Entitlement::community(EntitlementStatus::Stale)
+        };
+        assert!(e.check(Quota::Agents, 4).is_ok());
+        assert_eq!(
+            e.check(Quota::Agents, 5),
+            Err(Error::PlanLimit(
+                "Plan limit reached (agents: 5 on the pro plan). Remove one or upgrade the plan."
+                    .into()
+            ))
+        );
+        assert!(e.check(Quota::Hosts, 1).is_err());
+        assert!(e.check(Quota::Runtimes, 1_000).is_ok());
     }
 
     #[test]

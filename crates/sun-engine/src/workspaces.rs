@@ -11,6 +11,7 @@
 //! ([`crate::Access::workspaces`]). [`Engine::reach`] says which workspaces anything
 //! workspace-scoped lives on, for the API's one access guard.
 
+use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::{
     AuditAction, GitSettings, GitSettingsPatch, OutboxStatus, Role, SignupPolicy, Task, Workflow,
     Workspace,
@@ -496,16 +497,24 @@ impl Engine {
 
     /// Links an existing knowledge source, host or catalog install to
     /// `workspace` too (a knowledge source: the same row, so one index).
-    /// A no-op when it is already there. Audited.
+    /// A no-op when it is already there. Audited. `PlanLimit` for a host
+    /// `plan` has no room for.
     pub async fn import_to_workspace(
         &self,
         workspace: WorkspaceId,
         item: WorkspaceItem<'_>,
         actor: &str,
+        plan: &Entitlement,
     ) -> Result<()> {
         let mut tx = self.store.begin().await?;
         let workspace_name = tx.get_workspace(workspace).await?.name;
         let what = describe(&mut tx, item).await?;
+        if tx.workspaces_of(item).await?.contains(&workspace) {
+            return Ok(());
+        }
+        if let WorkspaceItem::Host(_) = item {
+            plan.check(Quota::Hosts, tx.hosts_in(workspace).await?.len())?;
+        }
         tx.link(workspace, item).await?;
         tx.append_audit(
             actor,

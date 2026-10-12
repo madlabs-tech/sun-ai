@@ -587,9 +587,12 @@ async fn enroll(api: &Api, token: &str, name: &str) -> Option<KernelFrame> {
     // leased seller host is paid capacity, not one of the plan's own hosts.
     let host = match enrols {
         Enrols::Workspace(workspace, by) => {
-            within_hosts(api, workspace).await.ok()?;
+            let plan = api.entitlements.for_workspace(workspace).await;
             let name = name.to_string();
-            api.engine.add_host(name, Some(workspace), by).await.ok()?
+            api.engine
+                .add_host(name, Some((workspace, &plan)), by)
+                .await
+                .ok()?
         }
         Enrols::Market(task) => {
             let host = api
@@ -628,7 +631,7 @@ pub(crate) fn random_hex() -> Result<String> {
 /// (`limits.hosts`, counting the hosts attached to it).
 async fn within_hosts(api: &Api, workspace: WorkspaceId) -> ApiResult<()> {
     let attached = api.engine.hosts(Some(workspace)).await?.len();
-    within_plan(api, workspace, Quota::Hosts, "hosts", attached).await
+    within_plan(api, workspace, Quota::Hosts, attached).await
 }
 
 /// `POST /api/v1/workspaces/{id}/hosts/tokens` (`manage_runtimes` there): a
@@ -667,13 +670,11 @@ pub(crate) async fn attach_host(
     if !caller.is_owner && !enrolled_it {
         return Err(Error::NotFound(format!("host {host}")).into());
     }
+    let plan = api.entitlements.for_workspace(workspace).await;
     let item = sun_engine::WorkspaceItem::Host(host);
-    if !api.engine.workspaces_of(item).await?.contains(&workspace) {
-        within_hosts(&api, workspace).await?;
-        api.engine
-            .import_to_workspace(workspace, item, &caller.actor())
-            .await?;
-    }
+    api.engine
+        .import_to_workspace(workspace, item, &caller.actor(), &plan)
+        .await?;
     api.queue.wake();
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1038,22 +1039,16 @@ pub(crate) async fn create_runtime(
     let workspace = named_workspace(&caller, query.workspace.as_deref())?;
     let name = std::mem::take(&mut input.name);
     let runtime = runtime_of(&api, &caller, workspace, name, &mut input)?;
-    // Runtimes someone added count, not the rows a chain name made.
-    let stored = api.engine.runtimes(Some(workspace)).await?;
-    let added = stored
-        .iter()
-        .filter(|r| r.source != RuntimeSource::ByoRuntime);
-    within_plan(&api, workspace, Quota::Runtimes, "runtimes", added.count()).await?;
-    if runtime.source == RuntimeSource::ByoKey {
-        let keys = stored
-            .iter()
-            .filter(|r| r.source == RuntimeSource::ByoKey)
-            .count();
-        within_plan(&api, workspace, Quota::ByoKeys, "BYO keys", keys).await?;
-    }
+    let plan = api.entitlements.for_workspace(workspace).await;
     if !api
         .engine
-        .save_runtime(&runtime, input.model.as_deref(), false, &caller.actor())
+        .save_runtime(
+            &runtime,
+            input.model.as_deref(),
+            false,
+            &caller.actor(),
+            &plan,
+        )
         .await?
     {
         return Err(ApiError::conflict(format!(
@@ -1087,9 +1082,16 @@ pub(crate) async fn update_runtime(
     }
     let workspace = named_workspace(&caller, query.workspace.as_deref())?;
     let runtime = runtime_of(&api, &caller, workspace, name, &mut input)?;
+    let plan = api.entitlements.for_workspace(workspace).await;
     if !api
         .engine
-        .save_runtime(&runtime, input.model.as_deref(), true, &caller.actor())
+        .save_runtime(
+            &runtime,
+            input.model.as_deref(),
+            true,
+            &caller.actor(),
+            &plan,
+        )
         .await?
     {
         return Err(sun_core::Error::NotFound(format!("runtime {}", runtime.name)).into());

@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 
 use serde_json::json;
+use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::{Agent, AuditAction, Run, Workflow};
 use sun_core::{AgentId, Error, Result, WorkflowId, WorkspaceId};
 use sun_store::{AgentRepo, AuditRepo, RepoRepo, TaskRepo, Tx, WorkflowRepo, WorkspaceRepo};
@@ -216,12 +217,14 @@ impl Engine {
     }
 
     /// Creates an agent on `workspace` from `fields` (a name and a runtime
-    /// at least); `NotFound` for a missing workspace.
+    /// at least); `NotFound` for a missing workspace, `PlanLimit` when
+    /// `plan` has no room for another agent.
     pub async fn create_agent(
         &self,
         workspace: WorkspaceId,
         fields: AgentFields,
         actor: &str,
+        plan: &Entitlement,
     ) -> Result<Agent> {
         let agent = fields.apply(Agent {
             id: AgentId::generate(),
@@ -236,6 +239,7 @@ impl Engine {
         })?;
         let mut tx = self.store.begin().await?;
         tx.get_workspace(workspace).await?;
+        plan.check(Quota::Agents, tx.agents(Some(workspace)).await?.len())?;
         tx.insert_agent(&agent).await?;
         audit(&mut tx, &agent, actor, "created").await?;
         tx.commit().await?;

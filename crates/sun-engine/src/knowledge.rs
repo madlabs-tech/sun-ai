@@ -1231,7 +1231,14 @@ mod tests {
         // An admin imports X's source into Main: the same row, both workspaces see it.
         let item = WorkspaceItem::KnowledgeSource(&x_wiki);
         engine
-            .import_to_workspace(WorkspaceId::MAIN, item, "owner")
+            .import_to_workspace(
+                WorkspaceId::MAIN,
+                item,
+                "owner",
+                &sun_core::entitlement::Entitlement::community(
+                    sun_core::entitlement::EntitlementStatus::Community,
+                ),
+            )
             .await
             .unwrap();
         assert_eq!(engine.knowledge_sources(None).await.unwrap().len(), 2);

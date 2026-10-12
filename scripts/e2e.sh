@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end check on the real `sun` binary:
-#   fresh data dir → `sun serve --with-host` → a task with the default
-#   workflow's steps on a temp git repo (bare origin) → the first fake runtime
-#   hits its limit → failover to the second → gates → PR step → approval via
-#   the API → done, every step succeeded.
+#   fresh data dir → `sun serve --with-host` → the first-run owner signs in
+#   and names their email → Main gets a repo (a temp bare origin behind an
+#   https URL) → a task on the default workflow's steps with a failover chain
+#   → the first fake runtime hits its limit → failover to the second → gates
+#   → PR step → the owner approves → done, every step succeeded, the task's
+#   branch pushed.
 # Then the whole-binary crash test: a second task, `kill -9` of the kernel
 # while the agent step runs and again while it waits for approval; each
 # restart resumes the run from the journal to done.
@@ -46,6 +48,17 @@ git -C "$work/seed" add .
 git -C "$work/seed" -c user.name=e2e -c user.email=e2e@sun.dev commit -q -m base
 git clone -q --bare "$work/seed" "$work/origin.git"
 origin="$work/origin.git"
+# Repos are added by URL (https, ssh or git): git on the host maps this one
+# to the bare origin, so nothing listens on the network.
+origin_url="https://git.e2e.invalid/sun/e2e.git"
+cat >"$work/gitconfig" <<EOF
+[user]
+  name = e2e
+  email = e2e@sun.dev
+[url "$origin"]
+  insteadOf = $origin_url
+EOF
+export GIT_CONFIG_GLOBAL="$work/gitconfig"
 
 # --- fake runtimes: `fake-limit` hits its quota, `fake-ok` does the work ---
 reset_at=$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)
@@ -108,11 +121,23 @@ started=$(python3 -c 'import time; print(time.time())')
 start_kernel
 python3 -c "import time; print('e2e: kernel up in %d ms' % ((time.time()-$started)*1000))"
 token=$(jq -r .token "$data/kernel.json")
+main_ws=00000000000000000000000001
 
+# Everything below runs as the owner's browser session (a cookie), not the
+# kernel token: the first-run owner signs in with it once, chooses a password
+# (which retires the printed token) and names a real email, as onboarding
+# does. Sessions are stored, so they outlive the kernel restarts.
+jar="$work/cookies"
 api() { # api METHOD PATH [JSON]
-  curl -fsS -X "$1" -H "authorization: Bearer $token" -H 'content-type: application/json' \
+  curl -fsS -b "$jar" -c "$jar" -X "$1" -H 'content-type: application/json' \
     ${3:+--data "$3"} "$base/api/v1$2"
 }
+api POST /session "$(jq -n --arg p "$token" '{email: "admin@sun.local", password: $p}')" >/dev/null ||
+  fail "the first-run owner could not sign in"
+api PUT /me/password "$(jq -n --arg p "$token" '{password: "the e2e owner’s password", current_password: $p}')" \
+  >/dev/null || fail "the owner could not choose a password"
+api PUT /me/email '{"email": "owner@e2e.dev"}' >/dev/null || fail "the owner could not name their email"
+api GET /me | jq -e '.is_owner and (.needs_email | not)' >/dev/null || fail "not signed in as the owner: $(api GET /me)"
 # wait_for WHAT SECONDS JQ_FILTER PATH: polls GET PATH until the filter is true.
 wait_for() {
   local deadline=$((SECONDS + $2)) body=""
@@ -137,11 +162,18 @@ default_yaml=$(api GET /workflows | jq -r '.[] | select(.name == "default") | .i
 workflow=$(printf 'runtime:\n  chain: [fake-limit, fake-ok]\n  on_limit: switch\n%s\n' \
   "$(echo "$default_yaml" | sed 's/^name: default$/name: e2e/')")
 workflow_id=$(api POST /workflows "$(jq -n --arg y "$workflow" '{source_yaml: $y}')" | jq -r .id)
-repo_id=$(api POST /repos "$(jq -n --arg u "$origin" '{url: $u, default_branch: "main"}')" | jq -r .id)
+api POST "/workspaces/$main_ws/repos" "$(jq -n --arg u "$origin_url" '{url: $u, default_branch: "main"}')" |
+  jq -e '.repo.id' >/dev/null || fail "could not add the repo"
 
+# A run works in the workspace repos its task names: "e2e" in the title.
 new_task() {
-  api POST /tasks "$(jq -n --arg t "$1" --arg w "$workflow_id" --arg r "$repo_id" \
-    '{title: $t, workflow_id: $w, repo_ids: [$r]}')" | jq -r .id
+  api POST /tasks "$(jq -n --arg t "$1" --arg w "$workflow_id" '{title: $t, workflow_id: $w}')" | jq -r .id
+}
+# branch_of TASK: the task's branch on the origin (`sun/<KEY>-<slug>`).
+branch_of() {
+  local key
+  key=$(api GET "/tasks/$1" | jq -r .key)
+  git -C "$origin" for-each-ref --format='%(refname:short)' "refs/heads/sun/$key-*" "refs/heads/sun/$key" | head -n 1
 }
 waiting_review='any(.run.steps[]?; .step_key == "review" and .status == "waiting_approval")'
 all_done='.status == "done" and .run.status == "done" and all(.run.steps[]; .status == "succeeded")'
@@ -158,7 +190,9 @@ echo "$events" | jq -e 'any(.[]; .kind == "limit_hit" or (.kind == "agent_event"
   echo "e2e: note: no limit_hit event kind found (kinds: $(echo "$events" | jq -c '[.[].kind] | unique'))"
 api POST "/tasks/$task/approve" '{}' >/dev/null
 wait_for "done" 60 "$all_done" "/tasks/$task"
-pushed=$(git -C "$origin" show "sun/$task:src/lib.rs")
+branch=$(branch_of "$task")
+[ -n "$branch" ] || fail "the task's branch was not pushed: $(git -C "$origin" branch --list)"
+pushed=$(git -C "$origin" show "$branch:src/lib.rs")
 [ "$pushed" = "//! Changed by the agent." ] || fail "the task branch holds: $pushed"
 echo "e2e: ok: limit hit → failover → gates → PR → approval → done"
 
@@ -174,6 +208,6 @@ crash_kernel "waiting for approval"
 start_kernel
 api POST "/tasks/$task/approve" '{}' >/dev/null
 wait_for "done after the restarts" 60 "$all_done" "/tasks/$task"
-git -C "$origin" rev-parse -q --verify "sun/$task" >/dev/null || fail "the crash task's branch was not pushed"
+[ -n "$(branch_of "$task")" ] || fail "the crash task's branch was not pushed"
 echo "e2e: ok: kill -9 twice, resumed to done"
 echo "e2e: PASS"

@@ -7,6 +7,19 @@ const main = (page: Page) => page.getByRole('main');
 const sidebar = (page: Page) => page.getByRole('complementary', { name: 'Main' });
 const switcher = (page: Page) => sidebar(page).getByRole('button', { name: /^Workspace: / });
 const loaded = async (page: Page) => expect(page.getByText('Loading…')).toHaveCount(0);
+/** An agent's row by its exact name: "Agent 1" is also a substring of "Main agent 1". */
+const agent_row = (page: Page, name: string) => main(page).getByRole('article', { name, exact: true });
+
+/** Opens the Agents page of `workspace` and waits for its list to come back. */
+async function agents_of(page: Page, slug: string, id: string) {
+  const listed = page.waitForResponse((r) => r.url().endsWith(`/api/v1/agents?workspace=${id}`) && r.ok());
+  await page.goto(`/#/agents?workspace=${slug}`);
+  await listed;
+  await loaded(page);
+}
+
+/** A number no parallel test picks too (two workers can start in the same millisecond). */
+const unique = () => Date.now() + Math.floor(Math.random() * 1e9);
 
 /** Signs `owner` in as the deployment owner. */
 async function as_owner(owner: APIRequestContext) {
@@ -47,7 +60,7 @@ async function seeded(owner: APIRequestContext, stamp: number) {
 
 test('switching workspaces never shows the other one’s tasks, agents or members', async ({ page, playwright }, info) => {
   const origin = new URL(info.project.use.baseURL!).origin;
-  const stamp = Date.now();
+  const stamp = unique();
   const owner = await as_owner(await playwright.request.newContext({ baseURL: origin }));
   const ws = await seeded(owner, stamp);
   const main_title = `Only in Main ${stamp}`;
@@ -66,18 +79,18 @@ test('switching workspaces never shows the other one’s tasks, agents or member
   await expect(main(page).getByText(`Only in ${ws.name}`)).toBeVisible();
   await expect(main(page).getByText(main_title)).toHaveCount(0);
 
-  await page.goto(`/#/agents?workspace=${ws.slug}`);
-  await expect(main(page).getByRole('article', { name: ws.agent })).toBeVisible();
-  await expect(main(page).getByRole('article', { name: main_agent })).toHaveCount(0);
+  await agents_of(page, ws.slug, ws.id);
+  await expect(agent_row(page, ws.agent)).toBeVisible();
+  await expect(agent_row(page, main_agent)).toHaveCount(0);
   await page.goto(`/#/settings/members?workspace=${ws.slug}`);
   const people = page.getByRole('region', { name: `People in ${ws.name}` });
   await expect(people.getByRole('article', { name: ws.viewer })).toBeVisible();
   await expect(people.getByRole('article')).toHaveCount(2);
 
   // And back to Main: nothing of the other workspace's.
-  await page.goto('/#/agents?workspace=main');
-  await expect(main(page).getByRole('article', { name: main_agent })).toBeVisible();
-  await expect(main(page).getByRole('article', { name: ws.agent })).toHaveCount(0);
+  await agents_of(page, 'main', MAIN);
+  await expect(agent_row(page, main_agent)).toBeVisible();
+  await expect(agent_row(page, ws.agent)).toHaveCount(0);
   await page.goto('/#/tasks?workspace=main');
   await expect(main(page).getByText(main_title)).toBeVisible();
   await expect(main(page).getByText(`Only in ${ws.name}`)).toHaveCount(0);
@@ -86,7 +99,7 @@ test('switching workspaces never shows the other one’s tasks, agents or member
 test('a viewer of a workspace sees it read-only and no deployment page', async ({ page, playwright }, info) => {
   const origin = new URL(info.project.use.baseURL!).origin;
   const owner = await as_owner(await playwright.request.newContext({ baseURL: origin }));
-  const ws = await seeded(owner, Date.now());
+  const ws = await seeded(owner, unique());
   await owner.dispose();
 
   await sign_in(page, ws.email, ws.password);
@@ -95,6 +108,8 @@ test('a viewer of a workspace sees it read-only and no deployment page', async (
     ['agents', 'Agents', 'New agent'],
     ['runtimes', 'Runtimes', 'Add runtime'],
     ['workflows', 'Workflows', 'New workflow'],
+    // The workspace's hosts read for any member (no 422 for a missing ?workspace=).
+    ['hosts', 'Hosts', 'Add host'],
   ]) {
     await page.goto(`/#/${route}?workspace=${ws.slug}`);
     await expect(page.getByRole('heading', { name: heading, level: 1 })).toBeVisible();
@@ -102,6 +117,17 @@ test('a viewer of a workspace sees it read-only and no deployment page', async (
     await expect(main(page).getByRole('alert'), route).toHaveCount(0);
     await expect(main(page).getByRole('button', { name: button }), route).toHaveCount(0);
   }
+  // Its catalog and MCP servers too.
+  const servers = page.waitForResponse((r) => r.url().includes(`/api/v1/mcp_servers?workspace=${ws.id}`));
+  const catalog = page.waitForResponse((r) => r.url().includes('/api/v1/catalog?') && r.url().includes(`workspace=${ws.id}`));
+  await page.goto(`/#/catalog?workspace=${ws.slug}`);
+  expect((await catalog).status()).toBe(200);
+  expect((await servers).status()).toBe(200);
+  await expect(main(page).getByRole('alert')).toHaveCount(0);
+  await expect(main(page).getByRole('button', { name: /^(Remove|Install)$/ })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'MCP servers' }).click();
+  await expect(main(page).getByRole('alert')).toHaveCount(0);
+  await expect(main(page).getByRole('button', { name: 'Add MCP server' })).toHaveCount(0);
   await page.goto(`/#/settings/members?workspace=${ws.slug}`);
   await expect(page.getByRole('region', { name: `People in ${ws.name}` }).getByRole('article')).toHaveCount(2);
   await expect(page.getByRole('combobox')).toHaveCount(0);

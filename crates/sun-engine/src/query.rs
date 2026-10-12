@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 use serde_json::Value;
+use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::{
     Artifact, EventRecord, Host, Repo, Run, SecretScope, Step, Task, Workflow, WorkflowVersion,
 };
@@ -279,11 +280,12 @@ impl Engine {
     }
 
     /// Enrols a new host named `name`, attached to `workspace` (`None`: to
-    /// none, a leased seller host), with who minted its token.
+    /// none, a leased seller host), with who minted its token. `PlanLimit`
+    /// when the workspace's plan has no room for another host.
     pub async fn add_host(
         &self,
         name: String,
-        workspace: Option<WorkspaceId>,
+        workspace: Option<(WorkspaceId, &Entitlement)>,
         enrolled_by: Option<MemberId>,
     ) -> Result<Host> {
         let host = Host {
@@ -294,7 +296,8 @@ impl Engine {
         };
         let mut tx = self.store.begin().await?;
         tx.insert_host(&host).await?;
-        if let Some(workspace) = workspace {
+        if let Some((workspace, plan)) = workspace {
+            plan.check(Quota::Hosts, tx.hosts_in(workspace).await?.len())?;
             tx.link(workspace, WorkspaceItem::Host(host.id)).await?;
         }
         tx.commit().await?;

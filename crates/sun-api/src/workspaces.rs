@@ -219,9 +219,11 @@ pub(crate) async fn import_knowledge_source(
     Extension(caller): Extension<Caller>,
     Path((workspace, source)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    let workspace = id(&workspace, "workspace")?;
+    let plan = api.entitlements.for_workspace(workspace).await;
     let item = WorkspaceItem::KnowledgeSource(&source);
     api.engine
-        .import_to_workspace(id(&workspace, "workspace")?, item, &caller.actor())
+        .import_to_workspace(workspace, item, &caller.actor(), &plan)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

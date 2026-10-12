@@ -219,7 +219,7 @@
 {:else}
   <PageHeader title="Knowledge" subtitle="Docs agents on {workspace_name} can read and cite, synced from your tools or uploaded.">
     {#if can('manage_settings')}<Button variant="secondary" iconLeft="download" onclick={open_import}>Import</Button>{/if}
-    <Button variant="ice" iconLeft="plus" onclick={open_add}>Add source</Button>
+    {#if can('run')}<Button variant="ice" iconLeft="plus" onclick={open_add}>Add source</Button>{/if}
   </PageHeader>
 
   <div class="sun-page">
@@ -274,14 +274,14 @@
               </ul>
             {/if}
           </div>
-          <div class="source__actions">
+          {#if can('run')}<div class="source__actions">
             {#if s.kind === 'upload'}
               <Button size="sm" variant="secondary" iconLeft="upload" loading={busy === s.id} onclick={() => pick_files(s)}>Upload</Button>
             {:else}
               <Button size="sm" variant="secondary" iconLeft="refresh-cw" loading={busy === s.id} onclick={() => reindex(s)}>Re-index</Button>
             {/if}
             <IconButton icon="trash-2" label="Remove {s.name}" variant="ghost" size="sm" onclick={() => (deleting = s)} />
-          </div>
+          </div>{/if}
         </article>
       {/snippet}
     </Loaded>

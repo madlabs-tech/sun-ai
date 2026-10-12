@@ -54,11 +54,8 @@ test.describe('a viewer', () => {
     await expect(main(page).getByRole('button', { name: 'Stop' })).toHaveCount(0);
   });
 
-  // ponytail: these controls render for a viewer today and only fail at the API (403); each `test.fail` turns
-  // red once its screen gates the control on `run`, then drop the `test.fail`.
-  const BUG = 'bug: shown to viewers, refused by the API';
+  // These would only be refused by the API (403): a viewer doesn't get them.
   test('finds no New task', async ({ page }) => {
-    test.fail(true, BUG);
     await open(page, 'tasks', '&mock_role=viewer');
     await expect(page.getByRole('heading', { name: 'Tasks', level: 1 })).toBeVisible();
     await expect(page.getByRole('button', { name: 'New task' })).toHaveCount(0, { timeout: 1_000 });
@@ -66,8 +63,7 @@ test.describe('a viewer', () => {
 
   for (const name of ['Status', 'Priority', 'Assignee', 'Project']) {
     test(`finds no ${name} menu on a task`, async ({ page }) => {
-      test.fail(true, BUG);
-      await open(page, 'tasks/SUN-147', '&mock_role=viewer');
+        await open(page, 'tasks/SUN-147', '&mock_role=viewer');
       const details = page.getByRole('complementary', { name: 'Task details' });
       await expect(details).toBeVisible();
       await expect(details.getByRole('button', { name: new RegExp(`^${name}`) })).toHaveCount(0, { timeout: 1_000 });
@@ -75,20 +71,36 @@ test.describe('a viewer', () => {
   }
 
   test('finds no New project', async ({ page }) => {
-    test.fail(true, BUG);
     await open(page, 'projects', '&mock_role=viewer');
     await expect(page.getByRole('heading', { name: 'Projects', level: 1 })).toBeVisible();
     await expect(page.getByRole('button', { name: 'New project' })).toHaveCount(0, { timeout: 1_000 });
   });
 
   test('finds no knowledge source write', async ({ page }) => {
-    test.fail(true, BUG);
     await open(page, 'knowledge', '&mock_role=viewer');
     await expect(page.getByRole('heading', { name: 'Knowledge', level: 1 })).toBeVisible();
     await loaded(page);
     await expect(main(page).getByRole('button', { name: /^(Add source|Upload|Re-index)$|^Remove |^Delete / })).toHaveCount(0, {
       timeout: 1_000,
     });
+  });
+
+  test('finds no host, catalog or MCP server write', async ({ page }) => {
+    await open(page, 'hosts', '&mock_role=viewer');
+    await expect(main(page).getByRole('article', { name: 'hery-mbp' })).toContainText('Serves Main');
+    for (const name of [/^Add host$/, /^Detach /, /^Attach /, /^Kill session/])
+      await expect(main(page).getByRole('button', { name }), String(name)).toHaveCount(0);
+    await expect(page.getByRole('region', { name: 'Hosts you can attach' })).toHaveCount(0);
+
+    await open(page, 'catalog', '&mock_role=viewer');
+    for (const [tab, item] of [[/Installed/, 'tdd'], [/Suggested/, 'diagnosing-bugs'], ['MCP servers', 'github']] as const) {
+      await page.getByRole('tab', { name: tab }).click();
+      const article = main(page).getByRole('article').filter({ hasText: item });
+      await expect(article.first(), item).toBeVisible();
+      await expect(main(page).getByRole('article').getByRole('button'), item).toHaveCount(0);
+    }
+    await expect(main(page).getByRole('button', { name: 'Add MCP server' })).toHaveCount(0);
+    await expect(page.getByLabel('Suggest for a repo')).toHaveCount(0);
   });
 });
 
@@ -115,10 +127,23 @@ test.describe('switching workspaces', () => {
     const people = page.getByRole('region', { name: 'People in Design' });
     await expect(people.getByRole('article', { name: 'ana' })).toBeVisible();
     for (const name of ['ben', 'cho']) await expect(people.getByRole('article', { name })).toHaveCount(0);
+    // Hosts, catalog installs and MCP servers are Main's, not Design's.
+    await page.evaluate(() => (location.hash = '#/hosts?workspace=design'));
+    await expect(page.getByText('No hosts serve this workspace yet. Add one, or attach one below.')).toBeVisible();
+    await page.evaluate(() => (location.hash = '#/catalog?workspace=design'));
+    await expect(page.getByText('Nothing installed yet. Pick one under Suggested.')).toBeVisible();
+    await page.getByRole('tab', { name: 'MCP servers' }).click();
+    await loaded(page);
+    await expect(main(page).getByRole('article').filter({ hasText: 'github' })).toHaveCount(0);
 
     // And back: Main's again, nothing of Design's left over.
     await page.evaluate(() => (location.hash = '#/settings/members?workspace=main'));
     await expect(page.getByRole('region', { name: 'People in Main' }).getByRole('article', { name: 'cho' })).toBeVisible();
+    await page.evaluate(() => (location.hash = '#/hosts?workspace=main'));
+    await expect(main(page).getByRole('article', { name: 'hery-mbp' })).toContainText('Serves Main');
+    await page.evaluate(() => (location.hash = '#/catalog?workspace=main'));
+    await page.getByRole('tab', { name: 'MCP servers' }).click();
+    await expect(main(page).getByRole('article').filter({ hasText: 'github' })).toBeVisible();
     await page.evaluate(() => (location.hash = '#/tasks?workspace=main'));
     await expect(main(page).getByRole('link', { name: /SUN-147/ })).toBeVisible();
     await expect(switcher(page)).toHaveAccessibleName('Workspace: Main');
