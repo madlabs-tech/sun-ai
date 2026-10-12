@@ -669,17 +669,21 @@ async fn an_archived_agent_takes_no_task() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_agents_list_is_for_deployment_owners_and_counts_every_task() {
+async fn an_agent_takes_only_its_workspaces_tasks_and_members_name_the_workspace() {
     let w = world().await;
     let app = &w.k.app;
     let assign = json!({ "assignee": { "kind": "agent", "id": w.agent } });
-    for side in [&w.main, &w.ops] {
-        let path = format!("/api/v1/tasks/{}", side.plain);
-        ok(app, "PATCH", &path, Some(assign.clone())).await;
-    }
+    let path = format!("/api/v1/tasks/{}", w.main.plain);
+    ok(app, "PATCH", &path, Some(assign.clone())).await;
+    // Main's agent is no assignee on Ops, even for a deployment owner.
+    let path = format!("/api/v1/tasks/{}", w.ops.plain);
+    let (status, _) = call_as(app, crate::common::TOKEN, "PATCH", &path, Some(assign)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     let bob = member_token(&w.k.store, "bob", Role::Member).await;
     let (status, _) = call_as(app, &bob, "GET", "/api/v1/agents", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let agents = ok(app, "GET", "/api/v1/agents", None).await;
-    assert_eq!(agents[0]["task_count"], 2, "{agents}");
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let of_main = "/api/v1/agents?workspace=00000000000000000000000001";
+    let (status, agents) = call_as(app, &bob, "GET", of_main, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(agents[0]["task_count"], 1, "{agents}");
 }

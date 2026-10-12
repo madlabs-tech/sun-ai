@@ -28,11 +28,13 @@ use sun_core::model::{Runtime, RuntimeSource};
 use sun_core::{
     BoxStream, ByoKey, Error, HostEvent, HostId, HostLink, Readiness, Result, RunId, RuntimeId,
     SessionHandle, SessionId, SessionSpec, Steer, StepKey, StopMode, TaskId, Timestamp,
+    WorkspaceId,
 };
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{ApiError, ApiResult};
 use crate::license::within_plan;
+use crate::workspace_access::{InWorkspace, listed_workspace, named_workspace};
 use crate::{Api, auth, wire};
 use sun_core::entitlement::Quota;
 
@@ -786,19 +788,26 @@ pub(crate) async fn online_adapters(api: &Api) -> ApiResult<BTreeMap<String, (bo
     Ok(seen)
 }
 
-/// `GET /api/v1/runtimes`: one entry per adapter any host reported (`ready`
-/// when an online host has it installed and logged in), then every stored
-/// `byo_key` runtime with its `config` and `credits` runtime with its
-/// `model` (`ready` per [`readiness`]).
+/// `GET /api/v1/runtimes?workspace=`: one entry per adapter any host
+/// reported (`ready` when an online host has it installed and logged in,
+/// `workspace_id` null: every workspace's chains may name it), then the
+/// workspace's stored `byo_key` runtimes with their `config` and `credits`
+/// runtimes with their `model` (`ready` per [`readiness`]). Only a
+/// deployment owner may leave out `?workspace=` (every workspace's rows).
 // ponytail: byo_runtime entries are derived from host capabilities, not rows;
 // cooldowns and session counts come with the runtime repo.
-pub(crate) async fn list_runtimes(State(api): State<Api>) -> ApiResult<Json<Vec<Value>>> {
+pub(crate) async fn list_runtimes(
+    State(api): State<Api>,
+    axum::Extension(caller): axum::Extension<auth::Caller>,
+    axum::extract::Query(query): axum::extract::Query<InWorkspace>,
+) -> ApiResult<Json<Vec<Value>>> {
+    let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
     let online = online_adapters(&api).await?;
     let modes: BTreeMap<String, String> =
         api.engine.permission_modes().await?.into_iter().collect();
     let view = |name: &str, adapter: &str, source: &str, ready: bool, config: Option<&ByoKey>| {
         json!({
-            "model": null,
+            "model": null, "workspace_id": null,
             "id": name, "name": name, "adapter": adapter, "source": source,
             "status": if ready { "ready" } else { "offline" },
             "cooldown_until": null, "sessions": 0, "max_sessions": 0,
@@ -811,7 +820,7 @@ pub(crate) async fn list_runtimes(State(api): State<Api>) -> ApiResult<Json<Vec<
         .iter()
         .map(|(adapter, (_, ok))| view(adapter, adapter, "byo_runtime", *ok, None))
         .collect();
-    for runtime in api.engine.runtimes().await? {
+    for runtime in api.engine.runtimes(workspace).await? {
         if runtime.source == RuntimeSource::ByoRuntime {
             continue;
         }
@@ -820,8 +829,9 @@ pub(crate) async fn list_runtimes(State(api): State<Api>) -> ApiResult<Json<Vec<
         let source = runtime.source.as_str();
         let config = runtime.byo_key.as_ref();
         let mut entry = view(&runtime.name, &runtime.adapter, source, ok, config);
+        entry["workspace_id"] = json!(runtime.workspace_id);
         if runtime.source == RuntimeSource::Credits {
-            entry["model"] = json!(api.engine.credits_model(&runtime.name).await?);
+            entry["model"] = json!(api.engine.credits_model(runtime.id).await?);
         }
         views.push(entry);
     }
@@ -846,9 +856,16 @@ pub(crate) struct RuntimeInput {
     model: Option<String>,
 }
 
-/// A configured runtime from `input`, checked by [`Runtime::validate`]. The
-/// 422 message starts with the field to fix (`name: `, `endpoint: `, ...).
-fn runtime_of(api: &Api, name: String, input: &mut RuntimeInput) -> ApiResult<Runtime> {
+/// A configured runtime of `caller`'s for `workspace` from `input`, checked
+/// by [`Runtime::validate`]. The 422 message starts with the field to fix
+/// (`name: `, `endpoint: `, ...).
+fn runtime_of(
+    api: &Api,
+    caller: &auth::Caller,
+    workspace: WorkspaceId,
+    name: String,
+    input: &mut RuntimeInput,
+) -> ApiResult<Runtime> {
     match input.source {
         RuntimeSource::ByoKey => {}
         RuntimeSource::Credits if api.sun_cloud => {}
@@ -866,10 +883,12 @@ fn runtime_of(api: &Api, name: String, input: &mut RuntimeInput) -> ApiResult<Ru
     }
     let runtime = Runtime {
         id: RuntimeId::generate(),
+        workspace_id: workspace,
         name,
         adapter: input.adapter.take().unwrap_or_else(|| "opencode".into()),
         source: input.source,
         byo_key: input.config.take(),
+        created_by: caller.member_id,
     };
     match runtime.validate() {
         Ok(()) => Ok(runtime),
@@ -878,14 +897,18 @@ fn runtime_of(api: &Api, name: String, input: &mut RuntimeInput) -> ApiResult<Ru
     }
 }
 
-/// `POST /api/v1/runtimes` (admin): adds a `byo_key` runtime, or with Sun
-/// Cloud connected a `credits` one; `409` when the name is taken. Audited.
+/// `POST /api/v1/runtimes?workspace=` (`manage_runtimes` there): adds a
+/// `byo_key` runtime to the workspace, or with Sun Cloud connected a
+/// `credits` one; `409` when the workspace has the name. Audited.
 pub(crate) async fn create_runtime(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,
+    axum::extract::Query(query): axum::extract::Query<InWorkspace>,
     crate::routes::Body(mut input): crate::routes::Body<RuntimeInput>,
 ) -> ApiResult<Json<Value>> {
-    let runtime = runtime_of(&api, std::mem::take(&mut input.name), &mut input)?;
+    let workspace = named_workspace(&caller, query.workspace.as_deref())?;
+    let name = std::mem::take(&mut input.name);
+    let runtime = runtime_of(&api, &caller, workspace, name, &mut input)?;
     if !api
         .engine
         .save_runtime(&runtime, input.model.as_deref(), false, &caller.actor())
@@ -902,21 +925,26 @@ pub(crate) async fn create_runtime(
 /// What `POST`/`PUT /runtimes` answer: the stored fields of a `GET` entry.
 fn saved_view(r: &Runtime, model: Option<&str>) -> Value {
     let model = model.map(str::trim).filter(|m| !m.is_empty());
-    json!({ "id": r.name, "name": r.name, "adapter": r.adapter, "source": r.source, "config": r.byo_key, "model": model })
+    json!({
+        "id": r.name, "name": r.name, "workspace_id": r.workspace_id, "adapter": r.adapter,
+        "source": r.source, "config": r.byo_key, "model": model,
+    })
 }
 
-/// `PUT /api/v1/runtimes/{id}` (admin, `id` = the runtime's name): replaces
-/// its source config. Audited.
+/// `PUT /api/v1/runtimes/{id}?workspace=` (`manage_runtimes` there, `id` =
+/// the runtime's name): replaces its source config. Audited.
 pub(crate) async fn update_runtime(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<InWorkspace>,
     crate::routes::Body(mut input): crate::routes::Body<RuntimeInput>,
 ) -> ApiResult<Json<Value>> {
     if !input.name.is_empty() && input.name != name {
         return Err(ApiError::invalid("name: a runtime can't be renamed."));
     }
-    let runtime = runtime_of(&api, name, &mut input)?;
+    let workspace = named_workspace(&caller, query.workspace.as_deref())?;
+    let runtime = runtime_of(&api, &caller, workspace, name, &mut input)?;
     if !api
         .engine
         .save_runtime(&runtime, input.model.as_deref(), true, &caller.actor())
@@ -927,32 +955,38 @@ pub(crate) async fn update_runtime(
     Ok(Json(saved_view(&runtime, input.model.as_deref())))
 }
 
-/// `GET /api/v1/runtimes/{id}/readiness` (`id` = a runtime's name): see
-/// [`runtime_readiness`].
+/// `GET /api/v1/runtimes/{id}/readiness?workspace=` (`id` = a runtime's
+/// name in that workspace): see [`runtime_readiness`].
 pub(crate) async fn readiness(
     State(api): State<Api>,
+    axum::Extension(caller): axum::Extension<auth::Caller>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<InWorkspace>,
 ) -> ApiResult<Json<Readiness>> {
+    let workspace = named_workspace(&caller, query.workspace.as_deref())?;
     let online = online_adapters(&api).await?;
-    Ok(Json(readiness_of(&api, name, &online).await?))
+    Ok(Json(readiness_of(&api, workspace, name, &online).await?))
 }
 
-/// The readiness of the runtime named `name` (see [`runtime_readiness`]);
-/// `NotFound` for a name no row or host knows.
+/// The readiness of `workspace`'s runtime named `name` (see
+/// [`runtime_readiness`]); `NotFound` for a name no row or host knows.
 pub(crate) async fn readiness_of(
     api: &Api,
+    workspace: WorkspaceId,
     name: String,
     online: &BTreeMap<String, (bool, bool)>,
 ) -> ApiResult<Readiness> {
-    let runtime = match api.engine.runtime(&name).await {
+    let runtime = match api.engine.runtime(workspace, &name).await {
         Ok(runtime) => runtime,
         // A runtime only known from host capabilities (byo_runtime).
         Err(sun_core::Error::NotFound(_)) if online.contains_key(&name) => Runtime {
             id: RuntimeId::generate(),
+            workspace_id: workspace,
             name: name.clone(),
             adapter: name,
             source: RuntimeSource::ByoRuntime,
             byo_key: None,
+            created_by: None,
         },
         Err(e) => return Err(e.into()),
     };

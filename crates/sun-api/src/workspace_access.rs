@@ -12,15 +12,17 @@
 //!   the task's id: [`crate::tasks::key_paths`]), `/runs/{id}/*`,
 //!   `/workflows/{id}/*`, `/knowledge/sources/{id}/*`, `/knowledge/docs/{id}`,
 //!   `/artifacts/{id}`, `/evals/{id}`, `/outbox/{id}/resolve`, `/projects/{id}`,
-//!   `/repos/{id}`, `/vcs/connections/{id}`, and any `{repo_id}`, `{source_id}`
-//!   or `{connection_id}`
+//!   `/repos/{id}`, `/vcs/connections/{id}`, `/agents/{id}`, `/memory/{id}/*`,
+//!   `/corrections/{id}/*`, `/notes/{id}/*`, `/secrets/workspace/{id}/*`, and
+//!   any `{repo_id}`, `{source_id}` or `{connection_id}`
 //!   (so a knowledge import needs both workspaces);
 //! - `?workspace=` (or Main for the routes that default to it) and `?run_id=`;
 //! - JSON body keys anywhere in the body: `workspace_id`, `workflow_id`,
 //!   `task_id(s)`, `repo_id(s)`, `project_id`, `set_id`, an eval `pick` and a
-//!   task's workflow `assignee`.
+//!   task's `assignee` (a workflow or an agent).
 //!
-//! Lists without `?workspace=` filter themselves with [`Caller::sees`].
+//! Lists without `?workspace=` filter themselves with [`Caller::sees`], or
+//! need one from anyone but a deployment owner ([`listed_workspace`]).
 
 use axum::extract::{FromRequestParts, MatchedPath, Query, RawPathParams, Request, State};
 use axum::http::{Method, StatusCode, header};
@@ -28,8 +30,8 @@ use axum::middleware::Next;
 use axum::response::Response;
 use serde_json::Value;
 use sun_core::{
-    ArtifactId, Error, EvalRunId, EvalSetId, OutboxId, ProjectId, RepoId, RunId, TaskId,
-    VcsConnectionId, WorkflowId, WorkspaceId,
+    AgentId, ArtifactId, CorrectionId, Error, EvalRunId, EvalSetId, MemoryItemId, NoteId, OutboxId,
+    ProjectId, RepoId, RunId, TaskId, VcsConnectionId, WorkflowId, WorkspaceId,
 };
 use sun_engine::{OnWorkspace, Pick, Reach, WorkspaceItem};
 
@@ -82,6 +84,10 @@ enum Named {
     Outbox(OutboxId),
     Project(ProjectId),
     VcsConnection(VcsConnectionId),
+    Agent(AgentId),
+    MemoryItem(MemoryItemId),
+    Correction(CorrectionId),
+    Note(NoteId),
 }
 
 impl Named {
@@ -101,6 +107,10 @@ impl Named {
             Named::Outbox(id) => OnWorkspace::Outbox(*id),
             Named::Project(id) => OnWorkspace::Project(*id),
             Named::VcsConnection(id) => OnWorkspace::VcsConnection(*id),
+            Named::Agent(id) => OnWorkspace::Agent(*id),
+            Named::MemoryItem(id) => OnWorkspace::MemoryItem(*id),
+            Named::Correction(id) => OnWorkspace::Correction(*id),
+            Named::Note(id) => OnWorkspace::Note(*id),
         }
     }
 }
@@ -207,6 +217,35 @@ pub(crate) async fn guard(
     Ok(next.run(Request::from_parts(parts, body)).await)
 }
 
+/// The workspace a list names with `?workspace=`; `None` (every workspace)
+/// only for a deployment owner who names none. Anyone else must name one,
+/// which the guard already checked they are a member of.
+pub(crate) fn listed_workspace(
+    caller: &Caller,
+    workspace: Option<&str>,
+) -> ApiResult<Option<WorkspaceId>> {
+    match workspace {
+        Some(text) => text
+            .parse()
+            .map(Some)
+            .map_err(|_| ApiError::invalid("`workspace` is not a workspace id.")),
+        None if caller.is_owner => Ok(None),
+        None => Err(ApiError::invalid("Pass ?workspace=<workspace id>.")),
+    }
+}
+
+/// The workspace `?workspace=` names, Main when a deployment owner names
+/// none (see [`listed_workspace`]).
+pub(crate) fn named_workspace(caller: &Caller, workspace: Option<&str>) -> ApiResult<WorkspaceId> {
+    Ok(listed_workspace(caller, workspace)?.unwrap_or(WorkspaceId::MAIN))
+}
+
+/// `?workspace=` of the per-workspace lists and their items.
+#[derive(serde::Deserialize)]
+pub(crate) struct InWorkspace {
+    pub(crate) workspace: Option<String>,
+}
+
 /// True when the caller sees where `thing` lives; true when it doesn't
 /// exist (the handler answers that 404).
 pub(crate) async fn visible(api: &Api, caller: &Caller, thing: OnWorkspace<'_>) -> ApiResult<bool> {
@@ -246,6 +285,11 @@ fn from_path(path: &str, key: &str, value: &str, named: &mut Vec<Named>) {
         "id" if path.starts_with("/evals/") => push(named, value, Named::Eval),
         "id" if path.starts_with("/outbox/") => push(named, value, Named::Outbox),
         "id" if path.starts_with("/projects/") => push(named, value, Named::Project),
+        "id" if path.starts_with("/agents/") => push(named, value, Named::Agent),
+        "id" if path.starts_with("/memory/") => push(named, value, Named::MemoryItem),
+        "id" if path.starts_with("/corrections/") => push(named, value, Named::Correction),
+        "id" if path.starts_with("/notes/") => push(named, value, Named::Note),
+        "id" if path.starts_with("/secrets/workspace/") => push(named, value, Named::Workspace),
         _ => {}
     }
 }
@@ -276,10 +320,14 @@ fn from_json(json: &Value, named: &mut Vec<Named>, depth: u32) {
                     "repo_id" | "repo_ids" => ids.iter().for_each(|i| push(named, i, Named::Repo)),
                     "set_id" => ids.iter().for_each(|i| push(named, i, Named::EvalSet)),
                     "project_id" => ids.iter().for_each(|i| push(named, i, Named::Project)),
-                    // A task's `{kind: "workflow", id}` (agents are on no workspace).
+                    // A task's `{kind: "workflow" | "agent", id}`.
                     "assignee" if value["kind"] == "workflow" => {
                         let id = value["id"].as_str().unwrap_or_default();
                         push(named, id, Named::Workflow);
+                    }
+                    "assignee" if value["kind"] == "agent" => {
+                        let id = value["id"].as_str().unwrap_or_default();
+                        push(named, id, Named::Agent);
                     }
                     "pick" => {
                         if let Ok(pick) = serde_json::from_value(value.clone()) {

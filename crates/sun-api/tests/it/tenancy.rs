@@ -890,7 +890,6 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
             Some(json!({ "permissions": [] })),
         ),
         ("DELETE", "/mods/x", None),
-        ("GET", "/secrets", None),
         (
             "PUT",
             "/secrets/ecosystem/x/NAME",
@@ -909,11 +908,13 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
         ("PUT", "/settings/embeddings", Some(json!({}))),
         ("POST", "/catalog/x/install", Some(json!({}))),
         ("DELETE", "/catalog/x", None),
-        ("POST", "/runtimes", Some(json!({}))),
-        ("POST", "/agents", Some(json!({}))),
+        (
+            "PUT",
+            "/runtimes/claude-code/policy",
+            Some(json!({ "permission_mode": "default" })),
+        ),
         ("POST", "/mcp_servers", Some(json!({}))),
         ("GET", "/account/invoices", None),
-        ("GET", "/memory", None),
     ];
     for (method, path, body) in &routes {
         // Naming their own workspace (query and body) opens nothing.
@@ -932,4 +933,175 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
     as_token(app, "PUT", &path, Some(json!({ "is_owner": true }))).await;
     let (status, _) = call(app, Some(&ada), "GET", "/api/v1/audit", None).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// Agents, runtimes, secrets and memory are each workspace's own: members
+/// read them there (`?workspace=`, required for anyone but a deployment
+/// owner), another workspace's answer 404, and writes need the role there.
+#[tokio::test]
+async fn tenancy_agents_runtimes_secrets_and_memory_are_per_workspace() {
+    use sun_core::model::{MemoryItem, MemoryScope, MemoryStatus};
+    use sun_store::MemoryRepo;
+
+    let k = kernel().await;
+    let app = &k.app;
+    let (ada, _) = member(&k.store, "ada", &[]).await;
+    let (bob, _) = member(&k.store, "bob", &[]).await;
+    let a = workspace(app, &ada, "Alpha").await;
+    let b = workspace(app, &bob, "Beta").await;
+    let a_id: WorkspaceId = a.parse().unwrap();
+    let (vic, _) = member(&k.store, "vic", &[(a_id, Role::Viewer)]).await;
+    let ok = |status: StatusCode, value: &Value| assert!(status.is_success(), "{status} {value}");
+
+    // Agents: one name per workspace; each lists only its own.
+    let agent = json!({ "name": "Ada", "runtime_chain": ["claude-code"] });
+    let path = |w: &str| format!("/api/v1/agents?workspace={w}");
+    let (status, mine) = call(app, Some(&ada), "POST", &path(&a), Some(agent.clone())).await;
+    ok(status, &mine);
+    assert_eq!(mine["workspace_id"], json!(a));
+    let (status, theirs) = call(app, Some(&bob), "POST", &path(&b), Some(agent)).await;
+    ok(status, &theirs);
+    let (status, listed) = call(app, Some(&ada), "GET", &path(&a), None).await;
+    ok(status, &listed);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["id"], mine["id"]);
+    let (status, _) = call(app, Some(&ada), "GET", &path(&b), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(app, Some(&ada), "GET", "/api/v1/agents", None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a member names the workspace"
+    );
+    let theirs_path = format!("/api/v1/agents/{}", theirs["id"].as_str().unwrap());
+    for method in ["PATCH", "DELETE"] {
+        let body = (method == "PATCH").then(|| json!({ "name": "Mine" }));
+        let (status, _) = call(app, Some(&ada), method, &theirs_path, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method}");
+    }
+    // A viewer reads; writing needs `manage_runtimes` there.
+    let (status, listed) = call(app, Some(&vic), "GET", &path(&a), None).await;
+    ok(status, &listed);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let new = json!({ "name": "Vic", "runtime_chain": ["codex"] });
+    let (status, _) = call(app, Some(&vic), "POST", &path(&a), Some(new)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let mine_path = format!("/api/v1/agents/{}", mine["id"].as_str().unwrap());
+    let (status, _) = call(app, Some(&vic), "DELETE", &mine_path, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // An agent of another workspace is no assignee here.
+    let task = json!({ "title": "x", "workspace_id": a, "assignee": { "kind": "agent", "id": theirs["id"] } });
+    let (status, _) = call(app, Some(&ada), "POST", "/api/v1/tasks", Some(task)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Runtimes: a BYO key runtime is Alpha's; its key is Alpha's secret.
+    let runtime = json!({
+        "name": "ollama", "source": "byo_key",
+        "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen", "key_secret": "OR_KEY" },
+    });
+    let path = |w: &str| format!("/api/v1/runtimes?workspace={w}");
+    let (status, saved) = call(app, Some(&ada), "POST", &path(&a), Some(runtime.clone())).await;
+    ok(status, &saved);
+    assert_eq!(saved["workspace_id"], json!(a));
+    let (status, _) = call(app, Some(&vic), "POST", &path(&a), Some(runtime.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let stored = |list: &Value| -> Vec<String> {
+        let rows = list.as_array().unwrap().iter();
+        rows.filter(|r| !r["workspace_id"].is_null())
+            .map(|r| r["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (_, listed) = call(app, Some(&vic), "GET", &path(&a), None).await;
+    assert_eq!(stored(&listed), ["ollama"]);
+    let (_, listed) = call(app, Some(&bob), "GET", &path(&b), None).await;
+    assert!(stored(&listed).is_empty(), "{listed}");
+    let (status, _) = call(app, Some(&bob), "GET", &path(&a), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let in_b = format!("/api/v1/runtimes/ollama?workspace={b}");
+    let (status, _) = call(app, Some(&bob), "PUT", &in_b, Some(runtime.clone())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "Beta has no `ollama`");
+    let readiness = format!("/api/v1/runtimes/ollama/readiness?workspace={a}");
+    let (_, ready) = call(app, Some(&vic), "GET", &readiness, None).await;
+    assert_eq!(ready["logged_in"], false, "{ready}");
+
+    // Secrets: Alpha's, by `manage_secrets` there.
+    let secret = |w: &str, name: &str| format!("/api/v1/secrets/workspace/{w}/{name}");
+    let value = Some(json!({ "value": "sk-alpha-0123456789" }));
+    let (status, set) = call(app, Some(&bob), "PUT", &secret(&b, "OR_KEY"), value.clone()).await;
+    ok(status, &set);
+    let (_, ready) = call(app, Some(&vic), "GET", &readiness, None).await;
+    assert_eq!(ready["logged_in"], false, "Beta's key is not Alpha's");
+    let (status, set) = call(app, Some(&ada), "PUT", &secret(&a, "OR_KEY"), value.clone()).await;
+    ok(status, &set);
+    let (_, ready) = call(app, Some(&vic), "GET", &readiness, None).await;
+    assert_eq!(ready["logged_in"], true, "{ready}");
+    let listing = format!("/api/v1/secrets?workspace={a}");
+    let (status, names) = call(app, Some(&ada), "GET", &listing, None).await;
+    ok(status, &names);
+    assert_eq!(names.as_array().unwrap().len(), 1);
+    assert_eq!(names[0]["name"], "OR_KEY");
+    assert!(!names.to_string().contains("sk-alpha"), "never a value");
+    for (token, method, path, want) in [
+        (&bob, "GET", listing.clone(), StatusCode::NOT_FOUND),
+        (&bob, "PUT", secret(&a, "X_KEY"), StatusCode::NOT_FOUND),
+        (&bob, "DELETE", secret(&a, "OR_KEY"), StatusCode::NOT_FOUND),
+        (&vic, "GET", listing.clone(), StatusCode::FORBIDDEN),
+        (&vic, "PUT", secret(&a, "X_KEY"), StatusCode::FORBIDDEN),
+        (
+            &ada,
+            "PUT",
+            secret(&a, "VCS_X_TOKEN"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let body = (method == "PUT").then(|| json!({ "value": "sk-other-0123456789" }));
+        let (status, value) = call(app, Some(token), method, &path, body).await;
+        assert_eq!(status, want, "{method} {path}: {value}");
+    }
+    // The ecosystem scope keeps the deployment's own names only.
+    let eco = |name: &str| format!("/api/v1/secrets/ecosystem/00000000000000000000000000/{name}");
+    let (status, _) = call(app, Some(TOKEN), "PUT", &eco("OR_KEY"), value.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (status, _) = call(app, Some(TOKEN), "PUT", &eco("GITHUB_APP_SLUG"), value).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Memory: each workspace's; reviews need `manage_settings` there.
+    let item = MemoryItem {
+        id: sun_core::MemoryItemId::generate(),
+        workspace_id: b.parse().unwrap(),
+        scope: MemoryScope::Ecosystem,
+        scope_id: None,
+        body: "Run the tests.".into(),
+        target: None,
+        reason: "r".into(),
+        source_run: None,
+        status: MemoryStatus::Proposed,
+        author: "sun".into(),
+        reviewed_by: None,
+        created_at: chrono::Utc::now(),
+    };
+    let mut tx = k.store.begin().await.unwrap();
+    tx.insert_memory(&item, "beta").await.unwrap();
+    tx.commit().await.unwrap();
+    let memory = |w: &str| format!("/api/v1/memory?workspace={w}");
+    let (_, alpha) = call(app, Some(&ada), "GET", &memory(&a), None).await;
+    assert_eq!(alpha, json!([]));
+    let (_, beta) = call(app, Some(&bob), "GET", &memory(&b), None).await;
+    assert_eq!(beta[0]["id"], json!(item.id));
+    let (status, _) = call(app, Some(&ada), "GET", &memory(&b), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let metrics = format!("/api/v1/memory/metrics?workspace={a}");
+    let (status, _) = call(app, Some(&vic), "GET", &metrics, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let review = format!("/api/v1/memory/{}/review", item.id);
+    let active = Some(json!({ "status": "active" }));
+    let (status, _) = call(app, Some(&ada), "POST", &review, active.clone()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, reviewed) = call(app, Some(&bob), "POST", &review, active).await;
+    ok(status, &reviewed);
+    // A deployment owner sees every workspace's.
+    let (_, all) = call(app, Some(TOKEN), "GET", "/api/v1/agents", None).await;
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    let (_, all) = call(app, Some(TOKEN), "GET", "/api/v1/memory", None).await;
+    assert_eq!(all.as_array().unwrap().len(), 1);
 }
