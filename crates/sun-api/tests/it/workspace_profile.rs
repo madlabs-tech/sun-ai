@@ -7,7 +7,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use sun_core::GroupId;
+use sun_core::model::Role;
 
 use crate::common::{self, TOKEN, kernel};
 use crate::workspaces::{FLOW, call, call_as, member_token};
@@ -154,7 +154,7 @@ async fn profile_writes_need_edit_workspace_and_hidden_workspaces_are_404() {
     let (_, hidden) = create(app, json!({ "name": "Hidden" })).await;
     let hidden = hidden["id"].as_str().unwrap().to_owned();
     let main = sun_core::WorkspaceId::MAIN.to_string();
-    let member = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let member = member_token(&k.store, "bob", Role::Member).await;
     for (workspace, want) in [
         (&main, StatusCode::FORBIDDEN),
         (&hidden, StatusCode::NOT_FOUND),

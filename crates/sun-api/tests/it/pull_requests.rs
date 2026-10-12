@@ -13,7 +13,8 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use sun_core::{GroupId, ModCall, ModLink, Result};
+use sun_core::model::Role;
+use sun_core::{ModCall, ModLink, Result};
 use sun_store::SecretRepo;
 
 use crate::abuse::{github_connect, github_stub, hex, hmac, post, setup};
@@ -130,8 +131,8 @@ async fn github_deliveries_mirror_prs_link_tasks_and_move_them_on_merge() {
     .await;
     let key = task["key"].as_str().unwrap().to_owned();
     let branch = format!("sun/{key}-fix-login");
-    let bob = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
-    let vic = member_token(&k.store, "vic", &[GroupId::VIEWER]).await;
+    let bob = member_token(&k.store, "bob", Role::Member).await;
+    let vic = member_token(&k.store, "vic", Role::Viewer).await;
     let mut answers: Vec<String> = Vec::new();
 
     // Nothing yet.
@@ -560,8 +561,8 @@ async fn pull_request_writes_need_a_member_with_the_task_write_permission() {
     let key = task["key"].as_str().unwrap();
     let link = format!("/api/v1/tasks/{key}/pull_requests");
     let switch = format!("/api/v1/tasks/{key}/pr_auto_complete");
-    let vic = member_token(&k.store, "vic", &[GroupId::VIEWER]).await;
-    let bob = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let vic = member_token(&k.store, "vic", Role::Viewer).await;
+    let bob = member_token(&k.store, "bob", Role::Member).await;
     let pr = sun_core::PullRequestId::generate().to_string();
     let url = json!({ "url": "https://github.com/acme/web/pull/1" });
     let off = json!({ "disabled": true });

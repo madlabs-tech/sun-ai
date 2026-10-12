@@ -11,7 +11,8 @@ use common::{TOKEN, kernel};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sun_core::GroupId;
+use sun_core::WorkspaceId;
+use sun_core::model::Role;
 use sun_store::{LoginRepo, MemberRepo};
 
 pub(crate) const FLOW: &str =
@@ -49,13 +50,18 @@ pub(crate) async fn call(
     call_as(app, TOKEN, method, path, body).await
 }
 
-/// A session token of a new member in `groups`.
-pub(crate) async fn member_token(
+/// A session token of a new member, `role` in Main.
+pub(crate) async fn member_token(store: &sun_store::Store, name: &str, role: Role) -> String {
+    member_token_in(store, name, &[(WorkspaceId::MAIN, role)]).await
+}
+
+/// A session token of a new member with these `roles`.
+pub(crate) async fn member_token_in(
     store: &sun_store::Store,
     name: &str,
-    groups: &[GroupId],
+    roles: &[(WorkspaceId, Role)],
 ) -> String {
-    use sun_store::GroupRepo;
+    use sun_store::MembershipRepo;
     let token = format!("session-{name}");
     let hash: String = Sha256::digest(token.as_bytes())
         .iter()
@@ -67,7 +73,9 @@ pub(crate) async fn member_token(
         .upsert_member("https://idp", name, name, Some(&email), false)
         .await
         .unwrap();
-    tx.set_member_groups(member.id, groups).await.unwrap();
+    for (workspace, role) in roles {
+        tx.add_member(*workspace, member.id, *role).await.unwrap();
+    }
     let expires = chrono::Utc::now() + chrono::Duration::hours(1);
     tx.insert_login_session(&hash, member.id, expires)
         .await
@@ -77,7 +85,7 @@ pub(crate) async fn member_token(
 }
 
 #[tokio::test]
-async fn workspace_crud_is_admin_only_and_audited() {
+async fn workspace_edit_is_admin_only_and_anyone_creates_one() {
     let k = kernel().await;
     let app = &k.app;
 
@@ -86,27 +94,27 @@ async fn workspace_crud_is_admin_only_and_audited() {
     assert_eq!(workspaces[0]["name"], "Main");
     let main = workspaces[0]["id"].as_str().unwrap().to_owned();
 
-    // A member sees workspaces but can't change them.
-    let member = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    // A member sees their workspaces and can't change Main, but creates
+    // their own (and owns it).
+    let member = member_token(&k.store, "bob", Role::Member).await;
     let (status, workspaces) = call_as(app, &member, "GET", "/api/v1/workspaces", None).await;
     assert_eq!(
         (status, workspaces.as_array().unwrap().len()),
         (StatusCode::OK, 1)
     );
     let body = Some(json!({ "name": "Ops" }));
-    let (status, _) = call_as(app, &member, "POST", "/api/v1/workspaces", body.clone()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    let mine = Some(json!({ "name": "Bob's" }));
+    let (status, created) = call_as(app, &member, "POST", "/api/v1/workspaces", mine).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert!(created["created_by"].is_string(), "{created}");
+    let (_, workspaces) = call_as(app, &member, "GET", "/api/v1/workspaces", None).await;
+    assert_eq!(workspaces.as_array().unwrap().len(), 2);
     let path = format!("/api/v1/workspaces/{main}");
     let (status, _) = call_as(app, &member, "DELETE", &path, None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
     // An admin creates, renames and deletes.
-    let admin = member_token(
-        &k.store,
-        "ann",
-        &[GroupId::VIEWER, GroupId::MEMBER, GroupId::ADMIN],
-    )
-    .await;
+    let admin = member_token(&k.store, "ann", Role::Admin).await;
     let (status, ops) = call_as(app, &admin, "POST", "/api/v1/workspaces", body.clone()).await;
     assert_eq!(
         (status, ops["name"].as_str()),
@@ -377,16 +385,17 @@ async fn workspace_scopes_repos_and_knowledge_and_import_is_admin_only() {
     assert_eq!(listed.as_array().unwrap().len(), 1);
 
     // Main sees X's knowledge only once an admin imports it.
-    let member = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let member = member_token(&k.store, "bob", Role::Member).await;
     let import_hr = format!("/api/v1/workspaces/{main}/knowledge_sources/{hr}");
-    // X has no groups, so a member doesn't even see what they'd import;
+    // A member of Main only doesn't even see what they'd import;
     // `acl_workspace_visibility_matrix` has the 403 case.
     let (status, _) = call_as(app, &member, "POST", &import_hr, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let admin = member_token(
+    let x_id: WorkspaceId = x.parse().unwrap();
+    let admin = member_token_in(
         &k.store,
         "ann",
-        &[GroupId::VIEWER, GroupId::MEMBER, GroupId::ADMIN],
+        &[(WorkspaceId::MAIN, Role::Admin), (x_id, Role::Admin)],
     )
     .await;
     let (status, _) = call_as(app, &admin, "POST", &import_hr, None).await;

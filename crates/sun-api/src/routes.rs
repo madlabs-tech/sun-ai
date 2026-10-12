@@ -204,17 +204,8 @@ pub(crate) fn router(api: Api) -> Router {
             Permission::CreateWorkflow,
             Permission::EditWorkflow,
         ])));
-    let workspace_create = Router::new()
-        .route("/workspaces", post(crate::workspaces::create))
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::CreateWorkspace,
-        ])));
     let workspace_edit = Router::new()
         .route("/workspaces/{id}", patch(crate::workspaces::update))
-        .route(
-            "/workspaces/{id}/groups",
-            put(crate::workspaces::set_groups),
-        )
         .route(
             "/workspaces/{id}/logo",
             put(crate::workspaces::put_logo).delete(crate::workspaces::delete_logo),
@@ -267,14 +258,11 @@ pub(crate) fn router(api: Api) -> Router {
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::DeleteWorkspace,
         ])));
-    // Members and groups: one permission per verb. Reading members
-    // and groups is for whoever sees members or manages groups.
+    // Members: one permission per verb.
     let member_read = Router::new()
         .route("/members", get(auth::list_members))
-        .route("/groups", get(auth::list_groups))
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::ViewMembers,
-            Permission::ManageGroups,
         ])));
     // `invite_members` without a password, `create_members` with one: the
     // handler checks which.
@@ -286,7 +274,6 @@ pub(crate) fn router(api: Api) -> Router {
         ])));
     let member_edit = Router::new()
         .route("/members/{id}/password", put(auth::set_member_password))
-        .route("/members/{id}/groups", put(auth::set_member_groups))
         .route("/members/{id}/invite", post(auth::reinvite_member))
         .route(
             "/members/{id}/two_step",
@@ -300,16 +287,6 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/members/{id}/activate", post(auth::activate_member))
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::DeactivateMembers,
-        ])));
-    let group_manage = Router::new()
-        .route("/groups", post(auth::create_group))
-        .route(
-            "/groups/{id}",
-            patch(auth::update_group).delete(auth::delete_group),
-        )
-        .route("/groups/{id}/members", put(auth::set_group_members))
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::ManageGroups,
         ])));
     let settings = Router::new()
         .route("/hosts/tokens", post(crate::hosts::create_token))
@@ -414,7 +391,6 @@ pub(crate) fn router(api: Api) -> Router {
         .merge(workflow_create)
         .merge(workflow_edit)
         .merge(workflow_check)
-        .merge(workspace_create)
         .merge(workspace_edit)
         .merge(workspace_delete)
         .merge(repo_edit)
@@ -423,13 +399,15 @@ pub(crate) fn router(api: Api) -> Router {
         .merge(member_create)
         .merge(member_edit)
         .merge(member_deactivate)
-        .merge(group_manage)
         .merge(settings)
         .merge(owner)
         .merge(approvals)
         .merge(runtimes)
         .merge(plugins)
         .merge(secrets)
+        // Any signed-in member creates a workspace (the handler applies
+        // `SUN_DISABLE_WORKSPACE_CREATION`).
+        .route("/workspaces", post(crate::workspaces::create))
         // Any signed-in member sets their own view.
         .route("/me/view_role", put(auth::set_view_role))
         // Any signed-in member sets their own password, and an email once.

@@ -30,7 +30,8 @@ use openidconnect::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sun_api::PresetUrls;
-use sun_core::GroupId;
+use sun_core::WorkspaceId;
+use sun_core::model::Role;
 use sun_store::{LoginRepo, MemberRepo};
 
 /// Throwaway key that only signs the mock provider's ID tokens.
@@ -255,10 +256,15 @@ async fn oidc_kernel(idp: &Idp, allowed_domains: &[&str]) -> common::Kernel {
     k
 }
 
-/// An admin invited `name@domain` into `groups` (straight in the store).
-async fn invite(k: &common::Kernel, name: &str, domain: &str, groups: &[GroupId]) {
+/// An admin invited `name@domain` as `role` in Main (straight in the store).
+async fn invite(k: &common::Kernel, name: &str, domain: &str, role: Role) {
+    use sun_store::MembershipRepo;
     let mut tx = k.store.begin().await.unwrap();
-    tx.invite_member(&format!("{name}@{domain}"), name, false, groups)
+    let member = tx
+        .invite_member(&format!("{name}@{domain}"), name, false)
+        .await
+        .unwrap();
+    tx.add_member(WorkspaceId::MAIN, member.id, role)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -445,8 +451,10 @@ async fn auth_oidc_login_roles_and_audit() {
     let (_, headers, _) = send(app, "GET", &forged, Some("sun_sso_state=other"), None).await;
     assert_eq!(location(&headers), "/#/login/failed");
 
-    // Alice, invited as a viewer, signs in through the provider.
-    invite(&k, "alice", "corp.io", &[GroupId::VIEWER]).await;
+    // Alice, invited as a viewer, signs in through the provider (a
+    // deployment owner with an email exists, so she isn't the first).
+    person(app, "root", Role::Viewer, true).await;
+    invite(&k, "alice", "corp.io", Role::Viewer).await;
     let (landing, session) = sign_in(app, &idp, "alice", "corp.io").await;
     assert_eq!(landing, "/");
     let alice = session.unwrap();
@@ -455,7 +463,7 @@ async fn auth_oidc_login_roles_and_audit() {
     assert_eq!(
         (
             me["user"].as_str(),
-            me["groups"][0]["key"].as_str(),
+            me["memberships"][0]["role"].as_str(),
             me["via"].as_str()
         ),
         (Some("alice"), Some("viewer"), Some("sso"))
@@ -484,38 +492,27 @@ async fn auth_oidc_login_roles_and_audit() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
     }
 
-    // The token holder (an owner) lists members and moves alice into
-    // Member and Admin.
+    // The token holder (an owner) lists members; alice becomes an admin of
+    // Main (straight in the store: the role routes come with M2).
     let (_, _, members) = send(app, "GET", "/api/v1/members", None, None).await;
-    assert_eq!(members[0]["username"], "alice");
-    assert_eq!(members[0]["email"], "alice@corp.io");
-    let groups_path = format!(
-        "/api/v1/members/{}/groups",
-        members[0]["id"].as_str().unwrap()
-    );
-    let (status, _, error) = send(
-        app,
-        "PUT",
-        &groups_path,
-        None,
-        Some(json!({ "group_ids": ["boss"] })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
-    let (status, _, member) = send(
-        app,
-        "PUT",
-        &groups_path,
-        None,
-        Some(json!({ "group_ids": [GroupId::MEMBER, GroupId::ADMIN] })),
-    )
-    .await;
-    assert_eq!(
-        (status, &member["groups"]),
-        (StatusCode::OK, &json!([GroupId::MEMBER, GroupId::ADMIN]))
-    );
+    let listed = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["username"] == "alice")
+        .unwrap();
+    assert_eq!(listed["email"], "alice@corp.io");
+    let alice_id: sun_core::MemberId = listed["id"].as_str().unwrap().parse().unwrap();
+    {
+        use sun_store::MembershipRepo;
+        let mut tx = k.store.begin().await.unwrap();
+        tx.set_role(WorkspaceId::MAIN, alice_id, Role::Admin)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
 
-    // The new groups apply at once: alice (in Member) approves `who: [role:member]`.
+    // The new role applies at once: alice (an admin) approves `who: [role:member]`.
     let (status, _, workflow) = send(
         app,
         "POST",
@@ -565,10 +562,6 @@ async fn auth_oidc_login_roles_and_audit() {
         has("user:alice", "login", "signed in with sso:mock"),
         "{rows:?}"
     );
-    assert!(
-        has("user:me", "role_change", "Viewer -> User, Admin"),
-        "{rows:?}"
-    );
     assert!(has("user:alice", "approval", "approved"), "{rows:?}");
     assert!(
         has(
@@ -591,7 +584,7 @@ async fn auth_oidc_login_roles_and_audit() {
     // back in until she is reactivated.
     let (_, session) = sign_in(app, &idp, "alice", "corp.io").await;
     let alice = session.unwrap();
-    let id = members[0]["id"].as_str().unwrap();
+    let id = alice_id;
     let (status, _, member) = send(
         app,
         "POST",
@@ -623,7 +616,7 @@ async fn auth_oidc_allowed_domains_and_no_provider() {
     // Invite only: an allowed domain alone doesn't let anyone in.
     let (landing, session) = sign_in(&k.app, &idp, "carol", "corp.io").await;
     assert_eq!((landing.as_str(), session), ("/#/login/invite", None));
-    invite(&k, "bob", "corp.io", &[GroupId::VIEWER]).await;
+    invite(&k, "bob", "corp.io", Role::Viewer).await;
     let (landing, session) = sign_in(&k.app, &idp, "bob", "CORP.io").await;
     assert_eq!(landing, "/");
     let bob = session.unwrap();
@@ -647,7 +640,7 @@ async fn auth_oidc_allowed_domains_and_no_provider() {
 async fn view_role_follows_the_member() {
     let idp = mock_idp().await;
     let k = oidc_kernel(&idp, &[]).await;
-    invite(&k, "bob", "corp.io", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    invite(&k, "bob", "corp.io", Role::Member).await;
     let (_, bob) = sign_in(&k.app, &idp, "bob", "corp.io").await;
     let bob = bob.unwrap();
     let (_, _, me) = send(&k.app, "GET", "/api/v1/me", Some(&bob), None).await;
@@ -681,7 +674,7 @@ async fn view_role_follows_the_member() {
 async fn auth_oidc_keeps_the_deep_link_and_plan_seats() {
     let idp = mock_idp().await;
     let k = oidc_kernel(&idp, &[]).await;
-    invite(&k, "alice", "corp.io", &[GroupId::VIEWER]).await;
+    invite(&k, "alice", "corp.io", Role::Viewer).await;
     // A notification's deep link survives the provider round trip.
     let deep = "?return_to=%23%2Fapprove%2F01JAR%2Freview";
     let (landing, _) = sign_in_from(&k.app, &idp, "alice", "corp.io", deep).await;
@@ -789,7 +782,8 @@ async fn auth_sso_providers_google_github_and_settings() {
     );
 
     // Google: an invited member links by their verified email.
-    invite(&k, "alice", "corp.io", &[GroupId::VIEWER]).await;
+    person(app, "root", Role::Viewer, true).await;
+    invite(&k, "alice", "corp.io", Role::Viewer).await;
     let (landing, session) =
         sign_in_with(app, &idp, "google", "g-1", "alice@corp.io", false, "").await;
     assert_eq!(landing, "/");
@@ -813,7 +807,7 @@ async fn auth_sso_providers_google_github_and_settings() {
 
     // GitHub: the subject is the numeric user id, the email the primary
     // verified one; nobody uninvited, and no unverified email, gets in.
-    invite(&k, "bob", "corp.io", &[GroupId::VIEWER]).await;
+    invite(&k, "bob", "corp.io", Role::Viewer).await;
     let (landing, session) =
         sign_in_with(app, &idp, "github", "4242", "carol@corp.io", false, "").await;
     assert_eq!((landing.as_str(), session), ("/#/login/invite", None));
@@ -1005,14 +999,9 @@ async fn auth_first_run_owner_signs_in_with_the_token() {
         ),
         (Some("me"), &json!(true), &json!(true), Some("local"))
     );
-    // In the seeded groups, so `who: role:admin` approvals admit them.
-    let keys: Vec<&str> = me["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|g| g["key"].as_str().unwrap())
-        .collect();
-    assert_eq!(keys, ["viewer", "member", "admin"]);
+    // A deployment owner: every workspace and every `who: role:` without
+    // a membership.
+    assert_eq!(me["memberships"], json!([]));
     let (status, _, error) = send(app, "GET", "/api/v1/tasks", me_cookie, None).await;
     assert_eq!(
         (status, &error["error"]["code"]),
@@ -1107,7 +1096,7 @@ async fn auth_admin_set_passwords_and_deactivation() {
     let app = &k.app;
     let bob = |password: &str| {
         Some(json!({ "email": "bob@corp.io", "username": "bob",
-            "group_ids": [GroupId::MEMBER], "password": password }))
+            "role": "member", "password": password }))
     };
     let (status, _, _) = send(app, "POST", "/api/v1/members", None, bob("short")).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -1205,7 +1194,7 @@ async fn auth_admin_set_passwords_and_deactivation() {
     let (_, _, audit) = send(app, "GET", "/api/v1/audit?limit=500", None, None).await;
     let audit = audit.to_string();
     for expected in [
-        "created with a password bob@corp.io into [User]",
+        "created with a password bob@corp.io into Main as member",
         "password set by an admin",
         "\"deactivated\"",
         "\"reactivated\"",
@@ -1217,17 +1206,13 @@ async fn auth_admin_set_passwords_and_deactivation() {
 
 #[tokio::test]
 async fn acl_permissions_are_per_capability() {
-    use sun_store::GroupRepo;
+    use sun_store::MembershipRepo;
     let k = kernel().await;
     let app = &k.app;
     let later = chrono::Utc::now() + chrono::Duration::hours(1);
     let mut tx = k.store.begin().await.unwrap();
     let mut ids = Vec::new();
-    let groups: [(&str, &[GroupId]); 2] = [
-        ("ada", &[GroupId::VIEWER, GroupId::MEMBER, GroupId::ADMIN]),
-        ("max", &[GroupId::VIEWER, GroupId::MEMBER]),
-    ];
-    for (name, groups) in groups {
+    for (name, role) in [("ada", Role::Admin), ("max", Role::Member)] {
         let member = tx
             .upsert_member(
                 "https://idp",
@@ -1238,7 +1223,9 @@ async fn acl_permissions_are_per_capability() {
             )
             .await
             .unwrap();
-        tx.set_member_groups(member.id, groups).await.unwrap();
+        tx.add_member(WorkspaceId::MAIN, member.id, role)
+            .await
+            .unwrap();
         tx.insert_login_session(&sha256_hex(name), member.id, later)
             .await
             .unwrap();
@@ -1250,7 +1237,7 @@ async fn acl_permissions_are_per_capability() {
     // The token holder is an owner with every permission.
     let (_, _, me) = send(app, "GET", "/api/v1/me", None, None).await;
     assert_eq!(me["is_owner"], true);
-    assert_eq!(me["permissions"].as_array().unwrap().len(), 19, "{me}");
+    assert_eq!(me["permissions"].as_array().unwrap().len(), 16, "{me}");
 
     // Defaults: admin may manage secrets, member may not.
     let (status, _, _) = send(app, "GET", "/api/v1/secrets", ada, None).await;
@@ -1267,46 +1254,7 @@ async fn acl_permissions_are_per_capability() {
     let (_, _, read) = send(app, "GET", on_limit, max, None).await;
     assert_eq!(read, wait);
 
-    // Admin's permissions are editable like any group's; unknown ones are 422.
-    let admin_path = format!("/api/v1/groups/{}", GroupId::ADMIN);
-    let bad = json!({ "permissions": ["fly"] });
-    let (status, _, _) = send(app, "PATCH", &admin_path, None, Some(bad)).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let mut without_secrets: Vec<Value> = sun_core::model::Permission::ALL
-        .iter()
-        .map(|p| json!(p))
-        .collect();
-    without_secrets.retain(|p| p != "manage_secrets");
-    let body = json!({ "permissions": without_secrets });
-    let (status, _, _) = send(app, "PATCH", &admin_path, max, Some(body.clone())).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "max can't manage access");
-    let (status, _, saved) = send(app, "PATCH", &admin_path, ada, Some(body)).await;
-    assert_eq!(
-        (
-            status,
-            saved["key"].as_str(),
-            saved["permissions"].as_array().unwrap().len()
-        ),
-        (StatusCode::OK, Some("admin"), 18)
-    );
-
-    // An admin without manage_secrets gets 403 on /secrets, keeps the rest.
-    let (status, _, error) = send(app, "GET", "/api/v1/secrets", ada, None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let message = error["error"]["message"].as_str().unwrap();
-    assert!(message.contains("manage secrets"), "{error}");
-    let secret = "/api/v1/secrets/ecosystem/default/JIRA_TOKEN";
-    let value = json!({ "value": "s3cret-value" });
-    let (status, _, _) = send(app, "PUT", secret, ada, Some(value)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _, _) = send(app, "GET", "/api/v1/members", ada, None).await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, _, me) = send(app, "GET", "/api/v1/me", ada, None).await;
-    assert!(!me["permissions"].to_string().contains("manage_secrets"));
-    let (status, _, _) = send(app, "GET", "/api/v1/secrets", None, None).await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Only an owner grants owner, and only an owner regroups an owner.
+    // Only an owner grants owner.
     let owner = |id: &sun_core::MemberId| format!("/api/v1/members/{id}/owner");
     let yes = json!({ "is_owner": true });
     let (status, _, _) = send(app, "PUT", &owner(&ids[1]), ada, Some(yes.clone())).await;
@@ -1318,23 +1266,6 @@ async fn acl_permissions_are_per_capability() {
     );
     let (status, _, _) = send(app, "GET", "/api/v1/secrets", max, None).await;
     assert_eq!(status, StatusCode::OK);
-    let regroup = format!("/api/v1/members/{}/groups", ids[1]);
-    let none = json!({ "group_ids": [] });
-    let (status, _, _) = send(app, "PUT", &regroup, ada, Some(none)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let members_of_admin = format!("/api/v1/groups/{}/members", GroupId::ADMIN);
-    let (status, _, _) = send(
-        app,
-        "PUT",
-        &members_of_admin,
-        ada,
-        Some(json!({ "member_ids": [ids[0]] })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "ada drops no owner");
-    let mut tx = k.store.begin().await.unwrap();
-    assert_eq!(tx.groups_of_member(ids[1]).await.unwrap().len(), 2);
-    tx.commit().await.unwrap();
 }
 
 /// The 6-digit code in an invite mail.
@@ -1356,7 +1287,7 @@ async fn auth_invite_code_password_smtp_and_limits() {
     let app = &k.app;
     let session = |email: &str, key: &str, value: &str| Some(json!({ "email": email, key: value }));
     let ann = json!({ "email": "Ann@Corp.io", "username": "ann",
-        "group_ids": [GroupId::VIEWER, GroupId::MEMBER] });
+        "role": "member" });
 
     // No SMTP yet: invites are refused, and nothing is stored.
     let (status, _, body) = send(app, "POST", "/api/v1/members", None, Some(ann.clone())).await;
@@ -1623,7 +1554,7 @@ async fn auth_invite_code_password_smtp_and_limits() {
         })
         .collect();
     for expected in [
-        "member_change ann invited ann@corp.io into [Viewer, User]",
+        "member_change ann invited ann@corp.io into Main as member",
         "member_change ann re-invited ann@corp.io",
         "member_change ann password set",
         "member_change olga deactivated",
@@ -1729,7 +1660,7 @@ async fn auth_two_step_sign_in_policies_and_reset() {
     let person = |name: &str| {
         Some(
             json!({ "email": format!("{name}@corp.io"), "username": name,
-            "group_ids": [GroupId::MEMBER], "password": format!("{name}'s long password"),
+            "role": "member", "password": format!("{name}'s long password"),
             "must_change": false }),
         )
     };
@@ -2039,7 +1970,7 @@ async fn auth_only_sso_sessions_skip_the_required_two_step() {
     let idp = mock_idp().await;
     let k = oidc_kernel(&idp, &[]).await;
     let app = &k.app;
-    invite(&k, "dana", "corp.io", &[GroupId::MEMBER]).await;
+    invite(&k, "dana", "corp.io", Role::Member).await;
     // Linking her SSO identity (an admin's password set below ends sessions).
     sign_in(app, &idp, "dana", "corp.io").await.1.unwrap();
     let (_, _, members) = send(app, "GET", "/api/v1/members", None, None).await;
@@ -2248,7 +2179,7 @@ async fn auth_passkey_register_sign_in_and_refusals() {
     send(app, "PUT", "/api/v1/smtp", None, Some(smtp)).await;
     let password = "eve's long password";
     let body = json!({ "email": "eve@corp.io", "username": "eve",
-        "group_ids": [GroupId::MEMBER], "password": password, "must_change": false });
+        "role": "member", "password": password, "must_change": false });
     let (status, _, _) = send(app, "POST", "/api/v1/members", None, Some(body)).await;
     assert_eq!(status, StatusCode::CREATED);
     let cookie = password_session(app, "eve@corp.io", password)
@@ -2386,11 +2317,11 @@ fn password_of(name: &str) -> String {
     format!("{name}'s long password")
 }
 
-/// The token holder adds `name@corp.io` into `groups` with
+/// The token holder adds `name@corp.io` as `role` in Main with
 /// [`password_of`] and no change asked: their id.
-async fn person(app: &Router, name: &str, groups: &[GroupId], is_owner: bool) -> String {
+async fn person(app: &Router, name: &str, role: Role, is_owner: bool) -> String {
     let body = json!({ "email": format!("{name}@corp.io"), "username": name,
-        "group_ids": groups, "password": password_of(name), "must_change": false,
+        "role": role, "password": password_of(name), "must_change": false,
         "is_owner": is_owner });
     let (status, _, member) = send(app, "POST", "/api/v1/members", None, Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "{member}");
@@ -2430,8 +2361,8 @@ async fn auth_every_sign_in_failure_reads_the_same() {
     let k = kernel().await;
     let app = &k.app;
     smtp_on(app).await;
-    person(app, "bob", &[GroupId::MEMBER], false).await;
-    let dee = person(app, "dee", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
+    let dee = person(app, "dee", Role::Member, false).await;
     let deactivate = format!("/api/v1/members/{dee}/deactivate");
     let (status, _, _) = send(app, "POST", &deactivate, None, None).await;
     assert_eq!(status, StatusCode::OK);
@@ -2529,7 +2460,7 @@ async fn auth_every_sign_in_failure_reads_the_same() {
 async fn auth_rate_limit_counts_two_step_misses_per_email_and_ip() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "bob", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
     let password = password_of("bob");
     let cookie = password_session(app, "bob@corp.io", &password)
         .await
@@ -2573,7 +2504,7 @@ async fn auth_rate_limit_counts_two_step_misses_per_email_and_ip() {
 #[tokio::test]
 async fn auth_rate_limit_holds_under_parallel_tries() {
     let k = kernel().await;
-    person(&k.app, "bob", &[GroupId::MEMBER], false).await;
+    person(&k.app, "bob", Role::Member, false).await;
     let mut tries = tokio::task::JoinSet::new();
     for _ in 0..15 {
         let app = k.app.clone();
@@ -2599,7 +2530,7 @@ async fn auth_rate_limit_holds_under_parallel_tries() {
 async fn auth_wrong_current_password_is_rate_limited() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "bob", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
     let cookie = password_session(app, "bob@corp.io", &password_of("bob"))
         .await
         .unwrap();
@@ -2669,7 +2600,7 @@ async fn auth_codes_expire_and_never_cross_over() {
     let k = kernel().await;
     let app = &k.app;
     smtp_on(app).await;
-    let bob = person(app, "bob", &[GroupId::MEMBER], false).await;
+    let bob = person(app, "bob", Role::Member, false).await;
     let password = password_of("bob");
     let cookie = password_session(app, "bob@corp.io", &password)
         .await
@@ -2736,7 +2667,7 @@ async fn auth_deactivation_ends_sessions_and_challenges_until_reactivated() {
     let k = kernel().await;
     let app = &k.app;
     smtp_on(app).await;
-    let bob = person(app, "bob", &[GroupId::MEMBER], false).await;
+    let bob = person(app, "bob", Role::Member, false).await;
     let password = password_of("bob");
     let cookie = password_session(app, "bob@corp.io", &password)
         .await
@@ -2804,7 +2735,7 @@ async fn auth_deactivation_ends_sessions_and_challenges_until_reactivated() {
 async fn auth_totp_window_replays_and_junk_codes() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "bob", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
     let password = password_of("bob");
     let cookie = password_session(app, "bob@corp.io", &password)
         .await
@@ -2879,7 +2810,7 @@ async fn auth_two_step_lockout_switching_and_one_session_per_answer() {
     let k = kernel().await;
     let app = &k.app;
     smtp_on(app).await;
-    person(app, "bob", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
     let password = password_of("bob");
     let cookie = password_session(app, "bob@corp.io", &password)
         .await
@@ -2957,7 +2888,7 @@ async fn auth_required_two_step_gate_opens_only_enrolment() {
     let app = &k.app;
     // An Admin, so only the gate stands in the way. No SMTP: no emailed
     // challenge, the session starts and is gated.
-    person(app, "bob", &[GroupId::ADMIN], false).await;
+    person(app, "bob", Role::Admin, false).await;
     let policy = Some(json!({ "require_two_step": true }));
     let (status, _, _) = send(app, "PUT", "/api/v1/settings/security", None, policy).await;
     assert_eq!(status, StatusCode::OK);
@@ -3030,8 +2961,8 @@ async fn auth_required_two_step_gate_opens_only_enrolment() {
 async fn auth_two_owners_deactivating_each_other_keep_one() {
     let k = kernel().await;
     let app = &k.app;
-    let olive = person(app, "olive", &[], true).await;
-    let otto = person(app, "otto", &[], true).await;
+    let olive = person(app, "olive", Role::Viewer, true).await;
+    let otto = person(app, "otto", Role::Viewer, true).await;
     let o1 = password_session(app, "olive@corp.io", &password_of("olive"))
         .await
         .unwrap();
@@ -3077,20 +3008,20 @@ async fn auth_two_owners_deactivating_each_other_keep_one() {
 
 /// Only an owner touches an owner, on every member route: an Admin who is
 /// no owner gets `403` for an owner's password, reset code, deactivation,
-/// reactivation, groups (even unchanged), 2-step reset, owner flag and
-/// group membership, and for making a new owner; the owner is untouched.
+/// reactivation, 2-step reset and owner flag, and for making a new owner;
+/// the owner is untouched.
 #[tokio::test]
 async fn auth_a_non_owner_admin_never_touches_an_owner() {
     let k = kernel().await;
     let app = &k.app;
     smtp_on(app).await;
-    let olive = person(app, "olive", &[GroupId::ADMIN], true).await;
+    let olive = person(app, "olive", Role::Admin, true).await;
     let oc = password_session(app, "olive@corp.io", &password_of("olive"))
         .await
         .unwrap();
     let (status, _, _) = send(app, "POST", "/api/v1/me/two_step/email", Some(&oc), None).await;
     assert_eq!(status, StatusCode::CREATED);
-    person(app, "ada", &[GroupId::ADMIN], false).await;
+    person(app, "ada", Role::Admin, false).await;
     let ada = password_session(app, "ada@corp.io", &password_of("ada"))
         .await
         .unwrap();
@@ -3104,18 +3035,8 @@ async fn auth_a_non_owner_admin_never_touches_an_owner() {
         ("POST", at("invite"), None),
         ("POST", at("deactivate"), None),
         ("POST", at("activate"), None),
-        (
-            "PUT",
-            at("groups"),
-            Some(json!({ "group_ids": [GroupId::ADMIN] })),
-        ),
         ("DELETE", at("two_step"), None),
         ("PUT", at("owner"), Some(json!({ "is_owner": false }))),
-        (
-            "PUT",
-            format!("/api/v1/groups/{}/members", GroupId::ADMIN),
-            Some(json!({ "member_ids": [] })),
-        ),
         (
             "POST",
             "/api/v1/members".into(),
@@ -3180,8 +3101,8 @@ async fn auth_must_change_comes_after_the_second_step_and_before_enrolment() {
     let k = kernel().await;
     let app = &k.app;
     smtp_on(app).await;
-    let bob = person(app, "bob", &[GroupId::MEMBER], false).await;
-    let carol = person(app, "carol", &[GroupId::MEMBER], false).await;
+    let bob = person(app, "bob", Role::Member, false).await;
+    let carol = person(app, "carol", Role::Member, false).await;
     let cookie = password_session(app, "bob@corp.io", &password_of("bob"))
         .await
         .unwrap();
@@ -3276,7 +3197,7 @@ async fn auth_sso_unverified_or_secondary_emails_never_link() {
     let idp = mock_idp().await;
     let k = oidc_kernel(&idp, &[]).await;
     let app = &k.app;
-    invite(&k, "alice", "corp.io", &[GroupId::VIEWER]).await;
+    invite(&k, "alice", "corp.io", Role::Viewer).await;
     let (landing, session) =
         sign_in_with(app, &idp, "mock", "sub-alice", "alice@corp.io", true, "").await;
     assert_eq!((landing.as_str(), session), ("/#/login/invite", None));
@@ -3284,7 +3205,7 @@ async fn auth_sso_unverified_or_secondary_emails_never_link() {
 
     // The mock's GitHub also lists someone-else@corp.io: verified, not primary.
     add_provider(app, &idp, "gh", "github", &[]).await;
-    invite(&k, "someone-else", "corp.io", &[GroupId::VIEWER]).await;
+    invite(&k, "someone-else", "corp.io", Role::Viewer).await;
     let (landing, session) = sign_in_with(app, &idp, "gh", "777", "carol@corp.io", false, "").await;
     assert_eq!((landing.as_str(), session), ("/#/login/invite", None));
     assert_eq!(identity_of(&k, "someone-else@corp.io").await.0, "local");
@@ -3447,8 +3368,8 @@ async fn auth_passkey_tampered_replayed_and_malformed_answers_fail() {
     const RP: &str = "localhost";
     let k = kernel().await;
     let app = &k.app;
-    person(app, "eve", &[GroupId::MEMBER], false).await;
-    person(app, "max", &[GroupId::MEMBER], false).await;
+    person(app, "eve", Role::Member, false).await;
+    person(app, "max", Role::Member, false).await;
     let eve_pw = password_of("eve");
     let eve_cookie = password_session(app, "eve@corp.io", &eve_pw).await.unwrap();
     let max_cookie = password_session(app, "max@corp.io", &password_of("max"))
@@ -3590,7 +3511,7 @@ async fn auth_passkey_tampered_replayed_and_malformed_answers_fail() {
 async fn auth_passkey_answer_from_a_cross_origin_frame_is_refused() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "eve", &[GroupId::MEMBER], false).await;
+    person(app, "eve", Role::Member, false).await;
     let cookie = password_session(app, "eve@corp.io", &password_of("eve"))
         .await
         .unwrap();
@@ -3618,8 +3539,8 @@ async fn auth_passkey_answer_from_a_cross_origin_frame_is_refused() {
 async fn auth_passkey_credential_registers_once() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "eve", &[GroupId::MEMBER], false).await;
-    person(app, "max", &[GroupId::MEMBER], false).await;
+    person(app, "eve", Role::Member, false).await;
+    person(app, "max", Role::Member, false).await;
     let eve = password_session(app, "eve@corp.io", &password_of("eve"))
         .await
         .unwrap();
@@ -3643,7 +3564,7 @@ async fn auth_passkey_credential_registers_once() {
 async fn auth_right_password_before_two_step_gives_its_try_back() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "bob", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
     let password = password_of("bob");
     let cookie = password_session(app, "bob@corp.io", &password)
         .await
@@ -3679,8 +3600,8 @@ async fn auth_right_password_before_two_step_gives_its_try_back() {
 async fn auth_sign_in_and_password_change_limits_count_apart() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "bob", &[GroupId::MEMBER], false).await;
-    person(app, "cat", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
+    person(app, "cat", Role::Member, false).await;
     let cookie = password_session(app, "bob@corp.io", &password_of("bob"))
         .await
         .unwrap();
@@ -3725,7 +3646,7 @@ async fn auth_sign_in_and_password_change_limits_count_apart() {
 async fn auth_two_step_misses_on_password_change_are_rate_limited() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "bob", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
     let password = password_of("bob");
     let cookie = password_session(app, "bob@corp.io", &password)
         .await
@@ -3765,10 +3686,7 @@ async fn auth_two_step_misses_on_password_change_are_rate_limited() {
 async fn auth_admin_password_route_on_yourself_is_refused() {
     let k = kernel().await;
     let app = &k.app;
-    let editors = json!({ "name": "Editors", "permissions": ["view_members", "edit_members"] });
-    let (_, _, editors) = send(app, "POST", "/api/v1/groups", None, Some(editors)).await;
-    let editors: GroupId = editors["id"].as_str().unwrap().parse().unwrap();
-    let eda = person(app, "eda", &[GroupId::VIEWER, editors], false).await;
+    let eda = person(app, "eda", Role::Admin, false).await;
     let cookie = password_session(app, "eda@corp.io", &password_of("eda"))
         .await
         .unwrap();
@@ -3784,7 +3702,7 @@ async fn auth_admin_password_route_on_yourself_is_refused() {
         (status, &error["error"]["code"]),
         (StatusCode::FORBIDDEN, &json!("two_step_required"))
     );
-    let own = person(app, "own", &[], true).await;
+    let own = person(app, "own", Role::Viewer, true).await;
     let owner = password_session(app, "own@corp.io", &password_of("own"))
         .await
         .unwrap();
@@ -3813,7 +3731,7 @@ async fn auth_admin_password_route_on_yourself_is_refused() {
 async fn auth_passkey_registration_from_a_cross_origin_frame_is_refused() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "eve", &[GroupId::MEMBER], false).await;
+    person(app, "eve", Role::Member, false).await;
     let cookie = password_session(app, "eve@corp.io", &password_of("eve"))
         .await
         .unwrap();
@@ -3841,8 +3759,8 @@ async fn auth_passkey_registration_from_a_cross_origin_frame_is_refused() {
 async fn auth_passkey_credential_id_is_unique_whatever_its_key() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "eve", &[GroupId::MEMBER], false).await;
-    person(app, "max", &[GroupId::MEMBER], false).await;
+    person(app, "eve", Role::Member, false).await;
+    person(app, "max", Role::Member, false).await;
     let eve = password_session(app, "eve@corp.io", &password_of("eve"))
         .await
         .unwrap();
@@ -3876,8 +3794,8 @@ async fn auth_passkey_credential_id_is_unique_whatever_its_key() {
 async fn auth_passkey_same_credential_added_at_once_registers_once() {
     let k = kernel().await;
     let app = &k.app;
-    person(app, "eve", &[GroupId::MEMBER], false).await;
-    person(app, "max", &[GroupId::MEMBER], false).await;
+    person(app, "eve", Role::Member, false).await;
+    person(app, "max", Role::Member, false).await;
     let mut cookies = Vec::new();
     for name in ["eve", "max"] {
         let email = format!("{name}@corp.io");
@@ -3995,7 +3913,7 @@ async fn auth_security_settings_refuse_bad_bodies_whole() {
     let (status, _, kept) = put(json!({ "require_two_step": null })).await;
     assert_eq!((status, kept), (StatusCode::OK, saved.clone()));
 
-    person(app, "bob", &[GroupId::MEMBER], false).await;
+    person(app, "bob", Role::Member, false).await;
     let bob = password_session(app, "bob@corp.io", &password_of("bob"))
         .await
         .unwrap();

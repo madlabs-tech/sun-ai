@@ -4,7 +4,8 @@
 
 use axum::http::StatusCode;
 use serde_json::{Value, json};
-use sun_core::{GroupId, WorkspaceId};
+use sun_core::WorkspaceId;
+use sun_core::model::Role;
 
 use crate::common::kernel;
 use crate::workspaces::{call, call_as, member_token};
@@ -104,7 +105,7 @@ async fn project_writes_need_run_and_hidden_workspaces_are_404() {
     let on_hidden = format!("/api/v1/projects/{}", on_hidden["id"].as_str().unwrap());
 
     // A viewer reads but can't write.
-    let viewer = member_token(&k.store, "vic", &[GroupId::VIEWER]).await;
+    let viewer = member_token(&k.store, "vic", Role::Viewer).await;
     let (status, listed) = call_as(app, &viewer, "GET", &main, None).await;
     assert_eq!(
         (status, listed.as_array().unwrap().len()),
@@ -121,7 +122,7 @@ async fn project_writes_need_run_and_hidden_workspaces_are_404() {
     }
 
     // A member with `run` doesn't even see a hidden workspace's projects.
-    let member = member_token(&k.store, "bob", &[GroupId::VIEWER, GroupId::MEMBER]).await;
+    let member = member_token(&k.store, "bob", Role::Member).await;
     let calls = [
         ("GET", hidden.clone(), None),
         ("POST", hidden.clone(), Some(json!({ "name": "New" }))),

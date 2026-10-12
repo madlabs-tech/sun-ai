@@ -1,10 +1,10 @@
-//! `/workspaces`: lists the workspaces the caller sees, each with the groups that
-//! see it; create needs `create_workspace`; the profile (`PATCH`: name,
-//! description, context, default workflow, `git_settings`; logo; issue
-//! prefix) and access (`PUT /workspaces/{id}/groups`) `edit_workspace`;
-//! delete `delete_workspace` (layers in `routes.rs`). Anyone who sees a
-//! workspace may read its logo. Without `manage_groups`, a caller attaches or detaches
-//! only their own groups. Importing a knowledge source into another
+//! `/workspaces`: lists the workspaces the caller sees; any signed-in
+//! member creates one and becomes its owner (unless
+//! `SUN_DISABLE_WORKSPACE_CREATION` keeps that to deployment owners); the
+//! profile (`PATCH`: name, description, context, default workflow,
+//! `git_settings`; logo; issue prefix) needs `edit_workspace`; delete
+//! `delete_workspace` (layers in `routes.rs`). Anyone who sees a
+//! workspace may read its logo. Importing a knowledge source into another
 //! workspace (and removing a source) needs `manage_settings`, removing a
 //! repo `edit_workspace`;
 //! [`crate::workspace_access::guard`] makes
@@ -16,13 +16,13 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
-use sun_core::model::{Permission, Workspace};
-use sun_core::{GroupId, RepoId, WorkspaceId};
+use sun_core::model::{SignupPolicy, Workspace};
+use sun_core::{RepoId, WorkspaceId};
 use sun_engine::{ProfileChange, WorkspaceItem};
 
 use crate::Api;
 use crate::auth::Caller;
-use crate::error::{ApiError, ApiResult};
+use crate::error::ApiResult;
 use crate::routes::{Body, id};
 
 #[derive(Deserialize)]
@@ -38,61 +38,25 @@ pub(crate) struct NewWorkspace {
     /// Default: from the name, made unique.
     #[serde(default)]
     slug: Option<String>,
-    /// The groups that see it; none: admins only.
-    #[serde(default)]
-    group_ids: Vec<GroupId>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct WorkspaceGroups {
-    group_ids: Vec<GroupId>,
-}
-
-/// A workspace with the groups that see it.
+/// A workspace and its logo link.
 #[derive(Serialize)]
 pub(crate) struct WorkspaceView {
     #[serde(flatten)]
     workspace: Workspace,
-    group_ids: Vec<GroupId>,
     /// `GET /workspaces/{id}/logo`, versioned by the image; `null`: no logo.
     logo_url: Option<String>,
 }
 
-async fn view(api: &Api, workspace: Workspace) -> ApiResult<WorkspaceView> {
-    let links = api.engine.workspace_groups().await?;
-    Ok(with_groups(workspace, &links))
-}
-
-fn with_groups(workspace: Workspace, links: &[(WorkspaceId, GroupId)]) -> WorkspaceView {
-    let group_ids = links
-        .iter()
-        .filter(|(b, _)| *b == workspace.id)
-        .map(|(_, g)| *g)
-        .collect();
+fn view(workspace: Workspace) -> WorkspaceView {
     let logo_url = workspace.logo_hash.as_ref().map(|hash| {
         let version = hash.get(..16).unwrap_or(hash);
         format!("/api/v1/workspaces/{}/logo?v={version}", workspace.id)
     });
     WorkspaceView {
         workspace,
-        group_ids,
         logo_url,
-    }
-}
-
-/// Without `manage_groups`, a caller may attach or detach only groups they
-/// are in (422 otherwise).
-fn only_own_groups(caller: &Caller, changed: impl Iterator<Item = GroupId>) -> ApiResult<()> {
-    if caller.can(Permission::ManageGroups) {
-        return Ok(());
-    }
-    let mine = |g: &GroupId| caller.groups.iter().any(|own| own.id == *g);
-    match changed.filter(|g| !mine(g)).count() {
-        0 => Ok(()),
-        _ => Err(ApiError::invalid(
-            "You can give or take workspace access only for your own groups.",
-        )),
     }
 }
 
@@ -101,57 +65,34 @@ pub(crate) async fn list(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
 ) -> ApiResult<Json<Vec<WorkspaceView>>> {
-    let links = api.engine.workspace_groups().await?;
     let workspaces = api.engine.workspaces().await?;
     Ok(Json(
         workspaces
             .into_iter()
             .filter(|b| caller.sees(b.id))
-            .map(|b| with_groups(b, &links))
+            .map(view)
             .collect(),
     ))
 }
 
-/// `POST /workspaces {name, group_ids?}`.
+/// `POST /workspaces {name, slug?}`: the caller becomes its owner.
 pub(crate) async fn create(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Body(input): Body<NewWorkspace>,
 ) -> ApiResult<(StatusCode, Json<WorkspaceView>)> {
-    only_own_groups(&caller, input.group_ids.iter().copied())?;
+    let policy = SignupPolicy::from_env(|name| std::env::var(name).ok());
     let workspace = api
         .engine
         .create_workspace(
             &input.name,
             input.slug.as_deref(),
-            &input.group_ids,
+            caller.member_id,
+            &policy,
             &caller.actor(),
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(view(&api, workspace).await?)))
-}
-
-/// `PUT /workspaces/{id}/groups {group_ids}`: exactly these groups see it.
-pub(crate) async fn set_groups(
-    State(api): State<Api>,
-    Extension(caller): Extension<Caller>,
-    Path(workspace): Path<String>,
-    Body(input): Body<WorkspaceGroups>,
-) -> ApiResult<Json<WorkspaceView>> {
-    let workspace: WorkspaceId = id(&workspace, "workspace")?;
-    let before = api.engine.groups_of_workspace(workspace).await?;
-    let changed = before
-        .iter()
-        .filter(|g| !input.group_ids.contains(g))
-        .chain(input.group_ids.iter().filter(|g| !before.contains(g)))
-        .copied();
-    only_own_groups(&caller, changed)?;
-    api.engine
-        .set_workspace_groups(workspace, &input.group_ids, &caller.actor())
-        .await?;
-    Ok(Json(
-        view(&api, api.engine.workspace(workspace).await?).await?,
-    ))
+    Ok((StatusCode::CREATED, Json(view(workspace))))
 }
 
 /// `PATCH /workspaces/{id}` with any of `name`, `description`, `context`,
@@ -168,7 +109,7 @@ pub(crate) async fn update(
         .engine
         .update_workspace_profile(workspace, &change, &caller.actor())
         .await?;
-    Ok(Json(view(&api, workspace).await?))
+    Ok(Json(view(workspace)))
 }
 
 /// `POST /workspaces/{id}/prefix {issue_prefix}`.
@@ -183,7 +124,7 @@ pub(crate) async fn set_prefix(
         .engine
         .set_issue_prefix(workspace, &input.issue_prefix, &caller.actor())
         .await?;
-    Ok(Json(view(&api, workspace).await?))
+    Ok(Json(view(workspace)))
 }
 
 /// `PUT /workspaces/{id}/logo`: the raw image as the body, its type in
@@ -208,7 +149,7 @@ pub(crate) async fn put_logo(
             &caller.actor(),
         )
         .await?;
-    Ok(Json(view(&api, workspace).await?))
+    Ok(Json(view(workspace)))
 }
 
 /// `DELETE /workspaces/{id}/logo`.
@@ -222,7 +163,7 @@ pub(crate) async fn delete_logo(
         .engine
         .set_logo(workspace, None, &caller.actor())
         .await?;
-    Ok(Json(view(&api, workspace).await?))
+    Ok(Json(view(workspace)))
 }
 
 /// `GET /workspaces/{id}/logo`: the image; 404 when there is none.

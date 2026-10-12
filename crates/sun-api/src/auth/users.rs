@@ -19,8 +19,8 @@ use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sun_core::entitlement::Quota;
-use sun_core::model::{Mail, Member, Permission, SmtpSettings, SmtpTls, normalize_email};
-use sun_core::{GroupId, MemberId, Timestamp};
+use sun_core::model::{Mail, Member, Permission, Role, SmtpSettings, SmtpTls, normalize_email};
+use sun_core::{MemberId, Timestamp, WorkspaceId};
 use sun_engine::FirstSignIn;
 
 use super::members::{may_act_on, may_grant, not_yourself, only_owner_touches_owner};
@@ -285,8 +285,12 @@ pub(super) fn parse_id(id: &str) -> ApiResult<MemberId> {
 pub(crate) struct Invite {
     email: String,
     username: String,
-    #[serde(default)]
-    group_ids: Vec<String>,
+    /// The workspace they join (default Main).
+    #[serde(default = "main")]
+    workspace_id: WorkspaceId,
+    /// Their role there (default viewer).
+    #[serde(default = "viewer")]
+    role: Role,
     #[serde(default)]
     is_owner: bool,
     /// Set their password instead of mailing a code.
@@ -300,23 +304,32 @@ fn yes() -> bool {
     true
 }
 
-/// `POST /api/v1/members {email, username, group_ids?, is_owner?,
+fn main() -> WorkspaceId {
+    WorkspaceId::MAIN
+}
+
+fn viewer() -> Role {
+    Role::Viewer
+}
+
+/// `POST /api/v1/members {email, username, workspace_id?, role?, is_owner?,
 /// password?, must_change?}` (`invite_members`, or `create_members` with a
-/// password): adds the member to those
-/// groups and emails them a sign-in code, or, with `password`, sets it
-/// (no mail; `must_change`, default true, forces a change at their first
-/// sign-in). Only an owner invites an owner; without `manage_groups` only
-/// into groups whose permissions the caller holds. Without a password, 409 until
+/// password): adds the member to the workspace (default Main) as `role`
+/// (default viewer) and emails them a sign-in code, or, with `password`,
+/// sets it (no mail; `must_change`, default true, forces a change at their
+/// first sign-in). Only an owner invites an owner; anyone else grants only a
+/// role up to their own in that workspace. Without a password, 409 until
 /// SMTP is configured; a plan without a free seat is 403.
 pub(crate) async fn invite_member(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Body(input): Body<Invite>,
 ) -> ApiResult<(StatusCode, Json<Member>)> {
-    caller.need(match input.password {
+    let permission = match input.password {
         Some(_) => Permission::CreateMembers,
         None => Permission::InviteMembers,
-    })?;
+    };
+    caller.need(permission)?;
     let email = normalize_email(&input.email)?;
     let username = input.username.trim();
     let valid_name = (1..=64).contains(&username.len())
@@ -328,16 +341,8 @@ pub(crate) async fn invite_member(
             "Use a username of 1-64 letters, digits, - _ or .",
         ));
     }
-    let groups = input
-        .group_ids
-        .iter()
-        .map(|g| {
-            g.parse::<GroupId>()
-                .map_err(|_| ApiError::invalid(format!("`{g}` is not a valid group id.")))
-        })
-        .collect::<ApiResult<Vec<_>>>()?;
     only_owner_touches_owner(&caller, input.is_owner)?;
-    may_grant(&api, &caller, groups.iter().copied()).await?;
+    may_grant(&caller, input.workspace_id, input.role, permission)?;
     let members = api.engine.members().await?;
     within_plan(&api, Quota::Seats, "seats", members.len())?;
     if let Some(password) = input.password {
@@ -353,7 +358,8 @@ pub(crate) async fn invite_member(
                 &email,
                 username,
                 input.is_owner,
-                &groups,
+                input.workspace_id,
+                input.role,
                 first,
                 &caller.actor(),
             )
@@ -374,7 +380,8 @@ pub(crate) async fn invite_member(
             &email,
             username,
             input.is_owner,
-            &groups,
+            input.workspace_id,
+            input.role,
             first,
             &caller.actor(),
         )
