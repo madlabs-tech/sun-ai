@@ -795,7 +795,9 @@ fn kernel_answers(listen: &str) -> bool {
 
 /// `sun status --json`: where this install lives and whether its kernel
 /// answers. `url` is the running kernel's (`<data_dir>/address`) or the
-/// configured `listen`, reached on loopback.
+/// configured `listen`, reached on loopback. `entitlement` is where plans
+/// come from (`cloud` or `community`), by this environment, as `sun serve`
+/// decides it.
 pub fn status(data_dir: &Path) -> Result<serde_json::Value> {
     let config = Config::load(data_dir)?;
     let reported = std::fs::read_to_string(data_dir.join(crate::serve::ADDRESS_FILE))
@@ -863,6 +865,7 @@ pub fn status(data_dir: &Path) -> Result<serde_json::Value> {
         "kernel": if running { "running" } else { "stopped" },
         "token_path": token_path,
         "service": service,
+        "entitlement": crate::serve::entitlement_source(|name| std::env::var(name).ok()),
         "resources": resources,
     }))
 }

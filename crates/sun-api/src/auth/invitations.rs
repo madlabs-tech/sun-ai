@@ -24,8 +24,8 @@ use super::members::may_grant;
 use super::users::send;
 use super::{Caller, digest};
 use crate::Api;
+use crate::entitlement::within_plan;
 use crate::error::{ApiError, ApiResult};
-use crate::license::within_plan;
 use crate::routes::{Body, id};
 use crate::workspace_access::hidden;
 
@@ -63,12 +63,8 @@ pub(crate) async fn create(
     let workspace: WorkspaceId = id(&workspace, "workspace")?;
     let email = sun_core::model::normalize_email(&input.email)?;
     may_grant(&caller, workspace, input.role, Permission::InviteMembers)?;
-    within_plan(
-        &api,
-        Quota::Seats,
-        "seats",
-        api.engine.members().await?.len(),
-    )?;
+    let seats = api.engine.workspace_members(workspace).await?.len();
+    within_plan(&api, workspace, Quota::Seats, "seats", seats).await?;
     let token = new_token()?;
     let expires_at = chrono::Utc::now() + INVITATION_TTL;
     let invitation = api
@@ -232,16 +228,27 @@ fn not_pending(error: Error) -> ApiError {
 
 /// `POST /api/v1/invitations/{id}/accept`: the caller joins its workspace
 /// with its role (keeping a higher one they have there). 403 unless it is
-/// to their verified email; 404 when it isn't pending.
+/// to their verified email, or when joining needs a seat the workspace's
+/// plan doesn't have; 404 when it isn't pending.
 pub(crate) async fn accept(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Path(invitation): Path<String>,
 ) -> ApiResult<Json<WorkspaceMember>> {
     let invitation: InvitationId = id(&invitation, "invitation")?;
+    let me = invitee(&caller)?;
+    let mine = api.engine.my_invitations(me).await?;
+    if let Some(found) = mine.iter().find(|i| i.id == invitation) {
+        let members = api.engine.workspace_members(found.workspace_id).await?;
+        // A member taking a new role keeps their seat.
+        if !members.iter().any(|m| m.member_id == me) {
+            let seats = members.len();
+            within_plan(&api, found.workspace_id, Quota::Seats, "seats", seats).await?;
+        }
+    }
     let joined = api
         .engine
-        .accept_invitation(invitation, invitee(&caller)?)
+        .accept_invitation(invitation, me)
         .await
         .map_err(not_pending)?;
     Ok(Json(joined))

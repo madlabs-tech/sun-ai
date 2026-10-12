@@ -31,8 +31,8 @@ use sun_core::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use crate::entitlement::within_plan;
 use crate::error::{ApiError, ApiResult};
-use crate::license::within_plan;
 use crate::{Api, auth, wire};
 use sun_core::entitlement::Quota;
 
@@ -578,7 +578,16 @@ async fn enroll(api: &Api, token: &str, name: &str) -> Option<KernelFrame> {
     // leased seller host is paid capacity, not one of the plan's own hosts.
     if task.is_none() {
         let enrolled = api.engine.hosts().await.ok()?.len();
-        within_plan(api, Quota::Runtimes, "hosts", enrolled).ok()?;
+        // ponytail: Main's plan and every host until M5 attaches hosts to workspaces.
+        within_plan(
+            api,
+            sun_core::WorkspaceId::MAIN,
+            Quota::Hosts,
+            "hosts",
+            enrolled,
+        )
+        .await
+        .ok()?;
     }
     let host = api.engine.add_host(name.to_string()).await.ok()?;
     if let Some(task) = task {
@@ -608,10 +617,17 @@ pub(crate) fn random_hex() -> Result<String> {
 }
 
 /// `POST /api/v1/hosts/tokens`: a single-use token for `sun host join`.
-/// Each host is a BYO runtime of the plan (`limits.runtimes`).
+/// Hosts count against the plan (`limits.hosts`).
 pub(crate) async fn create_token(State(api): State<Api>) -> ApiResult<(StatusCode, Json<Value>)> {
     let enrolled = api.engine.hosts().await.map_err(ApiError::from)?.len();
-    within_plan(&api, Quota::Runtimes, "hosts", enrolled)?;
+    within_plan(
+        &api,
+        sun_core::WorkspaceId::MAIN,
+        Quota::Hosts,
+        "hosts",
+        enrolled,
+    )
+    .await?;
     let token = api.hosts.issue_token()?;
     let expires_at = chrono::Utc::now() + TOKEN_TTL;
     Ok((

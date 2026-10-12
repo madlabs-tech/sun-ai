@@ -2,6 +2,7 @@
 //! integration tests.
 #![allow(clippy::unwrap_used)]
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,8 +10,9 @@ use async_trait::async_trait;
 use axum::Router;
 use serde_json::{Value, json};
 use sun_api::{Api, ApiConfig, HostHub, PresetUrls};
+use sun_core::entitlement::{Entitlement, EntitlementProvider, EntitlementStatus, Limits, Plan};
 use sun_core::model::{Host, Mail, SmtpSettings};
-use sun_core::{HostId, Mailer, Marketplace, ModCall, ModLink, Result};
+use sun_core::{HostId, Mailer, Marketplace, ModCall, ModLink, Result, WorkspaceId};
 use sun_engine::{Caps, Engine, EngineConfig, Principal, Queue, QueueConfig, Slot, WatchdogConfig};
 use sun_store::{HostRepo, Store};
 
@@ -292,10 +294,7 @@ async fn app_with(
         .with_preview_host(host)
         .with_mcp(mcp)
         .with_catalog(sun_catalog::Catalog::open(dir.join("data")).unwrap())
-        .with_license(sun_api::Licensing {
-            path: dir.join("license"),
-            public_key: sun_core::entitlement::dev::public_key(&LICENSE_SEED),
-        });
+        .with_entitlements(Arc::new(FilePlans(dir.join(PLANS_FILE))));
     (sun_api::router(api.clone()), api)
 }
 
@@ -319,25 +318,39 @@ pub async fn local_repo(k: &Kernel, workspace: sun_core::WorkspaceId, url: &str)
     repo.id.to_string()
 }
 
-/// The dev license issuer's key seed; no license file means no limits.
-pub const LICENSE_SEED: [u8; 32] = [7; 32];
+/// The test plans of a kernel: `{"<workspace id>": Limits}`, each a
+/// Business plan from the cloud; a workspace not in it is Community.
+const PLANS_FILE: &str = "plans.json";
 
-/// Installs a Business license with `limits` in `k`'s data dir.
-pub fn license(k: &Kernel, limits: sun_core::entitlement::Limits) {
-    use sun_core::entitlement::{License, Plan, dev};
-    let now = chrono::Utc::now();
-    let token = dev::sign(
-        &License {
-            license_id: "lic-test".into(),
-            licensee: "Acme".into(),
-            plan: Plan::Business,
-            issued_at: now - chrono::Duration::days(1),
-            expires_at: now + chrono::Duration::days(30),
-            offline_grace_days: 7,
-            limits,
-        },
-        &LICENSE_SEED,
-    )
-    .unwrap();
-    std::fs::write(k._dir.path().join("license"), token).unwrap();
+/// Reads [`PLANS_FILE`] on every call, so a test changes a plan mid-way.
+struct FilePlans(std::path::PathBuf);
+
+#[async_trait]
+impl EntitlementProvider for FilePlans {
+    async fn for_workspace(&self, workspace: WorkspaceId) -> Entitlement {
+        let plans: HashMap<String, Limits> = std::fs::read(&self.0)
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+            .unwrap_or_default();
+        match plans.get(&workspace.to_string()) {
+            Some(limits) => Entitlement {
+                plan: Plan::Business,
+                paid: true,
+                limits: *limits,
+                status: EntitlementStatus::Cloud {
+                    valid_until: chrono::Utc::now() + chrono::Duration::minutes(5),
+                },
+            },
+            None => Entitlement::community(EntitlementStatus::Community),
+        }
+    }
+}
+
+/// Puts `workspace` of `k` on a Business plan with `limits`.
+pub fn plan(k: &Kernel, workspace: WorkspaceId, limits: Limits) {
+    let path = k._dir.path().join(PLANS_FILE);
+    let mut plans: HashMap<String, Limits> = std::fs::read(&path)
+        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+        .unwrap_or_default();
+    plans.insert(workspace.to_string(), limits);
+    std::fs::write(path, serde_json::to_vec(&plans).unwrap()).unwrap();
 }

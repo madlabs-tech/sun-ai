@@ -306,9 +306,18 @@ pub(crate) fn package_root(dir: &Path) -> Result<PathBuf> {
     }
 }
 
-/// A hex ed25519 public key (`--trust`, `SUN_TRUSTED_KEYS`).
+/// A hex ed25519 key: 32 bytes from 64 hex chars (`--trust`,
+/// `SUN_TRUSTED_KEYS`, `host.key`).
 pub fn parse_key(hex: &str) -> Result<[u8; 32]> {
-    crate::license::parse_hex32(hex)
+    let hex = hex.trim();
+    if hex.len() != 64 || !hex.is_ascii() {
+        bail!("a key is 64 hex chars");
+    }
+    let mut key = [0u8; 32];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).context("a key is hex")?;
+    }
+    Ok(key)
 }
 
 /// `sun plugin|extension add|update <source>` ([`resolve_source`]): shows

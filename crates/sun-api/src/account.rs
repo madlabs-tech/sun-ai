@@ -8,7 +8,7 @@
 //! - `GET /account/invoices`.
 //! - `GET /account/support`; `POST /account/support` `{subject, body}` → 201.
 //!
-//! Without an account (self-hosted, no license) every route answers 503.
+//! Without an account (self-hosted, off Sun Cloud) every route answers 503.
 
 use std::sync::Arc;
 
@@ -32,7 +32,7 @@ fn account(api: &Api) -> ApiResult<Arc<dyn CloudAccount>> {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "unavailable",
-            "Plans and support need Sun Cloud or a paid license: this ecosystem isn't connected to Sun.",
+            "Plans and support need Sun Cloud: this ecosystem isn't connected to Sun.",
         )
     })
 }

@@ -90,11 +90,8 @@ test('picking a role puts its templates first, installing nothing', async ({ pag
   await expect(page.getByLabel('Your role')).toHaveValue('marketing');
 });
 
-test('the plan shows its limits once a license sets them', async ({ page }) => {
+test('the plan shows the limits Sun Cloud sets', async ({ page }) => {
   await open(page, 'settings/billing');
   const plan = page.getByRole('region', { name: /Plan/ });
-  await expect(plan).not.toContainText('Plan limits');
-  await plan.getByLabel('License token').fill('sunlic1.sample');
-  await plan.getByRole('button', { name: 'Install license' }).click();
-  await expect(plan).toContainText('Plan limits: 10 seats · 2 hosts · 5 agents at once.');
+  await expect(plan).toContainText('Plan limits: 5 seats · 2 hosts · 2 own API keys.');
 });

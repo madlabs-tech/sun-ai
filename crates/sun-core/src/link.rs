@@ -423,7 +423,7 @@ pub trait Marketplace: Send + Sync {
 
 /// The ecosystem's account at Sun: plan,
 /// seats, points, checkout and support from people. Sun Cloud kernels get
-/// all of it; a self-hosted install with a paid license gets plan and support.
+/// all of it.
 /// Requests are validated by the caller; answers are Sun's JSON.
 #[async_trait]
 pub trait CloudAccount: Send + Sync {
