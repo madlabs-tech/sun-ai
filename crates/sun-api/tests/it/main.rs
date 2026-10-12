@@ -11,6 +11,7 @@ mod features;
 mod knowledge;
 mod marketplace;
 mod mcp_servers;
+mod mod_install;
 mod no_secret_leaks;
 mod preview;
 mod projects;
