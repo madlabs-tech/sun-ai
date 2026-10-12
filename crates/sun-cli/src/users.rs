@@ -1,7 +1,6 @@
-//! `sun user list|invite|reinvite|set-password|deactivate|activate`, `sun smtp set|show|test`
-//! and `sun group list|create|rename|delete|set-permissions|add-user|
-//! remove-user`, through the running kernel (admin token). Secrets
-//! are read from stdin, never argv.
+//! `sun user list|invite|reinvite|set-password|deactivate|activate` and
+//! `sun smtp set|show|test`, through the running kernel (admin token).
+//! Secrets are read from stdin, never argv.
 
 use std::io::BufRead;
 
@@ -13,7 +12,7 @@ use crate::client::Client;
 
 #[derive(Subcommand)]
 pub enum UserCommand {
-    /// Members: who they are, their groups, and whether their invite is pending.
+    /// Members: who they are, and whether their invite is pending.
     List,
     /// Invite someone: they get an email with a one-time sign-in code, then
     /// pick a password. Needs `sun smtp set` first.
@@ -24,9 +23,9 @@ pub enum UserCommand {
         /// Their username (approvals' `who: user:<name>`).
         #[arg(long)]
         name: String,
-        /// A group (id, key or name) to put them in; repeat for several.
-        #[arg(long = "group")]
-        groups: Vec<String>,
+        /// Their role in Main: viewer, member, admin or owner.
+        #[arg(long, default_value = "viewer")]
+        role: String,
         /// Make them an owner (only an owner can).
         #[arg(long)]
         owner: bool,
@@ -54,54 +53,6 @@ pub enum UserCommand {
     },
     /// Reactivate a deactivated member.
     Activate {
-        /// Member id or email.
-        member: String,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum GroupCommand {
-    /// Groups: key (what `who: role:<key>` matches), name and permissions.
-    List,
-    /// Create a group; its key comes from the name and never changes.
-    Create {
-        /// Its name.
-        name: String,
-        /// Permissions, comma-separated (e.g. `run,edit_workflow`).
-        #[arg(long, value_delimiter = ',')]
-        permissions: Vec<String>,
-    },
-    /// Rename a group (its key stays).
-    Rename {
-        /// Group id, key or name.
-        group: String,
-        /// The new name.
-        name: String,
-    },
-    /// Delete a group; its members leave it.
-    Delete {
-        /// Group id, key or name.
-        group: String,
-    },
-    /// Replace a group's permissions (none given: it has none).
-    SetPermissions {
-        /// Group id, key or name.
-        group: String,
-        /// Permissions, comma-separated.
-        #[arg(value_delimiter = ',')]
-        permissions: Vec<String>,
-    },
-    /// Put a member in a group.
-    AddUser {
-        /// Group id, key or name.
-        group: String,
-        /// Member id or email.
-        member: String,
-    },
-    /// Take a member out of a group.
-    RemoveUser {
-        /// Group id, key or name.
-        group: String,
         /// Member id or email.
         member: String,
     },
@@ -160,57 +111,6 @@ fn member_id(client: &Client, who: &str) -> Result<String> {
     Ok(m["id"].as_str().unwrap_or_default().to_owned())
 }
 
-/// The id of the group `which` names: its id, key, or name (any case).
-fn group_id(groups: &Value, which: &str) -> Result<String> {
-    groups
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|g| {
-            g["id"] == which
-                || g["key"] == which
-                || g["name"]
-                    .as_str()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(which))
-        })
-        .and_then(|g| g["id"].as_str().map(str::to_owned))
-        .with_context(|| format!("no group `{which}`"))
-}
-
-/// The ids of the groups `which` name (id, key or name). Without
-/// `view_members` or `manage_groups` only the caller's own groups (`/me`) can be named.
-pub fn group_ids(client: &Client, which: &[String]) -> Result<Vec<String>> {
-    if which.is_empty() {
-        return Ok(Vec::new());
-    }
-    let groups = match client.get("/groups") {
-        Ok(all) => all,
-        Err(_) => client.get("/me")?["groups"].clone(),
-    };
-    which.iter().map(|g| group_id(&groups, g)).collect()
-}
-
-/// `ids`' group names, comma-separated (`-` for none).
-fn group_names(groups: &Value, ids: &Value) -> String {
-    let names: Vec<&str> = ids
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|id| {
-            groups
-                .as_array()?
-                .iter()
-                .find(|g| g["id"] == *id)?
-                .get("name")?
-                .as_str()
-        })
-        .collect();
-    match names.is_empty() {
-        true => "-".into(),
-        false => names.join(","),
-    }
-}
-
 fn status(member: &Value) -> &'static str {
     if !member["deactivated_at"].is_null() {
         return "deactivated";
@@ -225,15 +125,13 @@ fn status(member: &Value) -> &'static str {
 pub fn run_user(client: &Client, command: UserCommand) -> Result<()> {
     match command {
         UserCommand::List => {
-            let groups = client.get("/groups")?;
             for m in client.get("/members")?.as_array().into_iter().flatten() {
                 let owner = if m["is_owner"] == true { "owner " } else { "" };
                 println!(
-                    "{}  {:<16} {:<32} {owner}{:<24} {}",
+                    "{}  {:<16} {:<32} {owner}{}",
                     m["id"].as_str().unwrap_or("?"),
                     m["username"].as_str().unwrap_or("?"),
                     m["email"].as_str().unwrap_or("-"),
-                    group_names(&groups, &m["groups"]),
                     status(m),
                 );
             }
@@ -241,15 +139,10 @@ pub fn run_user(client: &Client, command: UserCommand) -> Result<()> {
         UserCommand::Invite {
             email,
             name,
-            groups,
+            role,
             owner,
         } => {
-            let all = client.get("/groups")?;
-            let group_ids = groups
-                .iter()
-                .map(|g| group_id(&all, g))
-                .collect::<Result<Vec<_>>>()?;
-            let body = json!({ "email": email, "username": name, "group_ids": group_ids,
+            let body = json!({ "email": email, "username": name, "role": role,
                 "is_owner": owner });
             let member = client.post("/members", &body)?;
             println!(
@@ -316,78 +209,6 @@ fn read_password() -> Result<String> {
         bail!("no password given");
     }
     Ok(password)
-}
-
-pub fn run_group(client: &Client, command: GroupCommand) -> Result<()> {
-    let groups = client.get("/groups")?;
-    let path = |g: &str| -> Result<String> { Ok(format!("/groups/{}", group_id(&groups, g)?)) };
-    let adding = matches!(command, GroupCommand::AddUser { .. });
-    match command {
-        GroupCommand::List => {
-            for g in groups.as_array().into_iter().flatten() {
-                let permissions: Vec<&str> = g["permissions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .collect();
-                println!(
-                    "{}  role:{:<16} {:<24} {}",
-                    g["id"].as_str().unwrap_or("?"),
-                    g["key"].as_str().unwrap_or("?"),
-                    g["name"].as_str().unwrap_or("?"),
-                    permissions.join(","),
-                );
-            }
-        }
-        GroupCommand::Create { name, permissions } => {
-            let g = client.post(
-                "/groups",
-                &json!({ "name": name, "permissions": permissions }),
-            )?;
-            println!(
-                "created {} (role:{})",
-                g["name"].as_str().unwrap_or("?"),
-                g["key"].as_str().unwrap_or("?")
-            );
-        }
-        GroupCommand::Rename { group, name } => {
-            client.patch(&path(&group)?, &json!({ "name": name }))?;
-            println!("renamed {group} to {name}");
-        }
-        GroupCommand::Delete { group } => {
-            client.delete(&path(&group)?)?;
-            println!("deleted {group}");
-        }
-        GroupCommand::SetPermissions { group, permissions } => {
-            client.patch(&path(&group)?, &json!({ "permissions": permissions }))?;
-            println!("{group}: {}", permissions.join(","));
-        }
-        GroupCommand::AddUser { group, member: who }
-        | GroupCommand::RemoveUser { group, member: who } => {
-            let id = group_id(&groups, &group)?;
-            let m = member(client, &who)?;
-            let mut ids: Vec<String> = m["groups"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .filter(|g| *g != id)
-                .map(str::to_owned)
-                .collect();
-            if adding {
-                ids.push(id);
-            }
-            let member_id = m["id"].as_str().unwrap_or_default();
-            client.put(
-                &format!("/members/{member_id}/groups"),
-                &json!({ "group_ids": ids }),
-            )?;
-            let what = if adding { "added to" } else { "removed from" };
-            println!("{who} {what} {group}");
-        }
-    }
-    Ok(())
 }
 
 pub fn run_smtp(client: &Client, command: SmtpCommand) -> Result<()> {
