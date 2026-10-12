@@ -16,7 +16,8 @@
 //!   `/corrections/{id}/*`, `/notes/{id}/*`, `/secrets/workspace/{id}/*`, and
 //!   any `{repo_id}`, `{source_id}` or `{connection_id}`
 //!   (so a knowledge import needs both workspaces);
-//! - `?workspace=` (or Main for the routes that default to it) and `?run_id=`;
+//! - `?workspace=` (or Main for the routes that default to it), `?run_id=` and
+//!   `?repo_id=`;
 //! - JSON body keys anywhere in the body: `workspace_id`, `workflow_id`,
 //!   `task_id(s)`, `repo_id(s)`, `project_id`, `set_id`, an eval `pick` and a
 //!   task's `assignee` (a workflow or an agent).
@@ -60,6 +61,8 @@ struct NamedQuery {
     workspace: Option<String>,
     /// `GET /usage?run_id=`.
     run_id: Option<String>,
+    /// `GET /catalog?repo_id=`.
+    repo_id: Option<String>,
 }
 
 /// Where the things a request names live, for a caller who isn't a
@@ -158,6 +161,9 @@ pub(crate) async fn guard(
         }
         if let Some(run) = query.run_id {
             push(&mut named, &run, Named::Run);
+        }
+        if let Some(repo) = query.repo_id {
+            push(&mut named, &repo, Named::Repo);
         }
     }
     let scan_body = matches!(parts.method, Method::POST | Method::PUT | Method::PATCH)
