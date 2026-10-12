@@ -1,0 +1,279 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sun.dev/schema/workflow.schema.json",
+  "title": "Sun workflow",
+  "description": "A Sun workflow file. `sun workflow validate` also checks unique step ids, `needs` references, cycles and durations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "steps"],
+  "properties": {
+    "name": { "$ref": "#/$defs/slug" },
+    "version": { "type": "integer", "minimum": 1, "description": "Set by Sun on save." },
+    "description": { "type": "string", "description": "What the workflow is for; with the task's text it names the repos a run works in." },
+    "needs_repo": { "type": "boolean", "default": false, "description": "The run must resolve a repo even without a git action or gate." },
+    "on": {
+      "type": "array",
+      "description": "Triggers. Default: [manual].",
+      "items": {
+        "type": "string",
+        "pattern": "^(manual|webhook|cron:.*\\S.*|[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+(:.+)?)$"
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chain"],
+      "properties": {
+        "chain": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Runtime names in failover order.",
+          "items": { "$ref": "#/$defs/slug" }
+        },
+        "on_limit": { "enum": ["switch", "pause_and_notify", "wait_until_reset"], "default": "switch" }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wall": { "$ref": "#/$defs/duration" },
+        "turns": { "type": "integer", "minimum": 1 },
+        "cost_usd": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "watchdog": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Stall settings for this workflow's agent steps; unset fields use sun.yaml's (default 15m, nudge).",
+      "properties": {
+        "stall_after": { "$ref": "#/$defs/duration" },
+        "on_stall": { "enum": ["nudge", "restart", "fail"] }
+      }
+    },
+    "exec_env": {
+      "description": "Where agent sessions run; absent = bare. The host must report the kind ready.",
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind"],
+          "properties": { "kind": { "const": "bare" } }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "image"],
+          "properties": {
+            "kind": { "const": "container" },
+            "image": { "type": "string", "minLength": 1, "maxLength": 255 },
+            "memory_mb": { "type": "integer", "minimum": 1 },
+            "cpu_millis": { "type": "integer", "minimum": 1 },
+            "network": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false, "required": ["kind", "template"],
+          "properties": {
+            "kind": { "const": "vm" },
+            "template": { "type": "string", "minLength": 1, "maxLength": 255 },
+            "memory_mb": { "type": "integer", "minimum": 1 },
+            "cpus": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "mcp": { "$ref": "#/$defs/mcp", "description": "MCP servers every agent step gets." },
+    "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } }
+  },
+  "$defs": {
+    "slug": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+    "mcp": {
+      "type": "array",
+      "description": "Registered MCP servers, each once. Without `tools`, only the server's read-only tools.",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["server"],
+        "properties": {
+          "server": { "allOf": [{ "$ref": "#/$defs/slug" }, { "not": { "const": "sun" } }] },
+          "tools": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } }
+        }
+      }
+    },
+    "dotted": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*(\\.[a-z][a-z0-9_-]*)+$" },
+    "duration": {
+      "type": "string",
+      "pattern": "^\\s*([0-9]+[smhd])+\\s*$",
+      "description": "A number and unit (s, m, h, d), e.g. 90s, 2h, 1h30m."
+    },
+    "non_empty_string": { "type": "string", "pattern": "\\S" },
+    "gate_name": {
+      "anyOf": [
+        {
+          "enum": [
+            "diff_not_empty", "test", "lint", "diagnostics_clean", "pr_exists", "ci_green",
+            "data_touched", "integration", "merge_order", "visual_diff",
+            "sections_present", "length", "format", "links_resolve", "terms", "image_size", "cites_sources"
+          ]
+        },
+        { "$ref": "#/$defs/dotted" }
+      ]
+    },
+    "gate": {
+      "anyOf": [
+        { "$ref": "#/$defs/gate_name" },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/gate_name" },
+          "description": "{gate_name: params}"
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type"],
+      "properties": {
+        "id": { "$ref": "#/$defs/slug" },
+        "type": {
+          "anyOf": [
+            { "enum": ["agent", "gate", "approval", "wait", "notify", "action", "decide"] },
+            { "$ref": "#/$defs/dotted", "description": "An extension step." }
+          ]
+        },
+        "needs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/slug" },
+          "description": "Steps that must succeed first. Without it, a step runs after the previous one; [] starts at once."
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max"],
+          "description": "Retry a failed attempt: at most `max` attempts in total, waiting `backoff` (doubled each time) in between.",
+          "properties": {
+            "max": { "type": "integer", "minimum": 1 },
+            "backoff": { "type": "string", "description": "A duration, e.g. 30s or 2m." }
+          }
+        },
+        "prompt": { "$ref": "#/$defs/non_empty_string", "description": "A prompt file path or inline text." },
+        "skills": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } },
+        "mcp": { "$ref": "#/$defs/mcp", "description": "MCP servers for this agent step, on top of the workflow's." },
+        "context": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sources": { "type": "array", "items": { "$ref": "#/$defs/non_empty_string" } },
+            "budget_tokens": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "gates": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/gate" } },
+        "on_fail": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["send_back_to"],
+          "properties": {
+            "send_back_to": { "$ref": "#/$defs/slug" },
+            "max": { "type": "integer", "minimum": 0, "default": 2 }
+          }
+        },
+        "who": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^(role|user):.+$" }
+        },
+        "timeout": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["after", "then"],
+          "properties": {
+            "after": { "$ref": "#/$defs/duration" },
+            "then": { "enum": ["fail", "remind", "auto_reject"] }
+          }
+        },
+        "when": {
+          "enum": ["data_touched"],
+          "description": "Approval steps: ask only when this holds, else succeed at once."
+        },
+        "for": { "$ref": "#/$defs/duration" },
+        "to": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/non_empty_string" } },
+        "message": { "type": "string" },
+        "use": { "$ref": "#/$defs/dotted" },
+        "with": { "description": "Input for an action or extension step." },
+        "decides": {
+          "enum": ["route", "triage", "flag", "add_check"],
+          "description": "What a decision may do; never pass a gate, mark done or approve."
+        },
+        "question": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "instructions", "criteria"],
+          "properties": {
+            "type": { "enum": ["choice", "score", "noul"] },
+            "instructions": { "$ref": "#/$defs/non_empty_string" },
+            "criteria": { "description": "Labels map (choice), levels list (score) or the statement (noul)." }
+          }
+        },
+        "threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Act at or above this confidence; below, a human in `who` decides."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "agent" } } },
+          "then": {
+            "required": ["prompt"],
+            "propertyNames": { "enum": ["id", "type", "needs", "retry", "prompt", "skills", "mcp", "context"] }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "gate" } } },
+          "then": {
+            "required": ["gates"],
+            "propertyNames": { "enum": ["id", "type", "needs", "retry", "gates", "on_fail"] }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "approval" } } },
+          "then": {
+            "required": ["who"],
+            "propertyNames": { "enum": ["id", "type", "needs", "retry", "who", "timeout", "when"] }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "wait" } } },
+          "then": {
+            "required": ["for"],
+            "propertyNames": { "enum": ["id", "type", "needs", "retry", "for"] }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "notify" } } },
+          "then": {
+            "required": ["to"],
+            "propertyNames": { "enum": ["id", "type", "needs", "retry", "to", "message"] }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "action" } } },
+          "then": {
+            "required": ["use"],
+            "propertyNames": { "enum": ["id", "type", "needs", "retry", "use", "with"] }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "decide" } } },
+          "then": {
+            "required": ["decides", "question", "threshold", "who"],
+            "propertyNames": { "enum": ["id", "type", "needs", "retry", "decides", "question", "threshold", "who"] }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "$ref": "#/$defs/dotted" } } },
+          "then": { "propertyNames": { "enum": ["id", "type", "needs", "retry", "with"] } }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,126 @@
+{
+  "entries": [
+    {
+      "id": "tdd",
+      "kind": "skill",
+      "description": "Test-driven development: write the failing test first, then the fix, with rules for tests worth keeping.",
+      "source": "github.com/mattpocock/skills",
+      "author": "Matt Pocock",
+      "license": "MIT",
+      "version": "1.2.3",
+      "stacks": []
+    },
+    {
+      "id": "diagnosing-bugs",
+      "kind": "skill",
+      "description": "A diagnosis loop for hard bugs and performance regressions: reproduce, narrow down, prove the cause.",
+      "source": "github.com/mattpocock/skills",
+      "author": "Matt Pocock",
+      "license": "MIT",
+      "version": "1.2.3",
+      "stacks": []
+    },
+    {
+      "id": "resolving-merge-conflicts",
+      "kind": "skill",
+      "description": "Resolve an in-progress git merge or rebase conflict while keeping both sides' behaviour.",
+      "source": "github.com/mattpocock/skills",
+      "author": "Matt Pocock",
+      "license": "MIT",
+      "version": "1.2.3",
+      "stacks": []
+    },
+    {
+      "id": "frontend-design",
+      "kind": "skill",
+      "description": "Build distinctive, production-grade web interfaces instead of generic-looking ones.",
+      "source": "github.com/anthropics/claude-code",
+      "author": "Anthropic",
+      "license": "Apache-2.0",
+      "version": "1.0.0",
+      "stacks": [
+        "frontend"
+      ]
+    },
+    {
+      "id": "github",
+      "kind": "mcp",
+      "description": "Read and update GitHub issues, pull requests, reviews and Actions runs.",
+      "source": "github.com/github/github-mcp-server",
+      "author": "GitHub",
+      "license": "MIT",
+      "version": "0.20.0",
+      "stacks": [],
+      "tools": [
+        "get_issue",
+        "list_pull_requests",
+        "create_pull_request",
+        "get_workflow_run"
+      ],
+      "server": {
+        "name": "github",
+        "transport": {
+          "type": "url",
+          "url": "https://api.githubcopilot.com/mcp/",
+          "bearer_secret": "GITHUB_TOKEN"
+        }
+      }
+    },
+    {
+      "id": "playwright",
+      "kind": "mcp",
+      "description": "Drive a real browser: open pages, click, fill forms, read the accessibility tree and take screenshots.",
+      "source": "github.com/microsoft/playwright-mcp",
+      "author": "Microsoft",
+      "license": "Apache-2.0",
+      "version": "0.0.41",
+      "stacks": [
+        "frontend"
+      ],
+      "tools": [
+        "browser_navigate",
+        "browser_click",
+        "browser_type",
+        "browser_snapshot",
+        "browser_take_screenshot"
+      ],
+      "server": {
+        "name": "playwright",
+        "transport": {
+          "type": "command",
+          "command": "npx",
+          "args": [
+            "-y",
+            "@playwright/mcp@0.0.41",
+            "--headless"
+          ],
+          "network": [
+            "registry.npmjs.org"
+          ],
+          "secrets": []
+        }
+      }
+    },
+    {
+      "id": "context7",
+      "kind": "mcp",
+      "description": "Up-to-date library documentation and code examples, fetched by package name.",
+      "source": "github.com/upstash/context7",
+      "author": "Upstash",
+      "license": "MIT",
+      "version": "1.0.0",
+      "stacks": [],
+      "tools": [
+        "resolve-library-id",
+        "get-library-docs"
+      ],
+      "server": {
+        "name": "context7",
+        "transport": {
+          "type": "url",
+          "url": "https://mcp.context7.com/mcp"
+        }
+      }
+    }
+  ]
+}

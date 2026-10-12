@@ -1,0 +1,10 @@
+{
+  "name": "my-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.18" },
+  "dependencies": {
+    "sun-mod-sdk": "file:../../sdk/typescript"
+  }
+}

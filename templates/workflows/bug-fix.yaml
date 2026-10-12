@@ -1,0 +1,36 @@
+# Role template · Engineering — bug fix.
+# Reproduce with a failing test → fix → code gates → open a PR → human review.
+name: bug-fix
+on: [manual]
+runtime:
+  chain: [claude-code, codex]
+  on_limit: switch
+budget: { wall: 2h, turns: 200, cost_usd: 5 }
+steps:
+  - id: reproduce
+    type: agent
+    prompt: |
+      Reproduce the bug described in the task. Add a test that fails because
+      of it, and explain the root cause in a short note. Don't fix it yet.
+    skills: [tdd]
+
+  - id: fix
+    type: agent
+    prompt: |
+      Fix the root cause you found. Make the new test pass without weakening
+      it, keep the change small, and run the whole test suite.
+    skills: [tdd]
+
+  - id: verify
+    type: gate
+    gates: [diff_not_empty, test, lint]
+    on_fail: { send_back_to: fix, max: 2 }
+
+  - id: pr
+    type: action
+    use: github.open_pr
+
+  - id: review
+    type: approval
+    who: [role:admin]
+    timeout: { after: 24h, then: remind }

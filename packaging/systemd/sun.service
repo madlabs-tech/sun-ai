@@ -1,0 +1,30 @@
+# Sun kernel + local runtime host. Installed by scripts/install.sh
+# to /etc/systemd/system/sun.service; it rewrites /usr/local/bin and
+# /var/lib/sun when --prefix / --data-dir are given. `sun upgrade` and
+# `sun rollback` stop and start this unit.
+[Unit]
+Description=Sun kernel (sun serve --with-host)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sun
+Group=sun
+Environment=SUN_DATA_DIR=/var/lib/sun
+Environment=HOME=/var/lib/sun
+# Agent CLIs installed for the sun user (e.g. `sudo -u sun npm i -g ...`).
+Environment=PATH=/var/lib/sun/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=/var/lib/sun
+# The VPS profile: emulators stay off the kernel box; device verify
+# runs on a runtime host on your own machine. A Linux desktop with the
+# Android SDK can drop --no-devices.
+ExecStart=/usr/local/bin/sun serve --with-host --no-devices
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+NoNewPrivileges=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

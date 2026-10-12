@@ -1,0 +1,12 @@
+[package]
+name = "my-extension"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone: not part of the Sun workspace.
+[workspace]
+
+[dependencies]
+serde_json = "1"
+sun-mod-sdk = { git = "https://github.com/madlabs-tech/sun-ai" }

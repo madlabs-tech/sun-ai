@@ -1,0 +1,24 @@
+# Sun's default workflow: implement → gates → open PR → human review.
+# Copy it to .sun/workflows/ and edit it to make it yours.
+name: default
+on: [manual]
+steps:
+  - id: implement
+    type: agent
+    prompt: |
+      Implement the task. Keep the change focused, add or update tests for it,
+      and run them before you say you are done.
+
+  - id: verify
+    type: gate
+    gates: [diff_not_empty, test, lint]
+    on_fail: { send_back_to: implement, max: 2 }
+
+  - id: pr
+    type: action
+    use: github.open_pr
+
+  - id: review
+    type: approval
+    who: [role:admin]
+    timeout: { after: 24h, then: remind }

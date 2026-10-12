@@ -1,0 +1,36 @@
+# Role template · Marketing — campaign.
+# Brief → channel drafts → brand gates → approval → scheduled posts. No repo needed.
+name: marketing-campaign
+on: [manual]
+budget: { wall: 1h, cost_usd: 3 }
+steps:
+  - id: brief
+    type: agent
+    prompt: |
+      Read the campaign request in the task. Write brief.md with these
+      headings: Audience, Message, Channels, Call to action, Dates.
+
+  - id: drafts
+    type: agent
+    prompt: |
+      Following brief.md, write one post per channel in posts.md, each under
+      its own heading named after the channel. Keep every post short and on brand.
+
+  - id: brand_check
+    type: gate
+    gates:
+      - sections_present: { file: brief.md, sections: [Audience, Message, Channels, Call to action] }
+      - length: { file: posts.md, max_words: 600 }
+      - links_resolve: { file: posts.md }
+      - terms: { file: posts.md, banned: [guarantee, risk-free] }
+    on_fail: { send_back_to: drafts, max: 2 }
+
+  - id: approve
+    type: approval
+    who: [role:member]
+    timeout: { after: 48h, then: remind }
+
+  - id: schedule
+    type: action
+    use: social.schedule_posts
+    with: { file: posts.md }

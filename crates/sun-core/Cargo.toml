@@ -1,0 +1,25 @@
+[package]
+name = "sun-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+futures-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+
+[features]
+# Token encoding for Sun Cloud's license issuer (entitlement::issuer); holds no key.
+license-issuer = []
+# Dev/test-only license issuer (entitlement::dev). Never enable in release builds.
+dev-license = ["license-issuer"]
+
+[lints]
+workspace = true

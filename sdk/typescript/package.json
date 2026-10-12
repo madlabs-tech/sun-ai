@@ -1,0 +1,18 @@
+{
+  "name": "sun-mod-sdk",
+  "version": "0.1.0",
+  "description": "SDK for Sun mods: mod.yaml manifest types and the JSON-RPC 2.0 stdio loop",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "files": ["src", "LICENSE"],
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "build": "tsc && node scripts/dist_package.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,39 @@
+# Footprint gate: builds the release binary with the UI, measures
+# binary size and idle RSS of `sun serve --with-host`, fails over budget and
+# publishes the numbers (job summary + footprint.json artifact).
+# Called by release.yml (cargo-dist `global-artifacts-jobs`) and by hand.
+name: Footprint
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: false
+        type: string
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  footprint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      - name: Footprint
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FOOTPRINT_JSON: footprint.json
+        run: bash scripts/footprint.sh
+      - if: always()
+        run: '[ -f footprint.json ] && cat footprint.json >> "$GITHUB_STEP_SUMMARY" || true'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: artifacts-footprint
+          path: footprint.json
+          if-no-files-found: ignore

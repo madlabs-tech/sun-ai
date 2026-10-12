@@ -1,0 +1,28 @@
+# Litestream for Sun (run by scripts/ha.sh). Tested with Litestream v0.5.17.
+# Install as /etc/litestream.yml, or point LITESTREAM_CONFIG at it.
+#
+# Litestream expands ${VAR} from the environment, so the same file serves the
+# primary and the standby:
+#   SUN_DATA_DIR     e.g. /var/lib/sun
+#   SUN_DB_REPLICA   e.g. s3://my-bucket/sun/db   (a file:///dir also works)
+# S3 credentials come from the usual AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+# environment. Use a private, encrypted bucket: the replica is the whole store.
+#
+# Sun already opens sun.db the way Litestream asks (crates/sun-store/src/lib.rs):
+# journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000. SQLite's
+# wal_autocheckpoint stays on: Litestream only suggests turning it off for heavy
+# write loads, and v0.5 recovers from an app checkpoint with a new snapshot.
+#
+# Only sun.db is here. The blobs and config files beside it are copied by
+# scripts/ha.sh, and Litestream must only run on the one primary.
+dbs:
+  - path: ${SUN_DATA_DIR}/sun.db
+    replica:
+      url: ${SUN_DB_REPLICA}
+      sync-interval: 1s
+
+# Full snapshots bound restore time; their retention bounds how far back a
+# restore can go, so keep it longer than any outage of the file sync.
+snapshot:
+  interval: 6h
+  retention: 72h

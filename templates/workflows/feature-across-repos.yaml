@@ -1,0 +1,45 @@
+# Role template · Engineering — a feature across repos.
+# Plan → build in every repo → gates in each repo → one PR per repo → review
+# → merge in order. Tick the repos in merge order when you create the task.
+name: feature-across-repos
+on: [manual]
+runtime:
+  chain: [claude-code, codex]
+  on_limit: switch
+budget: { wall: 4h, turns: 400, cost_usd: 12 }
+steps:
+  - id: plan
+    type: agent
+    prompt: |
+      Read the feature in the task. Write plan.md with these headings:
+      Goal, Changes per repo, Contracts between repos, Tests, Merge order.
+
+  - id: plan_check
+    type: gate
+    gates:
+      - sections_present: { file: plan.md, sections: [Goal, Changes per repo, Contracts between repos, Merge order] }
+    on_fail: { send_back_to: plan, max: 1 }
+
+  - id: build
+    type: agent
+    prompt: |
+      Implement plan.md in every repo folder of the worktree. Keep the
+      contracts between repos in step, add tests in each, and run them.
+
+  - id: verify
+    type: gate
+    gates: [diff_not_empty, test, lint]
+    on_fail: { send_back_to: build, max: 2 }
+
+  - id: prs
+    type: action
+    use: github.open_pr
+
+  - id: review
+    type: approval
+    who: [role:admin]
+    timeout: { after: 24h, then: remind }
+
+  - id: merged
+    type: gate
+    gates: [merge_order]

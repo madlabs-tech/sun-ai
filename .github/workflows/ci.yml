@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup on the runner installs the toolchain pinned in rust-toolchain.toml.
+      - run: rustup toolchain install
+      # The mod sandbox (sun-mod-sandbox) needs unprivileged user namespaces,
+      # which Ubuntu's AppArmor restricts by default.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: bash scripts/check-deps.sh
+
+  web:
+    runs-on: ubuntu-latest
+    # The design system is on GitHub Packages; the repo needs read access
+    # (package settings → Manage Actions access).
+    permissions: { contents: read, packages: read }
+    defaults: { run: { working-directory: web } }
+    steps:
+      - uses: actions/checkout@v4
+      # registry-url makes setup-node write the token from NODE_AUTH_TOKEN to
+      # ~/.npmrc; npm itself ignores that env var.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@hryer'
+      - run: npm ci
+        env: { NODE_AUTH_TOKEN: '${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}' }
+      - run: npm run check
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test

@@ -1,0 +1,26 @@
+{
+  "cli": "codex",
+  "case": "normal",
+  "transport": "headless-json",
+  "synthetic": false,
+  "cli_version": "codex-cli 0.160.0",
+  "recorded_at": "2026-10-06T18:38:04Z",
+  "argv": [
+    "codex",
+    "exec",
+    "--json",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-s",
+    "workspace-write",
+    "-c",
+    "model_reasoning_effort=\"low\"",
+    "Create file hello.txt containing hi, then reply done."
+  ],
+  "client_messages": [],
+  "exit_code": 0,
+  "stderr_tail": "Reading additional input from stdin...",
+  "note": null
+}

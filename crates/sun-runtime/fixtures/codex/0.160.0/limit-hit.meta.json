@@ -1,0 +1,16 @@
+{
+  "cli": "codex",
+  "case": "limit-hit",
+  "transport": "headless-json",
+  "synthetic": true,
+  "cli_version": "codex-cli 0.160.0",
+  "recorded_at": "2026-10-07T00:00:00Z",
+  "exit_code": 1,
+  "stderr_tail": "ERROR: You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 7th, 2026 11:50 PM.",
+  "source": "Hand-built. thread.started/turn.started are the real shapes; codex exec --json reports fatal turn errors as an \"error\" event followed by \"turn.failed\". Message text follows the CLI usage-limit wording (ChatGPT login). Not observed live.",
+  "confidence": "medium",
+  "detect": [
+    "turn.failed / error message matching /usage limit|rate limit/i",
+    "reset parsed from \"try again at <datetime>\" or \"try again in <duration>\""
+  ]
+}

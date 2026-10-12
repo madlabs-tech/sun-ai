@@ -1,0 +1,30 @@
+# Role template · Engineering — UI refactor with the design canvas.
+# Refactor → code gates → review the before/after previews in the canvas,
+# pinning anything to change → open a PR.
+name: ui-refactor
+on: [manual]
+runtime:
+  chain: [claude-code, codex]
+  on_limit: switch
+budget: { wall: 3h, turns: 300, cost_usd: 8 }
+steps:
+  - id: refactor
+    type: agent
+    prompt: |
+      Refactor the UI described in the task. Keep behaviour and copy the
+      same unless the task says otherwise, reuse the existing components and
+      design tokens, and keep every page usable at 360 px wide.
+
+  - id: verify
+    type: gate
+    gates: [diff_not_empty, test, lint]
+    on_fail: { send_back_to: refactor, max: 2 }
+
+  - id: design_review
+    type: approval
+    who: [role:member]
+    timeout: { after: 48h, then: remind }
+
+  - id: pr
+    type: action
+    use: github.open_pr

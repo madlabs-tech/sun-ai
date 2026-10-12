@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sun kernel + local runtime host, a per-user launch agent so
+     agents can use this Mac's simulators and CLI logins. scripts/install.sh
+     fills @SUN_BIN@, @SUN_DATA_DIR@ and @PATH@ and writes it to
+     ~/Library/LaunchAgents/dev.sun.kernel.plist. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.sun.kernel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@SUN_BIN@</string>
+    <string>serve</string>
+    <string>--with-host</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SUN_DATA_DIR</key>
+    <string>@SUN_DATA_DIR@</string>
+    <key>PATH</key>
+    <string>@PATH@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>@SUN_DATA_DIR@/sun.log</string>
+  <key>StandardErrorPath</key>
+  <string>@SUN_DATA_DIR@/sun.log</string>
+</dict>
+</plist>

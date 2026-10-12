@@ -1,0 +1,36 @@
+# Role template · Leadership — weekly summary. No repo needed.
+# Every Monday: work done, cost and blockers → checked → approved → saved to
+# Google Drive and posted to the team.
+name: weekly-summary
+on: [manual, "cron:0 9 * * 1"]
+budget: { wall: 30m, cost_usd: 1 }
+steps:
+  - id: summary
+    type: agent
+    prompt: |
+      Write summary.md for the last 7 days with these headings: Shipped,
+      In progress, Blockers, Cost. Use the tasks, notes and costs Sun gives
+      you; name each task and say who or what it waits on. Keep it to one page.
+
+  - id: check
+    type: gate
+    gates:
+      - sections_present: { file: summary.md, sections: [Shipped, In progress, Blockers, Cost] }
+      - length: { file: summary.md, max_words: 500 }
+      - format: { file: summary.md }
+    on_fail: { send_back_to: summary, max: 2 }
+
+  - id: approve
+    type: approval
+    who: [role:admin]
+    timeout: { after: 24h, then: remind }
+
+  - id: save
+    type: action
+    use: gdrive.upload
+    with: { files: [summary.md] }
+
+  - id: share
+    type: notify
+    to: [slack:#leads]
+    message: This week's summary is in Google Drive.

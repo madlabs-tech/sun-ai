@@ -1,0 +1,51 @@
+# Local reference material and the task plan — not versioned
+/references
+/TASKS/
+/plan/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / web
+node_modules/
+/web/dist/
+/web/build/
+/web/.svelte-kit/
+*.tsbuildinfo
+.vite/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Test / coverage output
+coverage/
+/playwright-report/
+/test-results/
+*.profraw
+*.profdata
+
+# Local data, secrets
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+master.key
+# scripts/dev.sh data, logs and throwaway keys
+/.dev/
+
+# Agent worktrees and local settings
+/.worktrees/
+/.claude/worktrees/
+.claude/settings.local.json
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

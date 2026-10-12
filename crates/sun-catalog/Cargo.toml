@@ -1,0 +1,20 @@
+[package]
+name = "sun-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rust-embed = "8.12.0"
+serde.workspace = true
+serde-saphyr.workspace = true
+serde_json.workspace = true
+sun-core.workspace = true
+sun-mod.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23.0"
+
+[lints]
+workspace = true

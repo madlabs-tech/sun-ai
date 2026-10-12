@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a11284-175e-7fa0-ae90-cde76fce2cda"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc 'cat missing.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/zsh -lc 'cat missing.txt'","aggregated_output":"cat: missing.txt: No such file or directory\n","exit_code":1,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"`cat missing.txt` failed: No such file or directory."}}
+{"type":"turn.completed","usage":{"input_tokens":33571,"cached_input_tokens":28160,"cache_write_input_tokens":0,"output_tokens":58,"reasoning_output_tokens":0}}

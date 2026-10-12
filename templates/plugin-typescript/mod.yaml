@@ -1,0 +1,14 @@
+# A Sun plugin: connects Sun to a third-party service.
+# Rename it, list what it provides, and declare every host and secret it
+# needs: the sandbox blocks anything undeclared.
+name: my-plugin
+kind: plugin
+version: 0.1.0
+api: ">=1.0 <2.0"
+entry: { command: node, args: [mod.ts] }
+provides:
+  actions: [ping]
+  triggers: [pinged]
+permissions:
+  network: [api.example.com]
+  secrets: [EXAMPLE_TOKEN]

@@ -1,0 +1,87 @@
+name: cli-matrix
+
+# Every week, record each agent CLI's latest version, replay every
+# recorded version through the adapter contract tests, and open a PR that pins
+# the versions that pass (crates/sun-runtime/fixtures/versions.txt). A version
+# that breaks the contract fails this workflow and stays unpinned, so readiness
+# warns users on it and names the pinned known-good fallback.
+# Recording spends real quota: the prompts are tiny (scripts/record-fixtures.sh).
+
+on:
+  schedule:
+    - cron: '17 4 * * 1' # Mondays 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-matrix
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    # Pushes the pin branch and opens its PR.
+    permissions: { contents: write, pull-requests: write }
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: actions/setup-node@v4
+        with: { node-version: 24 }
+      # Builds the contract tests once, before any recording spends quota.
+      - run: cargo test --locked -p sun-runtime --test it contract::
+
+      # One step per CLI, so one broken CLI doesn't hide the others.
+      - id: claude_code
+        name: claude-code
+        continue-on-error: true
+        env: { ANTHROPIC_API_KEY: '${{ secrets.ANTHROPIC_API_KEY }}' }
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then echo "::warning::ANTHROPIC_API_KEY is not set; claude-code skipped"; exit 0; fi
+          npm install -g @anthropic-ai/claude-code@latest
+          bash scripts/cli-matrix.sh claude-code
+      - id: codex
+        name: codex
+        continue-on-error: true
+        env: { CODEX_API_KEY: '${{ secrets.OPENAI_API_KEY }}' }
+        run: |
+          if [ -z "$CODEX_API_KEY" ]; then echo "::warning::OPENAI_API_KEY is not set; codex skipped"; exit 0; fi
+          npm install -g @openai/codex@latest
+          bash scripts/cli-matrix.sh codex
+      - id: opencode
+        name: opencode
+        continue-on-error: true
+        # Free model, no login; run through npx at the latest version.
+        env: { OPENCODE_VERSION: latest }
+        run: bash scripts/cli-matrix.sh opencode
+
+      - name: Keep the recordings that broke the contract
+        if: steps.claude_code.outcome == 'failure' || steps.codex.outcome == 'failure' || steps.opencode.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: broken-cli-recordings
+          path: target/cli-matrix
+          if-no-files-found: ignore
+
+      - name: Open a PR pinning the versions that passed
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          [ -n "$(git status --porcelain crates/sun-runtime/fixtures)" ] || { echo "nothing new to pin"; exit 0; }
+          branch="cli-matrix/$(date -u +%Y-%m-%d)"
+          git switch -c "$branch"
+          git add crates/sun-runtime/fixtures
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "test(runtime): pin the latest agent cli versions"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "test(runtime): pin the latest agent cli versions" \
+            --body "The weekly cli-matrix run recorded these CLI versions and they pass the adapter contract tests."
+
+      - name: Fail when a CLI broke the contract
+        if: steps.claude_code.outcome == 'failure' || steps.codex.outcome == 'failure' || steps.opencode.outcome == 'failure'
+        run: |
+          echo "::error::claude-code=${{ steps.claude_code.outcome }} codex=${{ steps.codex.outcome }} opencode=${{ steps.opencode.outcome }}; see the warnings and the broken-cli-recordings artifact"
+          exit 1

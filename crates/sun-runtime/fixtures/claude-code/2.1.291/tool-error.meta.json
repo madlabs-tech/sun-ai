@@ -1,0 +1,30 @@
+{
+  "cli": "claude-code",
+  "case": "tool-error",
+  "transport": "headless-json",
+  "synthetic": false,
+  "cli_version": "2.1.291 (Claude Code)",
+  "recorded_at": "2026-10-06T18:37:24Z",
+  "argv": [
+    "claude",
+    "-p",
+    "Read missing.txt with your file-read tool, not the shell (do not create it), then report the error in one line.",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--model",
+    "haiku",
+    "--permission-mode",
+    "acceptEdits",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--no-session-persistence",
+    "--max-turns",
+    "4"
+  ],
+  "client_messages": [],
+  "exit_code": 0,
+  "stderr_tail": "",
+  "note": null
+}

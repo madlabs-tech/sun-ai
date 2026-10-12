@@ -1,0 +1,10 @@
+# CLI versions the adapters are tested with. One line per CLI:
+#   <cli> <pinned> [<older tested version>...]
+# <pinned> is the known-good version: readiness names it as the fallback when
+# the installed CLI is untested. Each version's recordings live in
+# fixtures/<cli>/<version>/ and the contract tests replay every one of them.
+# The weekly `cli-matrix` CI job (scripts/cli-matrix.sh) pins a new version
+# once its recordings pass the contract tests.
+claude-code 2.1.291
+codex 0.160.0
+opencode 1.18.34

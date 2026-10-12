@@ -1,0 +1,337 @@
+//! Agents, part of the **Facade** for the API: ecosystem-wide agents a task
+//! can be assigned to. Each change commits with its audit row.
+//!
+//! An agent runs through the engine like any workflow: a task assigned to
+//! it runs the agent's hidden **system workflow** on the task's workspace
+//! (one `agent` step with its runtime chain, instructions and skills, no
+//! approval), made on the first assignment there ([`system_workflow`]).
+//! Editing the agent saves a new version of each of its system workflows;
+//! runs keep the version they were pinned to. System workflows are left out
+//! of every workflow list, and only the engine saves them.
+//!
+//! A session's prompt is the agent's instructions, then its task (key,
+//! title, description) ([`with_task`]); the engine adds the messages left
+//! for the step, such as the comment that woke it.
+
+use std::collections::HashMap;
+
+use serde_json::json;
+use sun_core::model::{Agent, AuditAction, Run, Workflow};
+use sun_core::{AgentId, Error, Result, WorkflowId, WorkspaceId};
+use sun_store::{AgentRepo, AuditRepo, RepoRepo, TaskRepo, Tx, WorkflowRepo, WorkspaceRepo};
+
+use crate::Engine;
+use crate::executor::tasks;
+use crate::query::parse;
+
+/// The step every system workflow has, and its YAML `name:` (a slug; the
+/// workflow row is named after the agent).
+pub const AGENT_STEP: &str = "agent";
+
+/// `POST /agents` and `PATCH /agents/{id}`: the fields to set; absent ones
+/// stay (a new agent needs a name and a runtime).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentFields {
+    /// 1–64 characters, unique among active agents ignoring case.
+    pub name: Option<String>,
+    /// At most 1000 characters.
+    pub description: Option<String>,
+    /// Its prompt, at most 20 000 characters.
+    pub instructions: Option<String>,
+    /// Runtime names in failover order; 1–32.
+    pub runtime_chain: Option<Vec<String>>,
+    /// Skill names (catalog ids); at most 32.
+    pub skill_ids: Option<Vec<String>>,
+}
+
+impl AgentFields {
+    /// `agent` with these fields set and checked; its system workflow source
+    /// must parse.
+    fn apply(self, mut agent: Agent) -> Result<Agent> {
+        if let Some(name) = self.name {
+            agent.name = Agent::clean_name(&name)?;
+        }
+        if let Some(text) = self.description {
+            agent.description = Agent::clean_description(&text)?;
+        }
+        if let Some(text) = self.instructions {
+            agent.instructions = Agent::clean_instructions(&text)?;
+        }
+        if let Some(chain) = self.runtime_chain {
+            agent.runtime_chain = chain;
+        }
+        if let Some(skills) = self.skill_ids {
+            agent.skill_ids = Agent::clean_skills(skills)?;
+        }
+        agent.name = Agent::clean_name(&agent.name)?;
+        agent.runtime_chain = Agent::clean_chain(agent.runtime_chain)?;
+        system_source(&agent)?;
+        Ok(agent)
+    }
+}
+
+/// The YAML (JSON, a YAML subset) of `agent`'s system workflow, with its
+/// parse: one `agent` step, the agent's chain and skills. `InvalidInput`
+/// when the parser refuses a runtime or skill name.
+pub(crate) fn system_source(agent: &Agent) -> Result<(String, sun_workflow::Workflow)> {
+    // No instructions: an empty prompt, the session gets its task alone.
+    // The newline keeps a one-word prompt like `fix.md` from reading as a
+    // prompt file.
+    let prompt = match agent.instructions.trim() {
+        "" => String::new(),
+        text => format!("{text}\n"),
+    };
+    let source = json!({
+        "name": AGENT_STEP,
+        "runtime": { "chain": agent.runtime_chain },
+        "steps": [{
+            "id": AGENT_STEP,
+            "type": "agent",
+            "prompt": prompt,
+            "skills": agent.skill_ids,
+        }],
+    });
+    let source = serde_json::to_string_pretty(&source)
+        .map_err(|e| Error::InvalidInput(format!("agent {}: {e}", agent.name)))?;
+    let parsed = parse(&source)?;
+    Ok((source, parsed))
+}
+
+/// `prompt` (a step's) for a session of `run`: on an agent's system
+/// workflow, its instructions followed by the task's key, title and
+/// description, then the workspace's repositories and how to work in them
+/// (the session runs in an empty folder and clones what it needs with the
+/// host machine's own git credentials); any other workflow's as it is.
+// ponytail: add `sun repo checkout <url>` reusing `Worktrees::fetch`'s bare
+// cache when clone time hurts.
+pub(crate) async fn with_task(tx: &mut Tx, run: &Run, prompt: String) -> Result<String> {
+    if tx.system_agent_of(run.workflow_id).await?.is_none() {
+        return Ok(prompt);
+    }
+    let task = tx.get_task(run.task_id).await?;
+    let key = tasks::key_of(tx, &task).await?;
+    let mut out = match prompt.trim() {
+        "" => String::new(),
+        instructions => format!("{instructions}\n\n"),
+    };
+    out.push_str(&format!("Your task: {key} {}", task.title));
+    if !task.body.trim().is_empty() {
+        out.push_str(&format!("\n\n{}", task.body.trim()));
+    }
+    let repos = tx.repos(task.workspace_id).await?;
+    if !repos.is_empty() {
+        out.push_str("\n\n## Repositories agents can use\n");
+        for repo in &repos {
+            match repo.description.trim() {
+                "" => out.push_str(&format!("\n- {}", repo.url)),
+                what => out.push_str(&format!("\n- {} — {what}", repo.url)),
+            }
+        }
+        out.push_str(&format!(
+            "\n\nClone what you need into this folder. Work on branch `{}`, push with \
+             this machine's git credentials, and open a pull request whose title \
+             starts with `{key}`.",
+            key.branch(&task.title)
+        ));
+    }
+    Ok(out)
+}
+
+/// `agent`'s system workflow on `workspace`, made with its first version on
+/// the first assignment there. `InvalidInput` for an archived agent.
+pub(crate) async fn system_workflow(
+    tx: &mut Tx,
+    agent: AgentId,
+    workspace: WorkspaceId,
+) -> Result<WorkflowId> {
+    let agent = tx.get_agent(agent).await?;
+    if agent.archived_at.is_some() {
+        return Err(Error::InvalidInput(format!(
+            "The agent {} is archived; pick another one.",
+            agent.name
+        )));
+    }
+    if let Some(id) = tx.system_workflow(agent.id, workspace).await? {
+        return Ok(id);
+    }
+    tx.get_workspace(workspace).await?;
+    let (source, parsed) = system_source(&agent)?;
+    let workflow = Workflow {
+        id: WorkflowId::generate(),
+        workspace_id: workspace,
+        name: agent.name.clone(),
+    };
+    tx.insert_system_workflow(&workflow, agent.id).await?;
+    tx.save_workflow_version(workflow.id, &source, &parsed.hash)
+        .await?;
+    Ok(workflow.id)
+}
+
+impl Engine {
+    /// The active agents, by name.
+    pub async fn agents(&self) -> Result<Vec<Agent>> {
+        Ok(self.store.read().await?.agents().await?)
+    }
+
+    /// One agent, archived too; `NotFound` when there is none.
+    pub async fn agent(&self, id: AgentId) -> Result<Agent> {
+        Ok(self.store.read().await?.get_agent(id).await?)
+    }
+
+    /// Open tasks (not Done or Cancelled) per agent, on the workspaces
+    /// `sees` lets through (the caller's).
+    pub async fn agent_task_counts(
+        &self,
+        sees: impl Fn(WorkspaceId) -> bool,
+    ) -> Result<HashMap<AgentId, u32>> {
+        let mut tx = self.store.read().await?;
+        let mut counts = HashMap::new();
+        for (agent, workspace, n) in tx.agent_task_counts().await? {
+            if sees(workspace) {
+                *counts.entry(agent).or_default() += n;
+            }
+        }
+        Ok(counts)
+    }
+
+    /// Every agent's system workflows with their latest version numbers
+    /// (task views name them; the lists leave them out).
+    pub async fn system_workflows(&self) -> Result<Vec<(Workflow, u32)>> {
+        let mut tx = self.store.read().await?;
+        let mut out = Vec::new();
+        for workflow in tx.system_workflows().await? {
+            let version = tx
+                .latest_workflow_version(workflow.id)
+                .await?
+                .map_or(0, |v| v.version);
+            out.push((workflow, version));
+        }
+        Ok(out)
+    }
+
+    /// Creates an agent from `fields` (a name and a runtime at least).
+    pub async fn create_agent(&self, fields: AgentFields, actor: &str) -> Result<Agent> {
+        let agent = fields.apply(Agent {
+            id: AgentId::generate(),
+            name: String::new(),
+            description: String::new(),
+            instructions: String::new(),
+            runtime_chain: Vec::new(),
+            skill_ids: Vec::new(),
+            created_at: chrono::Utc::now(),
+            archived_at: None,
+        })?;
+        let mut tx = self.store.begin().await?;
+        tx.insert_agent(&agent).await?;
+        audit(&mut tx, &agent, actor, "created").await?;
+        tx.commit().await?;
+        Ok(agent)
+    }
+
+    /// Changes the fields `fields` names, and saves a new version of each of
+    /// the agent's system workflows whose latest one isn't what the agent
+    /// generates now, so any save also regenerates a version an older engine
+    /// made. An archived agent doesn't change.
+    pub async fn update_agent(
+        &self,
+        id: AgentId,
+        fields: AgentFields,
+        actor: &str,
+    ) -> Result<Agent> {
+        let mut tx = self.store.begin().await?;
+        let before = tx.get_agent(id).await?;
+        if before.archived_at.is_some() {
+            return Err(Error::InvalidInput(format!(
+                "The agent {} is archived.",
+                before.name
+            )));
+        }
+        let agent = fields.apply(before.clone())?;
+        let (source, parsed) = system_source(&agent)?;
+        for workflow in tx.system_workflows_of(id).await? {
+            if tx.get_workflow(workflow).await?.name != agent.name {
+                tx.rename_workflow(workflow, &agent.name).await?;
+            }
+            let latest = tx.latest_workflow_version(workflow).await?;
+            if latest.is_none_or(|v| v.source_yaml != source) {
+                tx.save_workflow_version(workflow, &source, &parsed.hash)
+                    .await?;
+            }
+        }
+        if agent != before {
+            tx.update_agent(&agent).await?;
+            let what = format!("updated (was {})", before.name);
+            audit(&mut tx, &agent, actor, &what).await?;
+        }
+        tx.commit().await?;
+        Ok(agent)
+    }
+
+    /// Archives an agent (`DELETE`): it leaves the list and takes no new
+    /// tasks; its tasks and runs stay. Archiving twice changes nothing.
+    pub async fn archive_agent(&self, id: AgentId, actor: &str) -> Result<()> {
+        let mut tx = self.store.begin().await?;
+        let mut agent = tx.get_agent(id).await?;
+        if agent.archived_at.is_some() {
+            return Ok(());
+        }
+        agent.archived_at = Some(chrono::Utc::now());
+        tx.update_agent(&agent).await?;
+        audit(&mut tx, &agent, actor, "archived").await?;
+        Ok(tx.commit().await?)
+    }
+}
+
+/// An `agent_change` audit row on the agent's name: `<what>`.
+async fn audit(tx: &mut Tx, agent: &Agent, actor: &str, what: &str) -> Result<()> {
+    tx.append_audit(actor, AuditAction::AgentChange, &agent.name, what)
+        .await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(instructions: &str, chain: &[&str]) -> Agent {
+        Agent {
+            id: AgentId::generate(),
+            name: "Ada".into(),
+            description: String::new(),
+            instructions: instructions.into(),
+            runtime_chain: chain.iter().map(|r| r.to_string()).collect(),
+            skill_ids: vec!["tdd".into()],
+            created_at: chrono::Utc::now(),
+            archived_at: None,
+        }
+    }
+
+    #[test]
+    fn agent_system_workflow_is_one_agent_step_with_its_chain_and_skills() {
+        let (_, parsed) = system_source(&agent("fix.md", &["claude-code", "codex"])).unwrap();
+        assert_eq!(parsed.name, AGENT_STEP);
+        assert_eq!(
+            parsed.runtime.as_ref().map(|r| r.chain.clone()),
+            Some(vec!["claude-code".to_owned(), "codex".to_owned()])
+        );
+        let [step] = parsed.steps.as_slice() else {
+            panic!("{:?}", parsed.steps)
+        };
+        let sun_workflow::StepKind::Agent { prompt, skills, .. } = &step.kind else {
+            panic!("{:?}", step.kind)
+        };
+        assert!(!sun_workflow::is_prompt_file(prompt), "{prompt}");
+        assert_eq!(skills, &["tdd"]);
+        let (_, parsed) = system_source(&agent("  ", &["codex"])).unwrap();
+        let sun_workflow::StepKind::Agent { prompt, .. } = &parsed.steps[0].kind else {
+            panic!()
+        };
+        assert_eq!(prompt, "");
+        // The parser checks runtime names.
+        assert!(matches!(
+            system_source(&agent("", &["not a runtime"])),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+}

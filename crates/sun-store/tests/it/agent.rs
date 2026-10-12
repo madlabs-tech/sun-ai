@@ -1,0 +1,81 @@
+//! Agents: names unique among active ones ignoring case, the trigger-kept
+//! foreign key of `task.assignee_agent_id`, and system workflows left out
+//! of the workflow lists.
+#![allow(clippy::unwrap_used)]
+
+use sun_core::model::{Agent, Task, Workflow};
+use sun_core::{AgentId, Error, WorkflowId, WorkspaceId};
+use sun_store::{AgentRepo, Store, StoreError, TaskRepo, WorkflowRepo};
+
+fn agent(name: &str) -> Agent {
+    Agent {
+        id: AgentId::generate(),
+        name: name.into(),
+        description: String::new(),
+        instructions: "Be brief.".into(),
+        runtime_chain: vec!["claude-code".into(), "codex".into()],
+        skill_ids: vec!["tdd".into()],
+        created_at: chrono::Utc::now(),
+        archived_at: None,
+    }
+}
+
+#[tokio::test]
+async fn agent_names_are_unique_while_active_and_tasks_name_real_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let mut ada = agent("Ada");
+    tx.insert_agent(&ada).await.unwrap();
+    assert_eq!(tx.get_agent(ada.id).await.unwrap(), ada);
+    let taken = tx.insert_agent(&agent("ADA")).await;
+    assert!(matches!(
+        taken,
+        Err(StoreError::Core(Error::InvalidInput(_)))
+    ));
+    // Archived: off the list, and its name is free again.
+    ada.archived_at = Some(chrono::Utc::now());
+    tx.update_agent(&ada).await.unwrap();
+    assert!(tx.agents().await.unwrap().is_empty());
+    let ada2 = agent("ada");
+    tx.insert_agent(&ada2).await.unwrap();
+    assert_eq!(tx.agents().await.unwrap(), std::slice::from_ref(&ada2));
+
+    // A task names an agent that exists.
+    let mut task = Task::new(WorkspaceId::MAIN, "x");
+    task.assignee_agent_id = Some(AgentId::generate());
+    assert!(tx.insert_task(&task).await.is_err());
+    task.assignee_agent_id = Some(ada2.id);
+    tx.insert_task(&task).await.unwrap();
+    assert_eq!(
+        tx.agent_task_counts().await.unwrap(),
+        [(ada2.id, WorkspaceId::MAIN, 1)]
+    );
+    task.assignee_agent_id = Some(AgentId::generate());
+    assert!(tx.update_task(&task).await.is_err());
+
+    // A system workflow: found per (agent, workspace), never listed.
+    let system = Workflow {
+        id: WorkflowId::generate(),
+        workspace_id: WorkspaceId::MAIN,
+        name: "ada".into(),
+    };
+    tx.insert_system_workflow(&system, ada2.id).await.unwrap();
+    let mine = Workflow {
+        id: WorkflowId::generate(),
+        ..system.clone()
+    };
+    tx.insert_workflow(&mine).await.unwrap();
+    assert_eq!(
+        tx.system_workflow(ada2.id, WorkspaceId::MAIN)
+            .await
+            .unwrap(),
+        Some(system.id)
+    );
+    assert_eq!(tx.system_agent_of(system.id).await.unwrap(), Some(ada2.id));
+    assert_eq!(tx.system_agent_of(mine.id).await.unwrap(), None);
+    assert_eq!(tx.workflows().await.unwrap(), std::slice::from_ref(&mine));
+    let listed = tx.workflows_of_workspace(WorkspaceId::MAIN).await.unwrap();
+    assert_eq!(listed, [mine]);
+    assert_eq!(tx.system_workflows().await.unwrap(), [system]);
+}

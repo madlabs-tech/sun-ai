@@ -1,0 +1,441 @@
+/* App chrome and the few patterns the design system has no component for.
+   Tokens only (no raw colors). Mobile-first: 360 px base, sidebar from 1024 px. */
+
+/* Self-hosted body and code faces (C5: no third-party requests). Variable woff2, latin. */
+@font-face {
+  font-family: 'Sora';
+  src: url('./assets/fonts/sora.woff2') format('woff2');
+  font-weight: 100 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('./assets/fonts/jetbrains-mono.woff2') format('woff2');
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg-page);
+  color: var(--fg-1);
+}
+
+.sun-app {
+  display: flex;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.sun-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  /* room for the bottom tab bar */
+  padding-bottom: calc(68px + env(safe-area-inset-bottom));
+}
+
+/* ---------- sidebar (desktop) ---------- */
+.sun-sidebar {
+  display: none;
+  width: 248px;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-3) var(--space-4);
+  border-right: 1.5px solid var(--border-subtle);
+  background: var(--surface-sunken);
+  overflow-y: auto;
+}
+
+.sun-wordmark {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+}
+.sun-wordmark__sun {
+  font-family: var(--font-compressed);
+  font-weight: 800;
+  font-size: 40px;
+  line-height: 0.9;
+  color: var(--fg-1);
+}
+.sun-wordmark__by {
+  font-size: var(--size-xs);
+  color: var(--fg-3);
+}
+.sun-wordmark__by b {
+  font-family: var(--font-brand);
+  font-weight: 400;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+
+.sun-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sun-nav a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-2);
+  text-decoration: none;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.sun-nav a:hover {
+  background: var(--bg-subtle);
+  text-decoration: none;
+}
+.sun-nav a[aria-current='page'] {
+  background: var(--bg-subtle);
+  color: var(--fg-1);
+}
+.sun-nav__label {
+  flex: 1;
+}
+
+.sun-label {
+  font-family: var(--font-condensed);
+  font-size: 18px;
+  line-height: 1.1;
+  color: var(--fg-2);
+  margin: 0 0 10px;
+  font-weight: 400;
+}
+
+/* ---------- status dots ---------- */
+.sun-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 4px;
+  flex: none;
+  background: var(--fg-3);
+}
+.sun-dot--ready,
+.sun-dot--online,
+.sun-dot--running {
+  background: var(--mint-400);
+}
+.sun-dot--busy {
+  background: var(--ice-400);
+  animation: sun-pulse 1.4s ease-in-out infinite;
+}
+.sun-dot--cooling_down,
+.sun-dot--stopped {
+  background: var(--amber-400);
+}
+.sun-dot--crashed {
+  background: var(--red-400);
+}
+
+/* ---------- page header (64 px) ---------- */
+.sun-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  min-height: 64px;
+  box-sizing: border-box;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1.5px solid var(--border-subtle);
+}
+.sun-header h1 {
+  font-family: var(--font-heading);
+  font-weight: 400;
+  font-size: 26px;
+  line-height: 1;
+  margin: 0;
+  color: var(--fg-1);
+}
+.sun-header p {
+  margin: 2px 0 0;
+  font-size: var(--size-xs);
+  color: var(--fg-2);
+}
+.sun-header__spacer {
+  flex: 1;
+}
+
+/* ---------- scrolling page body with list rows ---------- */
+.sun-page {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  max-width: 1000px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.sun-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  flex-wrap: wrap;
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+  border: 1.5px solid var(--border-subtle);
+}
+.sun-row__body {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+.sun-row__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-1);
+}
+.sun-row__meta {
+  font-size: var(--size-xs);
+  color: var(--fg-2);
+  margin-top: 4px;
+}
+.sun-row__aside {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.sun-tile {
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  background: var(--surface-raised);
+  color: var(--fg-1);
+}
+.sun-tile--ice {
+  background: var(--ice-400);
+  color: var(--on-ice);
+}
+
+.sun-empty {
+  padding: 28px var(--space-3);
+  text-align: center;
+  font-size: 13px;
+  color: var(--fg-3);
+  border: 1.5px dashed var(--border-default);
+  border-radius: var(--radius-lg);
+}
+
+.sun-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ---------- mobile bottom tab bar ---------- */
+.sun-tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  justify-content: space-around;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-2) calc(var(--space-2) + env(safe-area-inset-bottom));
+  background: var(--surface-sunken);
+  border-top: 1.5px solid var(--border-subtle);
+}
+.sun-tabbar a {
+  flex: 1;
+  min-height: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-2);
+  text-decoration: none;
+  position: relative;
+}
+.sun-tabbar a:hover {
+  text-decoration: none;
+}
+.sun-tabbar__pill {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  transition: background var(--dur-base) var(--ease-spring);
+}
+.sun-tabbar a[aria-current='page'] {
+  color: var(--fg-1);
+}
+.sun-tabbar a[aria-current='page'] .sun-tabbar__pill {
+  background: var(--mint-400);
+  color: var(--on-mint);
+}
+.sun-tabbar__count {
+  position: absolute;
+  top: 0;
+  left: calc(50% + 14px);
+  z-index: 1;
+}
+
+/* ---------- toasts ---------- */
+.sun-toasts {
+  position: fixed;
+  right: var(--space-4);
+  left: var(--space-4);
+  bottom: calc(80px + env(safe-area-inset-bottom));
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: none;
+}
+.sun-toasts > * {
+  pointer-events: auto;
+}
+/* On a task's page, never over its comment box (bottom right on desktop, bottom on phones). */
+.sun-app:has(.task-page) ~ .sun-toasts {
+  top: var(--space-4);
+  bottom: auto;
+}
+/* Nor the sign-in card's buttons on phones (it has no tab bar to sit above). */
+@media (max-width: 1023px) {
+  .sign-in ~ .sun-toasts {
+    top: var(--space-4);
+    bottom: auto;
+  }
+}
+
+@keyframes sun-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+.sun-pulse {
+  animation: sun-pulse 1.4s ease-in-out infinite;
+}
+
+/* ---------- touch layout (below the sidebar breakpoint) ----------
+   Every tap target is at least 44 px (DS control-md): the DS "sm" controls grow,
+   and dialogs become phone sheets (radius 32) that rise from the bottom. */
+@media (max-width: 1023px) {
+  .ml-btn--sm,
+  .ml-control--sm,
+  .ml-tabs .ml-tab {
+    height: var(--control-md);
+    min-width: var(--control-md);
+    justify-content: center;
+  }
+  .ml-iconbtn.ml-btn--sm {
+    width: var(--control-md);
+  }
+}
+@media (max-width: 759px) {
+  .ml-dialog__scrim {
+    place-items: end stretch;
+    padding: 0;
+  }
+  .ml-dialog {
+    max-width: none;
+    max-height: calc(100dvh - var(--space-6));
+    border-radius: 32px 32px 0 0;
+    border-bottom: 0;
+    padding: var(--space-6) var(--space-5) calc(var(--space-5) + env(safe-area-inset-bottom));
+    animation: sun-sheet-in var(--dur-slow) var(--ease-spring) both;
+  }
+  .ml-dialog__footer > * {
+    flex: 1;
+  }
+}
+@keyframes sun-sheet-in {
+  from {
+    transform: translateY(40px);
+    opacity: 0;
+  }
+}
+
+/* The header's "show the sidebar" toggle: only on a desktop with the sidebar hidden. */
+.sun-header > .sun-tip:has(.sun-sidebar-expand) {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  .sun-sidebar {
+    display: flex;
+  }
+  .sun-app--collapsed .sun-sidebar {
+    display: none;
+  }
+  .sun-app--collapsed .sun-header > .sun-tip:has(.sun-sidebar-expand) {
+    display: inline-flex;
+  }
+  .sun-tabbar,
+  .sun-mobile-only {
+    display: none !important;
+  }
+  .sun-main {
+    padding-bottom: 0;
+  }
+  .sun-header {
+    padding: var(--space-3) var(--space-5);
+  }
+  .sun-page {
+    padding: var(--space-5);
+  }
+  .sun-toasts {
+    left: auto;
+    bottom: var(--space-6);
+    right: var(--space-6);
+  }
+}
+
+/* Collapsed output ("Show output") and its text, shared by the timeline and device results.
+   The toggle is a DS ghost Button; it hugs the text column instead of stretching. */
+.sun-disclosure {
+  align-self: flex-start;
+  margin-left: -14px;
+}
+.event__detail {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  color: var(--fg-1);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Read by screen readers, not shown. */
+.sun-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

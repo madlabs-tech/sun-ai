@@ -1,0 +1,26 @@
+{
+  "cli": "codex",
+  "case": "tool-error",
+  "transport": "headless-json",
+  "synthetic": false,
+  "cli_version": "codex-cli 0.160.0",
+  "recorded_at": "2026-10-06T18:40:19Z",
+  "argv": [
+    "codex",
+    "exec",
+    "--json",
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "-s",
+    "workspace-write",
+    "-c",
+    "model_reasoning_effort=\"low\"",
+    "Run `cat missing.txt` (do not create it), then report the error in one line."
+  ],
+  "client_messages": [],
+  "exit_code": 0,
+  "stderr_tail": "Reading additional input from stdin...",
+  "note": null
+}

@@ -1,0 +1,13 @@
+{
+  "mods": [
+    {
+      "name": "github",
+      "kind": "plugin",
+      "version": "0.1.0",
+      "description": "Opens pull requests, comments, reports CI status and follows labeled issues on GitHub.",
+      "repo": "https://github.com/madlabs-tech/sun-plugin-github",
+      "tier": "official",
+      "permissions": ["network:api.github.com", "secret:GITHUB_TOKEN"]
+    }
+  ]
+}

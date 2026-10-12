@@ -1,0 +1,57 @@
+{
+  "cli": "opencode",
+  "case": "crash",
+  "transport": "acp",
+  "synthetic": false,
+  "cli_version": "1.18.34",
+  "recorded_at": "2026-10-06T18:37:06Z",
+  "argv": [
+    "npx",
+    "-y",
+    "opencode-ai@1.18.34",
+    "acp"
+  ],
+  "client_messages": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": false,
+            "writeTextFile": false
+          },
+          "terminal": false
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/work",
+        "mcpServers": []
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "ses_eed7ee9adffezel9fqJi6nKjQQ",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "Create file hello.txt containing hi, then reply done."
+          }
+        ]
+      }
+    }
+  ],
+  "exit_code": 137,
+  "stderr_tail": "",
+  "note": "process group killed with SIGKILL right after the first tool call started"
+}

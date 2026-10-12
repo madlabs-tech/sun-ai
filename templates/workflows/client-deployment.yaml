@@ -1,0 +1,45 @@
+# Role template · Forward-deployed — client deployment.
+# Plan the rollout → configure → code gates → client sign-off → open a PR → tell the team.
+name: client-deployment
+on: [manual]
+runtime:
+  chain: [claude-code, codex]
+  on_limit: pause_and_notify
+budget: { wall: 4h, turns: 300, cost_usd: 10 }
+steps:
+  - id: plan
+    type: agent
+    prompt: |
+      Read the client's requirements in the task. Write rollout.md with these
+      headings: Environment, Configuration, Data migration, Rollback, Checklist.
+
+  - id: plan_check
+    type: gate
+    gates:
+      - sections_present: { file: rollout.md, sections: [Environment, Configuration, Rollback, Checklist] }
+    on_fail: { send_back_to: plan, max: 1 }
+
+  - id: configure
+    type: agent
+    prompt: |
+      Apply rollout.md: add the client's configuration and any migration
+      scripts to the repo, with tests. Don't touch other clients' settings.
+
+  - id: verify
+    type: gate
+    gates: [diff_not_empty, test, lint]
+    on_fail: { send_back_to: configure, max: 2 }
+
+  - id: sign_off
+    type: approval
+    who: [role:admin]
+    timeout: { after: 24h, then: remind }
+
+  - id: pr
+    type: action
+    use: github.open_pr
+
+  - id: announce
+    type: notify
+    to: [slack:#deployments]
+    message: The client deployment is ready to merge.

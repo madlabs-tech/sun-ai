@@ -1,0 +1,2 @@
+# `npm run build` output; publish it with `npm publish dist`.
+dist/

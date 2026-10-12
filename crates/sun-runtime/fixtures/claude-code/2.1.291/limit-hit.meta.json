@@ -1,0 +1,17 @@
+{
+  "cli": "claude-code",
+  "case": "limit-hit",
+  "transport": "headless-json",
+  "synthetic": true,
+  "cli_version": "2.1.291",
+  "recorded_at": "2026-10-07T00:00:00Z",
+  "exit_code": 1,
+  "stderr_tail": "",
+  "source": "Hand-built. Line 1 is the real init event and line 2 the real rate_limit_event shape (status flipped to \"rejected\"). The assistant message (model \"<synthetic>\", error \"rate_limit\") and the is_error result follow the shape Claude Code emits for API errors; the text follows the CLI's \"You've hit your ... limit · resets <time>\" wording. Not observed live.",
+  "confidence": "medium",
+  "detect": [
+    "rate_limit_event.rate_limit_info.status == \"rejected\" (resetsAt = epoch seconds)",
+    "assistant.error == \"rate_limit\"",
+    "result.is_error with limit text"
+  ]
+}

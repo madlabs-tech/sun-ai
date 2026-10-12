@@ -1,0 +1,37 @@
+[package]
+name = "sun-context"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+# Uploaded files: base64 bodies, xlsx sheets, docx (zip + XML), PDF text.
+base64 = "0.22.1"
+calamine = { version = "0.36.1", default-features = false }
+lopdf = { version = "0.45.0", default-features = false }
+quick-xml = "0.41.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+chrono.workspace = true
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+sun-core.workspace = true
+sun-store.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+# Opt-in embedding HTTP calls, on the blocking pool (same ureq as sun-mod-sdk).
+tokio = { version = "1.48.0", features = ["rt"] }
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+# Loopback HTTP mock for the embedder tests.
+sun-mod-sdk = { workspace = true, features = ["http"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "macros", "client"] }
+tempfile = "3.23.0"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "io-util"] }
+
+[lints]
+workspace = true

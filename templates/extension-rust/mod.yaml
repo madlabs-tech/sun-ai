@@ -1,0 +1,21 @@
+# A Sun extension: adds a capability to the engine. Extensions get
+# no network or secrets; they reach third parties through installed plugins.
+# Declare the paths, devices and processes it needs: the sandbox blocks
+# anything undeclared.
+name: my-extension
+kind: extension
+version: 0.1.0
+api: ">=1.2 <2.0"
+entry: { command: ./target/release/my-extension }
+provides:
+  step_types: [word_count]
+  gates: [max_words]
+  hooks: [run_finished]   # run hooks, sent as `call observe {events}` (API 1.2)
+  metrics: [runs_seen]    # asked as `call metrics {run}` at each run end
+  # Also API 1.2: serve an agent runtime (answer the `runtime.*` calls;
+  # chains name it `my-extension.<id>`) or an execution environment
+  # (`exec_env.*`).
+  # runtime_adapters: [my-cli]
+  # exec_envs: [my-sandbox]
+permissions:
+  paths: []

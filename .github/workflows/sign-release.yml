@@ -1,0 +1,34 @@
+# Signs the release's sha256.sum with the Sun release key (`ssh-keygen -Y`,
+# namespace `sun-release`) and uploads sha256.sum.sig, which
+# scripts/install.sh and `sun upgrade` verify. Called by release.yml
+# (cargo-dist `publish-jobs`). Secret SUN_RELEASE_SIGNING_KEY: the private
+# ed25519 key whose public half is SUN_RELEASE_KEY in scripts/install.sh.
+name: Sign release
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+    steps:
+      - name: Sign sha256.sum
+        env:
+          SIGNING_KEY: ${{ secrets.SUN_RELEASE_SIGNING_KEY }}
+        run: |
+          [ -n "$SIGNING_KEY" ] || { echo "SUN_RELEASE_SIGNING_KEY is not set" >&2; exit 1; }
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern sha256.sum
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > key
+          ssh-keygen -Y sign -f key -n sun-release sha256.sum
+          rm -f key
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" sha256.sum.sig

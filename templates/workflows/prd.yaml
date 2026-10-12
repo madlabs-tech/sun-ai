@@ -1,0 +1,46 @@
+# Role template · Product — interview notes → PRD → tasks. No repo needed.
+# Start it by hand, or label a Jira issue `prd`: then Sun reports back to that
+# issue once the PRD is approved (skipped for a manual run).
+name: prd
+on: [manual, "jira.issue_labeled:prd"]
+budget: { wall: 1h, cost_usd: 3 }
+steps:
+  - id: notes
+    type: agent
+    prompt: |
+      Read the interview notes attached to the task. Write findings.md: the
+      problems people raised, how often, and direct quotes for each.
+
+  - id: draft
+    type: agent
+    prompt: |
+      Using findings.md, write prd.md with these headings: Problem, Users,
+      Goals, Non-goals, User stories, Success metrics, Open questions.
+
+  - id: sections
+    type: gate
+    gates:
+      - sections_present: { file: prd.md, sections: [Problem, Users, Goals, Non-goals, User stories, Success metrics] }
+      - length: { file: prd.md, max_words: 2000 }
+      - format: { file: prd.md }
+    on_fail: { send_back_to: draft, max: 2 }
+
+  - id: approve
+    type: approval
+    who: [role:member]
+    timeout: { after: 72h, then: remind }
+
+  - id: tasks
+    type: agent
+    prompt: |
+      Turn each story under "User stories" in prd.md into one row of
+      stories.csv, a Jira CSV import file with the columns Summary,
+      Description and Issue Type (Story). Keep each summary under 100
+      characters and put the acceptance criteria in the description.
+
+  - id: report
+    type: action
+    use: jira.comment
+    with:
+      issue: "${trigger.issue}"
+      body: "The PRD for ${task.title} is approved. Its user stories are in stories.csv on Sun task ${task.id}, ready for Jira's CSV import."
