@@ -311,6 +311,7 @@ async fn secret_workspace_scope_seals_redacts_and_goes_with_its_workspace() {
         issue_counter: 0,
         default_workflow_id: None,
         git_settings: Default::default(),
+        created_by: None,
         created_at: chrono::Utc::now(),
     };
     let scope = SecretScope::Workspace(workspace.id);

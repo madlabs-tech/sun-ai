@@ -9,10 +9,10 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnection, SqliteRow};
 use sun_core::model::Workspace;
-use sun_core::{GroupId, MemberId, WorkspaceId};
+use sun_core::{MemberId, WorkspaceId};
 
 use crate::repo::{json, parse, parse_ts, ts};
-use crate::{BlobStore, GroupRepo, Result, StoreError, Tx};
+use crate::{BlobStore, Result, StoreError, Tx};
 
 /// **Repository** for `workspace` rows. Fields are checked with
 /// [`Workspace`]'s `clean_*` helpers by the caller; here names must be unique
@@ -51,16 +51,7 @@ pub trait WorkspaceRepo {
     async fn unlink(&mut self, workspace: WorkspaceId, item: WorkspaceItem<'_>) -> Result<bool>;
     /// The workspaces `item` is linked to, oldest first.
     async fn workspaces_of(&mut self, item: WorkspaceItem<'_>) -> Result<Vec<WorkspaceId>>;
-    /// Every `(workspace, group)` access link, by workspace then group.
-    async fn workspace_groups(&mut self) -> Result<Vec<(WorkspaceId, GroupId)>>;
-    /// Attaches exactly `groups` to `workspace`; an unknown workspace or group is
-    /// `NotFound`.
-    async fn set_workspace_groups(
-        &mut self,
-        workspace: WorkspaceId,
-        groups: &[GroupId],
-    ) -> Result<()>;
-    /// The workspaces attached to any of `member`'s groups.
+    /// The workspaces `member` is a member of (`workspace_member`), by id.
     async fn workspaces_of_member(&mut self, member: MemberId) -> Result<Vec<WorkspaceId>>;
 }
 
@@ -96,7 +87,7 @@ impl WorkspaceRepo for Tx {
         prefix_free(self, None, &workspace.issue_prefix).await?;
         sqlx::query(&format!(
             "INSERT INTO workspace ({WORKSPACE_COLUMNS}) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
         ))
         .bind(workspace.id.to_string())
         .bind(&workspace.name)
@@ -108,6 +99,7 @@ impl WorkspaceRepo for Tx {
         .bind(workspace.default_workflow_id.map(|w| w.to_string()))
         .bind(serde_json::to_string(&workspace.git_settings)?)
         .bind(ts(&workspace.created_at))
+        .bind(workspace.created_by.map(|m| m.to_string()))
         .execute(self.conn())
         .await?;
         Ok(())
@@ -290,48 +282,9 @@ impl WorkspaceRepo for Tx {
         ids.into_iter().map(parse).collect()
     }
 
-    async fn workspace_groups(&mut self) -> Result<Vec<(WorkspaceId, GroupId)>> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT workspace_id, group_id FROM workspace_group ORDER BY workspace_id, group_id",
-        )
-        .fetch_all(self.conn())
-        .await?;
-        rows.into_iter()
-            .map(|(workspace, group)| Ok((parse(workspace)?, parse(group)?)))
-            .collect()
-    }
-
-    async fn set_workspace_groups(
-        &mut self,
-        workspace: WorkspaceId,
-        groups: &[GroupId],
-    ) -> Result<()> {
-        self.get_workspace(workspace).await?;
-        for group in groups {
-            self.get_group(*group).await?;
-        }
-        sqlx::query("DELETE FROM workspace_group WHERE workspace_id = $1")
-            .bind(workspace.to_string())
-            .execute(self.conn())
-            .await?;
-        for group in groups {
-            sqlx::query(
-                "INSERT INTO workspace_group (workspace_id, group_id) VALUES ($1, $2) \
-                 ON CONFLICT DO NOTHING",
-            )
-            .bind(workspace.to_string())
-            .bind(group.to_string())
-            .execute(self.conn())
-            .await?;
-        }
-        Ok(())
-    }
-
     async fn workspaces_of_member(&mut self, member: MemberId) -> Result<Vec<WorkspaceId>> {
         let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT bg.workspace_id FROM workspace_group bg
-             JOIN member_group mg ON mg.group_id = bg.group_id
-             WHERE mg.member_id = $1 ORDER BY bg.workspace_id",
+            "SELECT workspace_id FROM workspace_member WHERE member_id = $1 ORDER BY workspace_id",
         )
         .bind(member.to_string())
         .fetch_all(self.conn())
@@ -390,11 +343,11 @@ async fn slug_taken(tx: &mut Tx, slug: &str) -> Result<bool> {
 }
 
 const WORKSPACE_COLUMNS: &str = "id, name, slug, description, context, issue_prefix, \
-     issue_counter, default_workflow_id, git_settings_json, created_at";
+     issue_counter, default_workflow_id, git_settings_json, created_at, created_by";
 
 /// What a read selects: the columns and the logo's hash.
 const WORKSPACE_READ: &str = "id, name, slug, description, context, issue_prefix, issue_counter, \
-     default_workflow_id, git_settings_json, created_at, \
+     default_workflow_id, git_settings_json, created_at, created_by, \
      (SELECT hash FROM workspace_logo WHERE workspace_id = workspace.id) AS logo_hash";
 
 fn workspace_from(row: &SqliteRow) -> Result<Workspace> {
@@ -411,6 +364,10 @@ fn workspace_from(row: &SqliteRow) -> Result<Workspace> {
         default_workflow_id: default_workflow.map(parse).transpose()?,
         git_settings: json(row.try_get("git_settings_json")?)?,
         created_at: parse_ts(row.try_get("created_at")?)?,
+        created_by: row
+            .try_get::<Option<String>, _>("created_by")?
+            .map(parse)
+            .transpose()?,
     })
 }
 

@@ -1,17 +1,18 @@
-//! Groups: the upgrade from fixed roles to groups keeps everyone's
-//! access and every `who: role:<name>` that admitted them.
+//! The access upgrades: fixed roles became groups, then groups became
+//! workspace roles again. Through both, everyone keeps their access and
+//! every `who: role:<name>` that admitted them.
 #![allow(clippy::unwrap_used)]
 
 use crate::permission_split;
 
 use sqlx::migrate::Migrate;
 use sqlx::{Connection, SqliteConnection};
-use sun_core::model::{Permission, permissions_of, roles_of};
-use sun_core::{GroupId, MemberId, WorkspaceId};
-use sun_store::{GroupRepo, MemberRepo, SettingRepo, Store, WorkspaceRepo};
+use sun_core::model::{Role, roles_of};
+use sun_core::{MemberId, WorkspaceId};
+use sun_store::{MemberRepo, MembershipRepo, SettingRepo, Store, WorkspaceRepo};
 
 #[tokio::test]
-async fn acl_upgrade_turns_roles_into_groups() {
+async fn acl_upgrade_turns_old_roles_into_workspace_roles() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
     let mut conn = SqliteConnection::connect(&url).await.unwrap();
@@ -50,81 +51,27 @@ async fn acl_upgrade_turns_roles_into_groups() {
 
     let store = Store::open(dir.path()).await.unwrap();
     let mut tx = store.read().await.unwrap();
-    let groups = tx.groups().await.unwrap();
-    let ids_and_keys: Vec<_> = groups.iter().map(|g| (g.id, g.key.as_str())).collect();
-    assert_eq!(
-        ids_and_keys,
-        [
-            (GroupId::VIEWER, "viewer"),
-            (GroupId::MEMBER, "member"),
-            (GroupId::ADMIN, "admin")
-        ]
-    );
-    use Permission::*;
-    assert_eq!(groups[0].permissions, [Approve]);
-    assert_eq!(groups[1].permissions, [Run, CreateWorkflow, EditWorkflow]);
-    assert_eq!(
-        groups[2].permissions,
-        [
-            Run,
-            Approve,
-            ManagePlugins,
-            ManageExtensions,
-            ManageRuntimes,
-            // The permission matrix split `manage_access` and `edit_workspace`.
-            ManageSettings,
-            InviteMembers,
-            CreateMembers,
-            ViewMembers,
-            EditMembers,
-            DeactivateMembers,
-            ManageGroups,
-            CreateWorkspace,
-            EditWorkspace,
-            DeleteWorkspace,
-            CreateWorkflow,
-            EditWorkflow,
-            AccessAllWorkspaces
-        ]
-    );
     assert_eq!(tx.setting("role_permissions").await.unwrap(), None);
 
-    // Each member is in every group their role covered, so `who:` keeps
-    // admitting them; only the owner is an owner.
-    let mut access = Vec::new();
+    // Each member gets the highest role their old one covered, in Main (the
+    // only workspace): `who: role:<their old role>` keeps admitting them.
+    // A customized permission map is not kept: roles grant fixed ones.
+    let mut roles = Vec::new();
     for id in &ids {
         let member = tx.get_member(*id).await.unwrap();
-        let groups = tx.groups_of_member(*id).await.unwrap();
-        access.push((
-            member.is_owner,
-            roles_of(member.is_owner, &groups),
-            permissions_of(member.is_owner, &groups),
-        ));
-    }
-    assert_eq!(access[0].1, ["viewer"]);
-    assert_eq!(access[1].1, ["viewer", "member"]);
-    assert_eq!(access[2].1, ["viewer", "member", "admin"]);
-    assert_eq!(access[3].1, ["viewer", "member", "admin", "owner"]);
-    assert_eq!(access[0].2, [Approve]);
-    assert_eq!(access[1].2, [Run, Approve, CreateWorkflow, EditWorkflow]);
-    assert!(access[2].2.contains(&ManageGroups) && !access[2].2.contains(&ManageSecrets));
-    assert!(access[3].0 && access[3].2 == Permission::ALL);
-    assert!(!access[2].0);
-
-    // Main is open to Viewer, Member and Admin, so every member still
-    // sees it after the upgrade.
-    let main = [
-        (WorkspaceId::MAIN, GroupId::VIEWER),
-        (WorkspaceId::MAIN, GroupId::MEMBER),
-        (WorkspaceId::MAIN, GroupId::ADMIN),
-    ];
-    assert_eq!(tx.workspace_groups().await.unwrap(), main);
-    for id in &ids {
+        let role = tx.role_of(WorkspaceId::MAIN, *id).await.unwrap().unwrap();
+        roles.push((role, roles_of(member.is_owner, &[role])));
         assert_eq!(
             tx.workspaces_of_member(*id).await.unwrap(),
             [WorkspaceId::MAIN]
         );
     }
+    assert_eq!(roles[0], (Role::Viewer, vec!["viewer".to_owned()]));
+    assert_eq!(roles[1], (Role::Member, vec!["member".to_owned()]));
+    assert_eq!(roles[2], (Role::Admin, vec!["admin".to_owned()]));
+    assert_eq!(roles[3], (Role::Owner, vec!["owner".to_owned()]));
+    assert!(tx.get_member(ids[3]).await.unwrap().is_owner);
+    assert!(!tx.get_member(ids[2]).await.unwrap().is_owner);
 
     let mut conn = SqliteConnection::connect(&url).await.unwrap();
     let violations: Vec<(String,)> =
@@ -136,24 +83,21 @@ async fn acl_upgrade_turns_roles_into_groups() {
 }
 
 #[tokio::test]
-async fn acl_fresh_install_seeds_default_groups() {
+async fn acl_fresh_install_has_roles_and_no_groups() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
     let mut tx = store.read().await.unwrap();
-    let groups = tx.groups().await.unwrap();
-    let member = &groups[1];
-    assert_eq!(
-        member.permissions,
-        [
-            Permission::Run,
-            Permission::Approve,
-            Permission::CreateWorkflow,
-            Permission::EditWorkflow
-        ],
-        "Member can't touch workspaces after install"
-    );
-    assert_eq!(groups[2].permissions, Permission::ALL);
-    assert!(groups[0].permissions.is_empty());
+    assert!(tx.members_of(WorkspaceId::MAIN).await.unwrap().is_empty());
+    let url = format!("sqlite://{}", dir.path().join("sun.db").display());
+    let mut conn = SqliteConnection::connect(&url).await.unwrap();
+    let groups: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_schema WHERE name IN ('user_group', 'member_group', \
+         'workspace_group')",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(groups, 0);
 }
 
 /// `manage_access` becomes every member permission plus
@@ -172,6 +116,10 @@ async fn acl_upgrade_splits_manage_access_and_edit_workspace() {
     {
         conn.apply(migration).await.unwrap();
     }
+    // Stop before groups become roles, to read the groups as they were.
+    let groups_left = migrator.iter().filter(|m| {
+        m.version >= permission_split::VERSION && m.version < crate::workspace_member::M1
+    });
     for (id, key, permissions) in permission_split::OLD_GROUPS {
         sqlx::query(
             "INSERT INTO user_group (id, key, name, permissions_json) VALUES ($1, $2, $2, $3)",
@@ -183,9 +131,18 @@ async fn acl_upgrade_splits_manage_access_and_edit_workspace() {
         .await
         .unwrap();
     }
+    for migration in groups_left {
+        conn.apply(migration).await.unwrap();
+    }
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, permissions_json FROM user_group ORDER BY id")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
     conn.close().await.unwrap();
-
-    let store = Store::open(dir.path()).await.unwrap();
-    let mut tx = store.read().await.unwrap();
-    permission_split::assert_split(&tx.groups().await.unwrap());
+    let groups: Vec<(String, Vec<String>)> = rows
+        .into_iter()
+        .map(|(key, json)| (key, serde_json::from_str(&json).unwrap()))
+        .collect();
+    permission_split::assert_split(&groups);
 }

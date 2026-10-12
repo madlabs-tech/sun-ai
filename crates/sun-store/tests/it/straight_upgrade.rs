@@ -10,10 +10,10 @@ use std::path::Path;
 
 use sqlx::migrate::Migrate;
 use sqlx::{Connection, SqliteConnection};
-use sun_core::model::{AuditAction, Permission, Priority, SecretScope, TaskKey};
+use sun_core::model::{AuditAction, Priority, SecretScope, TaskKey};
 use sun_core::{TaskStatus, WorkspaceId};
 use sun_store::{
-    AuditRepo, GroupRepo, RepoRepo, SecretRepo, Store, StoreError, TaskRepo, WorkflowRepo,
+    AuditRepo, MembershipRepo, RepoRepo, SecretRepo, Store, StoreError, TaskRepo, WorkflowRepo,
     WorkspaceRepo,
 };
 
@@ -274,21 +274,10 @@ async fn a_pre_rename_data_dir_upgrades_through_every_migration_in_one_open() {
         .collect();
     assert_eq!(got, want);
 
-    // Permission keys and access links carried over.
-    let groups = tx.groups().await.unwrap();
-    let leads = groups.iter().find(|g| g.key == "leads").unwrap();
-    for permission in [
-        Permission::Run,
-        Permission::CreateWorkspace,
-        Permission::EditWorkspace,
-        Permission::DeleteWorkspace,
-        Permission::AccessAllWorkspaces,
-    ] {
-        assert!(leads.permissions.contains(&permission), "{permission}");
-    }
+    // The Leads group (attached to Ops, with every-workspace access) is
+    // gone with the other group tables; nobody was in it.
     let ops: WorkspaceId = OPS.parse().unwrap();
-    let links = tx.workspace_groups().await.unwrap();
-    assert!(links.contains(&(ops, LEADS.parse().unwrap())), "{links:?}");
+    assert!(tx.members_of(ops).await.unwrap().is_empty());
     assert_eq!(
         tx.get_workflow(OPS_FLOW.parse().unwrap())
             .await

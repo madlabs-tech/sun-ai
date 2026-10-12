@@ -35,6 +35,7 @@ async fn project_crud_with_names_unique_per_workspace() {
         issue_counter: 0,
         default_workflow_id: None,
         git_settings: Default::default(),
+        created_by: None,
         created_at: chrono::Utc::now(),
     };
     tx.insert_workspace(&ops).await.unwrap();

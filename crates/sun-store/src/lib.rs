@@ -79,8 +79,10 @@
 //!   the `known_secrets` list for [`sun_core::redact::redact`] — pass it to
 //!   everything that emits text (runtime driver, hand-off, context packs,
 //!   logs, knowledge chunks). `append_event` already applies it to payloads.
-//! - **Members and audit** ([`MemberRepo`], [`GroupRepo`], [`AuditRepo`]):
-//!   members, their groups and owner flag; `audit` is append-only (a trigger blocks
+//! - **Members and audit** ([`MemberRepo`], [`MembershipRepo`],
+//!   [`InvitationRepo`], [`AuditRepo`]): members and their deployment owner
+//!   flag, their role in each workspace (a workspace keeps at least one
+//!   owner), invitations into a workspace; `audit` is append-only (a trigger blocks
 //!   `UPDATE`/`DELETE`). Write the audit row in the same `Tx` as the change.
 //!   [`LoginRepo`]: sign-in sessions and one-time login links, stored as
 //!   `sha256(token)` only.
@@ -101,10 +103,10 @@ mod eval;
 mod event_query;
 mod export;
 mod factor;
-mod group;
 mod host;
 mod knowledge;
 mod member;
+mod membership;
 mod memory;
 mod mod_install;
 mod note;
@@ -138,13 +140,13 @@ pub use eval::EvalRepo;
 pub use event_query::{COMPACTED, EventQuery, KEPT_KINDS};
 pub use export::{ARCHIVED_PATHS, ArchiveSecrets, SECRETS_TO_REENTER, SecretToReenter};
 pub use factor::{FactorRepo, TotpSecret};
-pub use group::GroupRepo;
 pub use host::HostRepo;
 pub use knowledge::{
     ChunkHit, ChunkText, DocChunk, DocSummary, FtsIndex, KnowledgeRepo, KnowledgeSource, NewDoc,
     SourceSummary,
 };
 pub use member::{AuditRepo, LoginRepo, MAX_OTP_ATTEMPTS, MemberRepo};
+pub use membership::{InvitationRepo, MembershipRepo};
 pub use memory::{MemoryPr, MemoryRepo};
 pub use mod_install::ModInstallRepo;
 pub use note::NoteRepo;

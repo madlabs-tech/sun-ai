@@ -7,10 +7,11 @@ use std::path::Path;
 
 use serde_json::Value;
 use sqlx::Connection;
-use sun_core::model::{Permission, SecretScope};
+use sun_core::model::{Role, SecretScope};
 use sun_core::{BlobHash, TaskStatus, WorkspaceId};
 use sun_store::{
-    ArtifactRepo, FactorRepo, GroupRepo, MemberRepo, SecretRepo, Store, TaskRepo, WorkspaceRepo,
+    ArtifactRepo, FactorRepo, MemberRepo, MembershipRepo, SecretRepo, Store, TaskRepo,
+    WorkspaceRepo,
 };
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -55,7 +56,7 @@ fn unpack_pre_t2(data: &Path) -> Value {
 }
 
 #[tokio::test]
-async fn a_pre_t2_data_dir_opens_with_tasks_members_groups_factors_secrets_and_blobs() {
+async fn a_pre_t2_data_dir_opens_with_tasks_members_roles_factors_secrets_and_blobs() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path();
     let expected = unpack_pre_t2(data);
@@ -91,37 +92,17 @@ async fn a_pre_t2_data_dir_opens_with_tasks_members_groups_factors_secrets_and_b
         .find(|m| m.id == id("member").parse().unwrap())
         .unwrap();
     assert_eq!(member.username, "ana");
-    let groups = tx.groups_of_member(member.id).await.unwrap();
-    assert_eq!(groups.len(), 1, "{groups:?}");
-    assert_eq!(groups[0].id, id("group").parse().unwrap());
-    assert_eq!(groups[0].name, "Reviewers");
-    assert!(
-        tx.groups()
-            .await
-            .unwrap()
-            .iter()
-            .any(|g| g.id == id("group").parse().unwrap())
+    // Ana was in a custom group that could run: a member of Main, where
+    // every member lands; she had a password, so her email counts as verified.
+    assert_eq!(
+        tx.role_of(WorkspaceId::MAIN, member.id).await.unwrap(),
+        Some(Role::Member)
     );
-    // Main and the admins' permissions come out as the workspace ones.
+    assert!(member.email_verified_at.is_some());
     assert_eq!(
         tx.get_workspace(WorkspaceId::MAIN).await.unwrap().name,
         "Main"
     );
-    let admin = tx
-        .groups()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|g| g.key == "admin")
-        .unwrap();
-    for permission in [
-        Permission::CreateWorkspace,
-        Permission::EditWorkspace,
-        Permission::DeleteWorkspace,
-        Permission::AccessAllWorkspaces,
-    ] {
-        assert!(admin.permissions.contains(&permission), "{permission}");
-    }
 
     // The sealed values open with the old key: the 2-step secret and the
     // ecosystem secret.

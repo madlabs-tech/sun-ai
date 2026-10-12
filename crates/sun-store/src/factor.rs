@@ -214,10 +214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let mut tx = store.begin().await.unwrap();
-        let ann = tx
-            .invite_member("ann@x.io", "ann", false, &[])
-            .await
-            .unwrap();
+        let ann = tx.invite_member("ann@x.io", "ann", false).await.unwrap();
         let bob = MemberId::generate();
         assert!(!ann.has_two_step);
 
