@@ -330,6 +330,7 @@ async fn readiness_needs_no_login() {
 
 /// Loads an old session: replays its history, then answers the load.
 const FAKE_OPENCODE_LOAD: &str = r#"#!/bin/sh
+[ "$1" = --version ] && exit 0
 read -r line; printf '%s\n' "$line" > "$SUN_OUT.stdin"
 echo '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
 read -r line; printf '%s\n' "$line" >> "$SUN_OUT.stdin"
