@@ -925,6 +925,19 @@ pub(crate) async fn create_runtime(
     let workspace = named_workspace(&caller, query.workspace.as_deref())?;
     let name = std::mem::take(&mut input.name);
     let runtime = runtime_of(&api, &caller, workspace, name, &mut input)?;
+    // Runtimes someone added count, not the rows a chain name made.
+    let stored = api.engine.runtimes(Some(workspace)).await?;
+    let added = stored
+        .iter()
+        .filter(|r| r.source != RuntimeSource::ByoRuntime);
+    within_plan(&api, workspace, Quota::Runtimes, "runtimes", added.count()).await?;
+    if runtime.source == RuntimeSource::ByoKey {
+        let keys = stored
+            .iter()
+            .filter(|r| r.source == RuntimeSource::ByoKey)
+            .count();
+        within_plan(&api, workspace, Quota::ByoKeys, "BYO keys", keys).await?;
+    }
     if !api
         .engine
         .save_runtime(&runtime, input.model.as_deref(), false, &caller.actor())
