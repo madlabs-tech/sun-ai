@@ -1,14 +1,15 @@
-//! Member routes: members, the deployment owner flag, and the audit log.
-//! Each is gated in `routes.rs` by its own permission (`view_members`,
-//! `edit_members`, `manage_settings` for the audit log). Workspace roles
-//! and invitations get their own routes in M2.
+//! Member routes: the deployment's accounts, the deployment owner flag
+//! and the audit log (deployment owners, gated in `routes.rs`), and a
+//! workspace's members: list (any member), change a role and remove
+//! (`edit_members` there, never above your own role), leave (yourself).
+//! A workspace keeps an owner: the change that would leave it none is 409.
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::{Extension, Json};
-use serde::Deserialize;
-use sun_core::model::{AuditEntry, Member, Permission, Role};
-use sun_core::{AuditId, MemberId, WorkspaceId};
+use serde::{Deserialize, Serialize};
+use sun_core::model::{AuditEntry, Member, Permission, Role, WorkspaceMember};
+use sun_core::{AuditId, Error, MemberId, Timestamp, WorkspaceId};
 
 use super::Caller;
 use crate::Api;
@@ -27,18 +28,6 @@ pub(crate) async fn list_members(State(api): State<Api>) -> ApiResult<Json<Vec<M
 fn parse<T: std::str::FromStr>(id: &str, what: &str) -> ApiResult<T> {
     id.parse()
         .map_err(|_| ApiError::invalid(format!("`{id}` is not a valid {what} id.")))
-}
-
-/// 403 unless an owner does it, when `target` is an owner.
-pub(super) fn only_owner_touches_owner(caller: &Caller, target_is_owner: bool) -> ApiResult<()> {
-    if !caller.is_owner && target_is_owner {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "Only an owner can invite, re-invite or remove an owner.",
-        ));
-    }
-    Ok(())
 }
 
 /// The privilege-escalation guard for putting someone in `workspace` as
@@ -64,36 +53,6 @@ pub(super) fn may_grant(
     ))
 }
 
-/// The take-over guard for every route that acts on another member's
-/// account (password, reset code, 2-step reset, deactivate / activate,
-/// role): only an owner touches an owner, and anyone else's target may
-/// hold no permission and see no workspace the caller doesn't (403
-/// otherwise). Returns the member; unknown ids are 404.
-pub(super) async fn may_act_on(api: &Api, caller: &Caller, id: MemberId) -> ApiResult<Member> {
-    let target = api.engine.member_access(id).await?;
-    only_owner_touches_owner(caller, target.member.is_owner)?;
-    if caller.is_owner {
-        return Ok(target.member);
-    }
-    let stronger = target.permissions.iter().any(|p| !caller.can(*p));
-    let wider = match &target.workspaces {
-        None => caller.workspaces.is_some(),
-        Some(workspaces) => workspaces.iter().any(|b| !caller.sees(*b)),
-    };
-    if stronger || wider {
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            format!(
-                "{} can do more or see more workspaces than you, so you can't change their \
-                 account. Ask a deployment owner.",
-                target.member.username
-            ),
-        ));
-    }
-    Ok(target.member)
-}
-
 /// The admin routes that reset how someone signs in (password, reset code,
 /// 2-step reset) refuse the caller's own account, owners included (403):
 /// `/me/*` asks for the current password and the second step, they don't.
@@ -114,8 +73,8 @@ pub(crate) struct SetOwner {
     is_owner: bool,
 }
 
-/// `PUT /api/v1/members/{id}/owner {is_owner}` (owner): grants or takes
-/// back owner, audited. Nobody changes their own.
+/// `PUT /api/v1/members/{id}/owner {is_owner}` (deployment owner): makes
+/// them a deployment owner or not, audited. Nobody changes their own.
 pub(crate) async fn set_owner(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -151,4 +110,147 @@ pub(crate) async fn audit_log(
         .map_err(|_| ApiError::invalid("`before` is not a valid audit id."))?;
     let limit = page.limit.unwrap_or(100).clamp(1, MAX_AUDIT_PAGE);
     Ok(Json(api.engine.audit_log(before, limit).await?))
+}
+
+/// One member of a workspace, with who they are.
+#[derive(Serialize)]
+pub(crate) struct WorkspaceMemberView {
+    member_id: MemberId,
+    workspace_id: WorkspaceId,
+    role: Role,
+    username: String,
+    email: Option<String>,
+    /// When they joined the workspace.
+    created_at: Timestamp,
+}
+
+/// `GET /api/v1/workspaces/{id}/members` (any member of it): oldest first.
+pub(crate) async fn workspace_members(
+    State(api): State<Api>,
+    Path(workspace): Path<String>,
+) -> ApiResult<Json<Vec<WorkspaceMemberView>>> {
+    let workspace: WorkspaceId = parse(&workspace, "workspace")?;
+    let people = api.engine.members().await?;
+    let views = api
+        .engine
+        .workspace_members(workspace)
+        .await?
+        .into_iter()
+        .filter_map(|m| {
+            let person = people.iter().find(|p| p.id == m.member_id)?;
+            Some(WorkspaceMemberView {
+                member_id: m.member_id,
+                workspace_id: m.workspace_id,
+                role: m.role,
+                username: person.username.clone(),
+                email: person.email.clone(),
+                created_at: m.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(views))
+}
+
+/// A change that would leave a workspace no owner is a conflict (409).
+fn last_owner(error: Error) -> ApiError {
+    match error {
+        Error::InvalidInput(message) => ApiError::conflict(message),
+        e => e.into(),
+    }
+}
+
+/// 403 unless the caller may change `target`'s membership in `workspace`
+/// (to `role`, when given): a deployment owner may; anyone else's role
+/// there must be `target`'s current role or above it, and `role` or above
+/// it (so only an owner touches or makes an owner). 404 when `target`
+/// isn't a member.
+async fn may_change(
+    api: &Api,
+    caller: &Caller,
+    workspace: WorkspaceId,
+    target: MemberId,
+    role: Option<Role>,
+) -> ApiResult<()> {
+    let current = api
+        .engine
+        .workspace_members(workspace)
+        .await?
+        .into_iter()
+        .find(|m| m.member_id == target)
+        .map(|m| m.role)
+        .ok_or_else(|| Error::NotFound(format!("workspace member {target}")))?;
+    if caller.is_owner {
+        return Ok(());
+    }
+    let mine = caller.role_in(workspace);
+    let covers = |r: Role| mine.is_some_and(|m| m.covers(r));
+    if covers(current) && role.is_none_or(covers) {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        StatusCode::FORBIDDEN,
+        "forbidden",
+        "You can't change the role of someone above you, or give a role above your own.",
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetRole {
+    role: Role,
+}
+
+/// `PUT /api/v1/workspaces/{id}/members/{member} {role}` (`edit_members`
+/// there): their new role, audited. Never above the caller's own role, nor
+/// on someone above it; 409 when it would leave the workspace no owner.
+pub(crate) async fn set_workspace_role(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path((workspace, member)): Path<(String, String)>,
+    Body(input): Body<SetRole>,
+) -> ApiResult<Json<WorkspaceMember>> {
+    let workspace: WorkspaceId = parse(&workspace, "workspace")?;
+    let member: MemberId = parse(&member, "member")?;
+    may_change(&api, &caller, workspace, member, Some(input.role)).await?;
+    let changed = api
+        .engine
+        .set_role(workspace, member, input.role, &caller.actor())
+        .await
+        .map_err(last_owner)?;
+    Ok(Json(changed))
+}
+
+/// `DELETE /api/v1/workspaces/{id}/members/{member}` (`edit_members`
+/// there): takes them out of the workspace, audited. Not someone above the
+/// caller's role; 409 for its last owner.
+pub(crate) async fn remove_workspace_member(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path((workspace, member)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let workspace: WorkspaceId = parse(&workspace, "workspace")?;
+    let member: MemberId = parse(&member, "member")?;
+    may_change(&api, &caller, workspace, member, None).await?;
+    api.engine
+        .remove_member(workspace, member, &caller.actor())
+        .await
+        .map_err(last_owner)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/v1/workspaces/{id}/leave` (any member of it): the caller
+/// leaves, audited; 409 for its last owner (make someone else owner first).
+pub(crate) async fn leave_workspace(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path(workspace): Path<String>,
+) -> ApiResult<StatusCode> {
+    let workspace: WorkspaceId = parse(&workspace, "workspace")?;
+    let Some(id) = caller.member_id else {
+        return Err(ApiError::invalid(
+            "The kernel token holder is in no workspace to leave.",
+        ));
+    };
+    api.engine.leave(workspace, id).await.map_err(last_owner)?;
+    Ok(StatusCode::NO_CONTENT)
 }
