@@ -378,8 +378,9 @@ impl Host {
         if self.sessions().contains_key(&id) {
             return Err(Error::InvalidInput(format!("session {id} already exists")));
         }
-        // Installed skills go into the CLI's native folder.
-        sun_runtime::skills::sync(&self.config.skills_dir, &spec.worktree, adapter_id)?;
+        // The workspace's installed skills go into the CLI's native folder.
+        let skills = spec.skills.as_deref();
+        sun_runtime::skills::sync(&self.config.skills_dir, &spec.worktree, adapter_id, skills)?;
         let tmp = self.config.data_dir.join("tmp").join(id.to_string());
         std::fs::create_dir_all(&tmp).map_err(buffer::io(&tmp))?;
         spec.env

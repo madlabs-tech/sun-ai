@@ -18,9 +18,12 @@ use common::{TOKEN, kernel};
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
+use sun_store::SettingRepo;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower::ServiceExt;
+
+const MAIN: &str = "00000000000000000000000001";
 
 async fn call(app: &Router, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
     let request = Request::builder()
@@ -72,8 +75,9 @@ async fn mcp_servers_are_tested_on_add_and_granted_per_task() {
     let docs = json!({"name": "docs", "transport":
         {"type": "url", "url": url, "bearer_secret": "DOCS_TOKEN"}});
 
-    // The bearer secret is not stored yet: plain 422 naming it. Until MCP
-    // servers are per workspace their secrets are Main's.
+    // The bearer secret is not stored yet: plain 422 naming it. A server is
+    // registered in a workspace (Main when a deployment owner names none)
+    // and connects with that workspace's secrets.
     let (status, error) = call(app, "POST", "/api/v1/mcp_servers", Some(docs.clone())).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
     assert!(error.to_string().contains("DOCS_TOKEN"), "{error}");
@@ -87,6 +91,8 @@ async fn mcp_servers_are_tested_on_add_and_granted_per_task() {
     assert_eq!(status, StatusCode::OK);
     let (status, added) = call(app, "POST", "/api/v1/mcp_servers", Some(docs.clone())).await;
     assert_eq!(status, StatusCode::CREATED, "{added}");
+    let mut docs = docs;
+    docs["workspace_id"] = json!(MAIN);
     assert_eq!(added["server"], docs);
     assert_eq!(
         added["tools"],
@@ -221,6 +227,66 @@ async fn mcp_servers_are_tested_on_add_and_granted_per_task() {
         status(dial("docs", &token).await.unwrap_err()),
         StatusCode::UNAUTHORIZED
     );
+
+    // Another workspace's server: registered with its own secrets, listed
+    // only there, never grantable to a Main task, and the relay refuses it to
+    // a Main run even when a grant names it.
+    let (_, ops) = call(
+        app,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({"name": "Ops"})),
+    )
+    .await;
+    let ops = ops["id"].as_str().unwrap().to_owned();
+    let ops_docs = json!({"name": "ops-docs", "transport":
+        {"type": "url", "url": url, "bearer_secret": "DOCS_TOKEN"}});
+    let in_ops = format!("/api/v1/mcp_servers?workspace={ops}");
+    let (code, error) = call(app, "POST", &in_ops, Some(ops_docs.clone())).await;
+    assert_eq!(
+        code,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "Main's secret isn't Ops': {error}"
+    );
+    let secret = format!("/api/v1/secrets/workspace/{ops}/DOCS_TOKEN");
+    let (code, _) = call(app, "PUT", &secret, Some(json!({"value": "t0ken-value"}))).await;
+    assert_eq!(code, StatusCode::OK);
+    let (code, added) = call(app, "POST", &in_ops, Some(ops_docs)).await;
+    assert_eq!(code, StatusCode::CREATED, "{added}");
+    assert_eq!(added["server"]["workspace_id"], json!(ops));
+    let names = |servers: Value| -> Vec<String> {
+        let servers = servers.as_array().unwrap().iter();
+        servers
+            .map(|s| s["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (_, listed) = call(app, "GET", &in_ops, None).await;
+    assert_eq!(names(listed), ["ops-docs"]);
+    let in_main = format!("/api/v1/mcp_servers?workspace={MAIN}");
+    let (_, listed) = call(app, "GET", &in_main, None).await;
+    assert_eq!(names(listed), ["docs"]);
+    let (code, _) = call(app, "GET", "/api/v1/mcp_servers/ops-docs/tools", None).await;
+    assert_eq!(code, StatusCode::NOT_FOUND, "not Main's");
+    let (code, _) = call(app, "PUT", &path, Some(json!([{"server": "ops-docs"}]))).await;
+    assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+    let token = k
+        .mcp
+        .issue(run_id, sun_core::StepKey::new("approve").unwrap());
+    let mut tx = k.store.begin().await.unwrap();
+    let key = format!("task_mcp.{}", task["id"].as_str().unwrap());
+    tx.put_setting(&key, &json!([{"server": "ops-docs"}]))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        status(dial("ops-docs", &token).await.unwrap_err()),
+        StatusCode::NOT_FOUND
+    );
+    let (code, _) = call(app, "DELETE", "/api/v1/mcp_servers/ops-docs", None).await;
+    assert_eq!(code, StatusCode::NOT_FOUND, "not Main's");
+    let gone = format!("/api/v1/mcp_servers/ops-docs?workspace={ops}");
+    let (code, _) = call(app, "DELETE", &gone, None).await;
+    assert_eq!(code, StatusCode::NO_CONTENT);
 
     let (status, _) = call(app, "DELETE", "/api/v1/mcp_servers/docs", None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);

@@ -17,7 +17,7 @@ use sun_core::entitlement::{Entitlement, EntitlementProvider, EntitlementStatus,
 use sun_core::model::Host;
 use sun_core::{HostId, ModCall, ModLink, Result, WorkspaceId};
 use sun_engine::{Engine, EngineConfig, Principal, Queue, QueueConfig, Slot, WatchdogConfig};
-use sun_store::{HostRepo, Store};
+use sun_store::{HostRepo, Store, WorkspaceItem, WorkspaceRepo};
 
 const WORKFLOW: &str = "
 name: review-by-a-person
@@ -64,9 +64,13 @@ async fn main() {
         id: host,
         name: "box".into(),
         capabilities: json!({}),
+        enrolled_by: None,
     })
     .await
     .unwrap();
+    tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(host))
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
 
     let hosts = HostHub::default();

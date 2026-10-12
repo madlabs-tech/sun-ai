@@ -329,6 +329,7 @@ async fn runs_a_session_and_never_loses_an_event_across_reconnects() {
 
     // A session may only run in a prepared worktree.
     let spec = |worktree: &Path| SessionSpec {
+        skills: None,
         session_id: SessionId::generate(),
         run_id: RunId::generate(),
         step_key: StepKey::new("implement").unwrap(),
@@ -705,6 +706,7 @@ async fn vm_env_lingers_for_gates_then_is_deleted() {
 /// returns the VM name.
 async fn vm_step(kernel: &mut Kernel, worktree: &Path) -> String {
     let spec = SessionSpec {
+        skills: None,
         session_id: SessionId::generate(),
         run_id: RunId::generate(),
         step_key: StepKey::new("implement").unwrap(),

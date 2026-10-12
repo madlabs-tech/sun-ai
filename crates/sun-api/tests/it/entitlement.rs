@@ -166,3 +166,55 @@ async fn agents_runtimes_and_byo_keys_count_per_workspace() {
         "byo keys: {value}"
     );
 }
+
+/// Hosts count per workspace: the ones attached to it, at token mint and at
+/// attach; Main's plan is its own.
+#[tokio::test]
+async fn hosts_count_the_hosts_attached_to_the_workspace() {
+    use sun_store::HostRepo;
+    let k = common::kernel().await;
+    let app = &k.app;
+    let ops = workspace(app, common::TOKEN, "Ops").await;
+    let limits = Limits {
+        hosts: Some(1),
+        ..Limits::default()
+    };
+    common::plan(&k, ops, limits);
+    let limited = |value: &Value| value["error"]["code"] == "plan_limit";
+    let tokens = format!("/api/v1/workspaces/{ops}/hosts/tokens");
+    let (status, value) = call(app, "POST", &tokens, None).await;
+    assert_eq!(status, StatusCode::CREATED, "none attached yet: {value}");
+    let attach = |host: sun_core::HostId| format!("/api/v1/workspaces/{ops}/hosts/{host}");
+    let (status, _) = call(app, "PUT", &attach(k.host), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, value) = call(app, "POST", &tokens, None).await;
+    assert!(
+        status == StatusCode::FORBIDDEN && limited(&value),
+        "{value}"
+    );
+    let other = sun_core::model::Host {
+        id: sun_core::HostId::generate(),
+        name: "spare".into(),
+        capabilities: json!({}),
+        enrolled_by: None,
+    };
+    let mut tx = k.store.begin().await.unwrap();
+    tx.insert_host(&other).await.unwrap();
+    tx.commit().await.unwrap();
+    let (status, value) = call(app, "PUT", &attach(other.id), None).await;
+    assert!(
+        status == StatusCode::FORBIDDEN && limited(&value),
+        "{value}"
+    );
+    let (status, _) = call(app, "PUT", &attach(k.host), None).await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "already attached: no new count"
+    );
+    let main = format!("/api/v1/workspaces/{MAIN}/hosts/tokens");
+    let (status, _) = call(app, "POST", &main, None).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let attached = k.store.read().await.unwrap().hosts_in(ops).await.unwrap();
+    assert_eq!(attached.len(), 1);
+}

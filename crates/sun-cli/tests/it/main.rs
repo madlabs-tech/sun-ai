@@ -3,6 +3,7 @@
 mod cloud;
 mod contract;
 mod git_apps;
+mod host_join;
 mod installer;
 mod mcp_proxy;
 mod runtime;

@@ -54,7 +54,7 @@ use sun_core::{
 use sun_store::{
     ArtifactRepo, AuditRepo, ContextRepo, EventLog, HostRepo, NewEvent, NoteRepo, OutboxRepo,
     RepoRepo, RunRepo, RuntimeRepo, SecretRepo, SessionRepo, SettingRepo, Store, TaskRepo, Tx,
-    WorkflowRepo,
+    WorkflowRepo, WorkspaceRepo,
 };
 use sun_workflow::{Step as StepDef, StepKind, Workflow};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -2327,15 +2327,18 @@ impl Executor {
                 let envelope_parts = context.envelope_parts.clone();
                 let mcp_config = context.mcp_config.clone();
                 delivered = Some(context);
-                let permission_mode = self
-                    .store
-                    .read()
-                    .await?
+                let mut read = self.store.read().await?;
+                let permission_mode = read
                     .permission_modes()
                     .await?
                     .into_iter()
                     .find_map(|(a, mode)| (a == *adapter).then_some(mode));
+                // Only the skills the run's workspace installed.
+                let workspace = read.workspace_of_run(step.run_id).await?;
+                let skills = Some(read.catalog_installs(workspace).await?);
+                drop(read);
                 let spec = SessionSpec {
+                    skills,
                     permission_mode,
                     session_id,
                     run_id: step.run_id,
@@ -3059,6 +3062,7 @@ mod byo_key_tests {
 
     fn spec(run_id: RunId, key_secret: Option<&str>) -> SessionSpec {
         SessionSpec {
+            skills: None,
             session_id: SessionId::generate(),
             run_id,
             step_key: StepKey::new("implement").unwrap(),

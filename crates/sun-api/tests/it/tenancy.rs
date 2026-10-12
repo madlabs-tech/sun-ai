@@ -7,6 +7,7 @@
 
 use crate::common;
 
+use std::future::IntoFuture;
 use std::time::Duration;
 
 use axum::Router;
@@ -833,6 +834,13 @@ async fn tenancy_the_role_in_each_workspace_decides() {
         .await;
         assert_eq!(status, want_rename, "{workspace}: rename");
     }
+    // B's runs need a host there: she didn't enrol the kernel's (404), a
+    // deployment owner attaches it.
+    let host = format!("/api/v1/workspaces/{b}/hosts/{}", k.host);
+    let (status, _) = call(app, Some(&bea), "PUT", &host, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(app, Some(TOKEN), "PUT", &host, None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
     // A task in B runs and waits for `role:admin`: as B's owner she approves.
     let body = json!({ "source_yaml": flow("gate"), "workspace_id": b });
     let (_, workflow) = call(app, Some(&bea), "POST", "/api/v1/workflows", Some(body)).await;
@@ -883,7 +891,7 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
         ("GET", "/settings/security", None),
         ("PUT", "/settings/security", Some(json!({}))),
         ("GET", "/audit", None),
-        ("POST", "/hosts/tokens", None),
+        ("GET", "/kernel", None),
         (
             "POST",
             "/mods/x/install",
@@ -906,14 +914,12 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
             Some(json!({ "monthly_usd": null })),
         ),
         ("PUT", "/settings/embeddings", Some(json!({}))),
-        ("POST", "/catalog/x/install", Some(json!({}))),
-        ("DELETE", "/catalog/x", None),
+        ("PUT", "/catalog/tdd/dismissed", None),
         (
             "PUT",
             "/runtimes/claude-code/policy",
             Some(json!({ "permission_mode": "default" })),
         ),
-        ("POST", "/mcp_servers", Some(json!({}))),
         ("GET", "/account/invoices", None),
     ];
     for (method, path, body) in &routes {
@@ -1104,4 +1110,150 @@ async fn tenancy_agents_runtimes_secrets_and_memory_are_per_workspace() {
     assert_eq!(all.as_array().unwrap().len(), 2);
     let (_, all) = call(app, Some(TOKEN), "GET", "/api/v1/memory", None).await;
     assert_eq!(all.as_array().unwrap().len(), 1);
+}
+
+/// Hosts, catalog installs and MCP servers are each workspace's: a token
+/// minted in a workspace enrols a host attached to it, members list only
+/// their workspace's, another workspace's answer 404, and changes need
+/// `manage_runtimes` (hosts) or `manage_plugins` (catalog, MCP) there.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenancy_hosts_catalog_and_mcp_servers_are_per_workspace() {
+    let k = kernel().await;
+    let app = &k.app;
+    let (ada, ada_id) = member(&k.store, "ada", &[]).await;
+    let (bob, _) = member(&k.store, "bob", &[]).await;
+    let a = workspace(app, &ada, "Alpha").await;
+    let b = workspace(app, &bob, "Beta").await;
+    let (vic, _) = member(&k.store, "vic", &[(a.parse().unwrap(), Role::Viewer)]).await;
+
+    // An enrolment token is minted in Alpha, by `manage_runtimes` there.
+    let tokens = |w: &str| format!("/api/v1/workspaces/{w}/hosts/tokens");
+    let (status, _) = call(app, Some(&vic), "POST", &tokens(&a), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(app, Some(&bob), "POST", &tokens(&a), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, issued) = call(app, Some(&ada), "POST", &tokens(&a), None).await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/host", listener.local_addr().unwrap());
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let dir = tempfile::tempdir().unwrap();
+    let token = issued["token"].as_str().unwrap();
+    let joined = sun_host::enroll(&url, token, "ada-mac", dir.path())
+        .await
+        .unwrap();
+    let host = joined.host_id.to_string();
+
+    // Alpha lists it (with who enrolled it); Beta doesn't, nor the kernel's.
+    let hosts = |w: &str| format!("/api/v1/hosts?workspace={w}");
+    let ids = |listed: &Value| -> Vec<String> {
+        let listed = listed.as_array().unwrap().iter();
+        listed
+            .map(|h| h["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let (status, listed) = call(app, Some(&vic), "GET", &hosts(&a), None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    assert_eq!(ids(&listed), std::slice::from_ref(&host));
+    assert_eq!(listed[0]["workspace_ids"], json!([a]));
+    assert_eq!(listed[0]["enrolled_by"], json!(ada_id));
+    let (_, listed) = call(app, Some(&bob), "GET", &hosts(&b), None).await;
+    assert_eq!(listed, json!([]));
+    let (status, _) = call(app, Some(&bob), "GET", &hosts(&a), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(app, Some(&bob), "GET", "/api/v1/hosts", None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "a member names one"
+    );
+    let (_, every) = call(app, Some(TOKEN), "GET", "/api/v1/hosts", None).await;
+    assert_eq!(every.as_array().unwrap().len(), 2, "owners see every host");
+
+    // Attach: who enrolled it, to another workspace of theirs; not Bob, who
+    // didn't, and not into a workspace Ada isn't in.
+    let attach = |w: &str| format!("/api/v1/workspaces/{w}/hosts/{host}");
+    let (status, _) = call(app, Some(&bob), "PUT", &attach(&b), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(app, Some(&ada), "PUT", &attach(&b), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let kernel_host = format!("/api/v1/workspaces/{a}/hosts/{}", k.host);
+    let (status, _) = call(app, Some(&ada), "PUT", &kernel_host, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "she didn't enrol the kernel's"
+    );
+    let g = workspace(app, &ada, "Gamma").await;
+    let (status, _) = call(app, Some(&ada), "PUT", &attach(&g), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, listed) = call(app, Some(&ada), "GET", &hosts(&a), None).await;
+    let mut both = [a.clone(), g.clone()];
+    both.sort();
+    assert_eq!(listed[0]["workspace_ids"], json!(both));
+    let (_, listed) = call(app, Some(&vic), "GET", &hosts(&a), None).await;
+    assert_eq!(
+        listed[0]["workspace_ids"],
+        json!([a]),
+        "only the ones vic sees"
+    );
+    let (status, _) = call(app, Some(&vic), "DELETE", &attach(&a), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(app, Some(&ada), "DELETE", &attach(&g), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(app, Some(&ada), "DELETE", &attach(&g), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Catalog installs: Alpha's own; the files stay while Beta has it.
+    let install = |w: &str| format!("/api/v1/catalog/tdd/install?workspace={w}");
+    let uninstall = |w: &str| format!("/api/v1/catalog/tdd?workspace={w}");
+    let catalog = |w: &str| format!("/api/v1/catalog?workspace={w}");
+    let installed = |view: &Value| -> bool {
+        let entries = view["entries"].as_array().unwrap();
+        let tdd = entries.iter().find(|e| e["id"] == "tdd").unwrap();
+        !tdd["installed"].is_null()
+    };
+    let (status, _) = call(app, Some(&vic), "POST", &install(&a), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(app, Some(&bob), "POST", &install(&a), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(app, Some(&ada), "POST", &install(&a), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, view) = call(app, Some(&vic), "GET", &catalog(&a), None).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert!(installed(&view));
+    let (_, view) = call(app, Some(&bob), "GET", &catalog(&b), None).await;
+    assert!(!installed(&view), "Alpha's install isn't Beta's");
+    let (status, _) = call(app, Some(&bob), "GET", &catalog(&a), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let probe = format!("/api/v1/catalog?workspace={a}&repo=/tmp");
+    let (status, _) = call(app, Some(&ada), "GET", &probe, None).await;
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no folder probes on the kernel's machine"
+    );
+    let (status, _) = call(app, Some(&bob), "POST", &install(&b), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(app, Some(&ada), "DELETE", &uninstall(&a), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call(app, Some(&ada), "DELETE", &uninstall(&a), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, view) = call(app, Some(&bob), "GET", &catalog(&b), None).await;
+    assert!(installed(&view), "Beta keeps its install");
+    let (_, view) = call(app, Some(&ada), "GET", &catalog(&a), None).await;
+    assert!(!installed(&view));
+
+    // MCP servers: listed per workspace; registering needs `manage_plugins`.
+    let servers = |w: &str| format!("/api/v1/mcp_servers?workspace={w}");
+    let (status, listed) = call(app, Some(&vic), "GET", &servers(&a), None).await;
+    assert_eq!((status, listed), (StatusCode::OK, json!([])));
+    let (status, _) = call(app, Some(&bob), "GET", &servers(&a), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let server =
+        json!({"name": "docs", "transport": {"type": "url", "url": "https://x.example/mcp"}});
+    let (status, _) = call(app, Some(&vic), "POST", &servers(&a), Some(server.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(app, Some(&bob), "POST", &servers(&a), Some(server)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

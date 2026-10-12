@@ -25,7 +25,9 @@ use sun_engine::{
     AgentFields, Engine, EngineConfig, NewTask, Queue, QueueConfig, Slot, WatchdogConfig,
     WorkflowPick,
 };
-use sun_store::{HostRepo, RunRepo, RuntimeRepo, Store, TaskRepo, WorkflowRepo};
+use sun_store::{
+    HostRepo, RunRepo, RuntimeRepo, Store, TaskRepo, WorkflowRepo, WorkspaceItem, WorkspaceRepo,
+};
 use tokio::sync::mpsc;
 
 /// Agent sessions that say they work, then wait until `finish` is set to
@@ -36,6 +38,8 @@ struct HoldHost {
     envelopes: Mutex<Vec<String>>,
     /// The adapter each session started with.
     adapters: Mutex<Vec<String>>,
+    /// The skills each session got.
+    skills: Mutex<Vec<Option<Vec<String>>>>,
     steers: Mutex<Vec<String>>,
     alive: Arc<Mutex<HashSet<SessionId>>>,
     sink: Arc<Mutex<Option<mpsc::UnboundedSender<HostEvent>>>>,
@@ -65,6 +69,7 @@ impl HostLink for HoldHost {
     ) -> Result<SessionHandle> {
         let id = spec.session_id;
         self.adapters.lock().unwrap().push(adapter.to_owned());
+        self.skills.lock().unwrap().push(spec.skills.clone());
         self.envelopes.lock().unwrap().push(spec.envelope);
         self.alive.lock().unwrap().insert(id);
         let (finish, alive, sink) = (self.finish.clone(), self.alive.clone(), self.sink.clone());
@@ -152,8 +157,11 @@ impl ModLink for NoMods {
 
 struct Kernel {
     engine: Engine,
+    queue: Queue,
     store: Store,
     host: Arc<HoldHost>,
+    /// The one enrolled host, attached to Main.
+    host_id: HostId,
     _dir: tempfile::TempDir,
 }
 
@@ -166,8 +174,12 @@ async fn kernel() -> Kernel {
         id: host_id,
         name: "box".into(),
         capabilities: json!({}),
+        enrolled_by: None,
     };
     tx.insert_host(&row).await.unwrap();
+    tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(host_id))
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     let host = Arc::new(HoldHost::default());
     let config = EngineConfig {
@@ -184,11 +196,13 @@ async fn kernel() -> Kernel {
         host: host_id,
     };
     let caps = Default::default();
-    Queue::start(store.clone(), engine.clone(), QueueConfig { slot, caps });
+    let (queue, _) = Queue::start(store.clone(), engine.clone(), QueueConfig { slot, caps });
     Kernel {
         engine,
+        queue,
         store,
         host,
+        host_id,
         _dir: dir,
     }
 }
@@ -771,12 +785,35 @@ async fn agents_and_their_runtimes_stay_in_their_workspace() {
     let err = k.engine.assign_task(main_task, to, None).await.unwrap_err();
     assert!(matches!(err, Error::NotFound(_)), "{err:?}");
 
-    // Ops' task runs on Ops' own `fake`.
+    // Ops' task waits while Ops has no host (the only one is Main's), then
+    // runs on Ops' own `fake` with only Ops' skills.
+    let mut tx = k.store.begin().await.unwrap();
+    tx.link(WorkspaceId::MAIN, WorkspaceItem::CatalogInstall("tdd"))
+        .await
+        .unwrap();
+    tx.link(ops, WorkspaceItem::CatalogInstall("playwright"))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
     new.workspace_id = Some(ops);
     new.status = TaskStatus::Todo;
     let task = k.engine.create_task(new).await.unwrap().id;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let queued = k.runs(task).await.pop().unwrap().status;
+    assert_eq!(queued, RunStatus::Queued, "not on Main's host");
+    assert!(k.host.adapters.lock().unwrap().is_empty());
+    let host = WorkspaceItem::Host(k.host_id);
+    k.engine
+        .import_to_workspace(ops, host, "user:me")
+        .await
+        .unwrap();
+    k.queue.wake();
     k.working(task).await;
     assert_eq!(*k.host.adapters.lock().unwrap(), ["fake"]);
+    assert_eq!(
+        *k.host.skills.lock().unwrap(),
+        [Some(vec!["playwright".to_owned()])]
+    );
     let run = k.runs(task).await.pop().unwrap();
     let mut read = k.store.read().await.unwrap();
     let step = read.steps_of_run(run.id).await.unwrap().pop().unwrap();

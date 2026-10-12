@@ -114,6 +114,10 @@ pub struct SessionSpec {
     /// `anthropic` and Codex `openai_compatible` ([`ByoKeyKind::runs_on`]).
     #[serde(default)]
     pub byo_key: Option<ByoKey>,
+    /// The skills of the store the session gets: those the run's workspace
+    /// installed. `None` (an older kernel): every skill in the store.
+    #[serde(default)]
+    pub skills: Option<Vec<String>>,
 }
 
 /// What every agent is told, whatever the CLI: one

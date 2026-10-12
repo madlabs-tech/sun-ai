@@ -2,14 +2,17 @@
 //! (`workflow.workspace_id`), tasks (`task.workspace_id`) and repos
 //! (`repo.workspace_id`). Knowledge sources are linked to workspaces
 //! (`workspace_knowledge_source`): a source imported into another workspace
-//! is the same row. Issue prefixes are unique in the ecosystem, ignoring case.
+//! is the same row. So are hosts (`workspace_host`: a workspace's runs go only
+//! to its hosts) and catalog installs (`workspace_catalog_install`: the files
+//! are shared on disk). Issue prefixes are unique in the ecosystem, ignoring
+//! case.
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use sqlx::sqlite::{SqliteConnection, SqliteRow};
 use sun_core::model::Workspace;
-use sun_core::{MemberId, WorkspaceId};
+use sun_core::{HostId, MemberId, WorkspaceId};
 
 use crate::repo::{json, parse, parse_ts, ts};
 use crate::{BlobStore, Result, StoreError, Tx};
@@ -53,6 +56,8 @@ pub trait WorkspaceRepo {
     async fn workspaces_of(&mut self, item: WorkspaceItem<'_>) -> Result<Vec<WorkspaceId>>;
     /// The workspaces `member` is a member of (`workspace_member`), by id.
     async fn workspaces_of_member(&mut self, member: MemberId) -> Result<Vec<WorkspaceId>>;
+    /// The catalog ids `workspace` installed, sorted.
+    async fn catalog_installs(&mut self, workspace: WorkspaceId) -> Result<Vec<String>>;
 }
 
 /// An item a workspace links to (shared rows, unlike its own repos).
@@ -60,6 +65,10 @@ pub trait WorkspaceRepo {
 pub enum WorkspaceItem<'a> {
     /// A `knowledge_source` row.
     KnowledgeSource(&'a str),
+    /// A `host` row: the workspace's runs may go to it.
+    Host(HostId),
+    /// A catalog entry's install (its files are shared on disk).
+    CatalogInstall(&'a str),
 }
 
 impl WorkspaceItem<'_> {
@@ -68,6 +77,10 @@ impl WorkspaceItem<'_> {
         match self {
             WorkspaceItem::KnowledgeSource(id) => {
                 ("workspace_knowledge_source", "source_id", id.to_owned())
+            }
+            WorkspaceItem::Host(id) => ("workspace_host", "host_id", id.to_string()),
+            WorkspaceItem::CatalogInstall(id) => {
+                ("workspace_catalog_install", "catalog_id", id.to_owned())
             }
         }
     }
@@ -302,6 +315,16 @@ impl WorkspaceRepo for Tx {
         .await?;
         ids.into_iter().map(parse).collect()
     }
+
+    async fn catalog_installs(&mut self, workspace: WorkspaceId) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT catalog_id FROM workspace_catalog_install WHERE workspace_id = $1 \
+             ORDER BY catalog_id",
+        )
+        .bind(workspace.to_string())
+        .fetch_all(self.conn())
+        .await?)
+    }
 }
 
 /// `InvalidInput` when a workspace other than `except` is named `name` (any case).
@@ -428,6 +451,34 @@ pub(crate) async fn move_old_logos(conn: &mut SqliteConnection, blobs: &BlobStor
         if let Some((kind, bytes)) = logo {
             put_logo(&mut *conn, parse(id)?, kind, &bytes).await?;
         }
+    }
+    Ok(())
+}
+
+/// Data step of `20261103090200_catalog_install_main` ([`crate::DATA_STEPS`]):
+/// every catalog install from before (`<data>/catalog/installed.json`, id ->
+/// version) is Main's. No file: nothing was installed.
+pub(crate) async fn seed_main_catalog_installs(
+    conn: &mut SqliteConnection,
+    data_dir: &std::path::Path,
+) -> Result<()> {
+    let path = data_dir.join("catalog").join("installed.json");
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let installed: std::collections::BTreeMap<String, String> = serde_json::from_slice(&raw)
+        .map_err(|e| sun_core::Error::InvalidInput(format!("{}: {e}", path.display())))?;
+    for id in installed.keys() {
+        sqlx::query(
+            "INSERT INTO workspace_catalog_install (workspace_id, catalog_id) VALUES ($1, $2) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(WorkspaceId::MAIN.to_string())
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
     }
     Ok(())
 }

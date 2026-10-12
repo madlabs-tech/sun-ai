@@ -211,6 +211,9 @@ pub(crate) async fn side(k: &Kernel, gitlab: &str, id: &str, name: &str) -> Side
         Some(json!({ "name": "Web" })),
     )
     .await;
+    // The kernel's host takes the workspace's runs.
+    let host = format!("/api/v1/workspaces/{id}/hosts/{}", k.host);
+    ok(app, "PUT", &host, None).await;
     let plain = ok(
         app,
         "POST",
@@ -582,18 +585,15 @@ async fn filters_and_bodies_never_reach_into_a_hidden_workspace() {
 
 /// The deployment-wide reads, until they are per workspace: 403 for every
 /// member who isn't a deployment owner (even naming their own workspace),
-/// and open to a deployment owner. Agents, runtimes and memory are per
-/// workspace: open to every member naming it.
+/// and open to a deployment owner. Agents, runtimes, memory, hosts, catalog
+/// installs and MCP servers are per workspace: open to every member naming it.
 #[tokio::test(flavor = "multi_thread")]
 async fn deployment_wide_reads_are_for_deployment_owners_only() {
     let k = kernel().await;
     let app = &k.app;
     let reads = [
-        "/hosts",
         "/kernel",
         "/mods",
-        "/catalog",
-        "/mcp_servers",
         "/usage",
         "/settings/on_limit",
         "/settings/budget",
@@ -627,7 +627,7 @@ async fn deployment_wide_reads_are_for_deployment_owners_only() {
     ] {
         tokens.push(member_token(&k.store, name, role).await);
     }
-    for path in reads.iter().chain(&by_id) {
+    for path in &reads {
         let named = if path.contains('?') { '&' } else { '?' };
         let path = format!("/api/v1{path}{named}workspace={MAIN}");
         for token in &tokens {
@@ -640,7 +640,15 @@ async fn deployment_wide_reads_are_for_deployment_owners_only() {
         let (status, value) = call_as(app, common::TOKEN, "GET", &path, None).await;
         assert_eq!(status, StatusCode::OK, "{path}: {value}");
     }
-    for path in ["/runtimes", "/agents", "/memory", "/memory/metrics"] {
+    for path in [
+        "/runtimes",
+        "/agents",
+        "/memory",
+        "/memory/metrics",
+        "/hosts",
+        "/catalog",
+        "/mcp_servers",
+    ] {
         let path = format!("/api/v1{path}?workspace={MAIN}");
         for token in &tokens {
             let (status, value) = call_as(app, token, "GET", &path, None).await;
@@ -655,9 +663,13 @@ async fn deployment_wide_reads_are_for_deployment_owners_only() {
         "its own answer: no such runtime"
     );
     for path in by_id {
-        let path = format!("/api/v1{path}");
-        let (status, value) = call_as(app, common::TOKEN, "GET", &path, None).await;
-        assert_ne!(status, StatusCode::FORBIDDEN, "{path}: {value}");
-        assert_ne!(status, StatusCode::UNAUTHORIZED, "{path}: {value}");
+        let mut callers = vec![(common::TOKEN, format!("/api/v1{path}"))];
+        let mine = format!("/api/v1{path}?workspace={MAIN}");
+        callers.extend(tokens.iter().map(|t| (t.as_str(), mine.clone())));
+        for (token, path) in callers {
+            let (status, value) = call_as(app, token, "GET", &path, None).await;
+            assert_ne!(status, StatusCode::FORBIDDEN, "{path}: {value}");
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "{path}: {value}");
+        }
     }
 }

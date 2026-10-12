@@ -285,7 +285,7 @@ impl HostLink for Online {
 }
 
 async fn add_host(store: &Store, name: &str, logged_in: bool) -> HostId {
-    use sun_store::HostRepo;
+    use sun_store::{HostRepo, WorkspaceRepo};
     let host = sun_core::model::Host {
         id: HostId::generate(),
         name: name.into(),
@@ -294,9 +294,16 @@ async fn add_host(store: &Store, name: &str, logged_in: bool) -> HostId {
             "runtimes": [{"adapter": "fake", "readiness":
                 {"installed": true, "version": "1", "logged_in": logged_in, "detail": null}}],
         }),
+        enrolled_by: None,
     };
     let mut tx = store.begin().await.unwrap();
     tx.insert_host(&host).await.unwrap();
+    tx.link(
+        sun_core::WorkspaceId::MAIN,
+        sun_store::WorkspaceItem::Host(host.id),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     host.id
 }

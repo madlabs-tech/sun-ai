@@ -275,10 +275,10 @@ const HOSTS: Host[] = [
     android_emulator: tool(false, [], 'No Android system image: run `sdkmanager "system-images;android-35;google_apis;arm64-v8a"`'),
     maestro: tool(true),
   } }, sessions: 2, session_stats: [live(142, 'fix', 612, 38.5, 1460), live(147, 'draft', 248, 4.2, 312)],
-  disk: [{ task_id: fake_id('T', 142), bytes: 1.4 * 1024 * MIB }, { task_id: fake_id('T', 147), bytes: 3 * MIB }], last_seen_at: today('10:12') },
+  disk: [{ task_id: fake_id('T', 142), bytes: 1.4 * 1024 * MIB }, { task_id: fake_id('T', 147), bytes: 3 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
   { id: fake_id('H', 2), name: 'build-box-01', status: 'online', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['opencode', 'codex'], devices: ['Pixel_8_API_35'] }, sessions: 1,
-    session_stats: [live(139, 'fix', 410, 0.4, 7380)], disk: [{ task_id: fake_id('T', 139), bytes: 820 * MIB }], last_seen_at: today('10:12') },
-  { id: fake_id('H', 3), name: 'rina-laptop', status: 'offline', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['claude-code'], devices: [] }, sessions: 0, last_seen_at: today('06:40') },
+    session_stats: [live(139, 'fix', 410, 0.4, 7380)], disk: [{ task_id: fake_id('T', 139), bytes: 820 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
+  { id: fake_id('H', 3), name: 'rina-laptop', status: 'offline', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['claude-code'], devices: [] }, sessions: 0, last_seen_at: today('06:40'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
 ];
 
 const MODS: ModInstall[] = [
@@ -1199,8 +1199,17 @@ function route(method: string, full_path: string, body: unknown): unknown {
       const cost = tasks.find((x) => x.run?.id === params.get('run_id'))?.run?.cost_usd ?? 0;
       return { input_tokens: Math.round(cost * 120_000), output_tokens: Math.round(cost * 9_000), cost_usd: cost };
     }
-    case 'POST /hosts/:id': // /hosts/tokens
+    // --- Per workspace (M5): a token enrols a host into its workspace; attach and detach.
+    case 'POST /workspaces/:id/hosts': // /workspaces/{id}/hosts/tokens
       return { token: 'sun_enrol_' + Math.random().toString(36).slice(2, 14), expires_at: new Date(Date.now() + 3600_000).toISOString() };
+    case 'PUT /workspaces/:id/hosts':
+    case 'DELETE /workspaces/:id/hosts': {
+      const host = HOSTS.find((h) => h.id === parts[3]);
+      if (!host) throw not_found('Host');
+      host.workspace_ids = host.workspace_ids.filter((w) => w !== parts[1]).concat(method === 'PUT' ? [parts[1]] : []);
+      return null;
+    }
+    // --- end per workspace (M5)
     case 'GET /runs/:id/events': {
       const after = Number(params.get('after') ?? 0);
       return clone((events.get(parts[1]) ?? []).filter((e) => e.seq > after));
@@ -1245,8 +1254,10 @@ function route(method: string, full_path: string, body: unknown): unknown {
       r.permission_mode = mode;
       return { id: r.id, permission_mode: mode };
     }
-    case 'GET /hosts':
-      return clone(HOSTS);
+    case 'GET /hosts': {
+      const workspace = params.get('workspace');
+      return clone(HOSTS.filter((h) => !workspace || h.workspace_ids.includes(workspace)));
+    }
     case 'GET /kernel':
       return { pid: 4242, rss_bytes: 46 * MIB, cpu_percent: 0.6, uptime_s: 93_600 };
     case 'POST /sessions/:id/kill': {

@@ -8,7 +8,8 @@
 //! next sync. Folders without that marker (e.g. committed in the repo) are
 //! never touched, and a skill the CLI already sees under that name is skipped.
 //! A skill the store's [`SKILL_RUNTIMES_FILE`] limits to other runtimes is
-//! not copied (and an earlier copy is removed).
+//! not copied (and an earlier copy is removed), nor is one the session's
+//! workspace didn't install (`SessionSpec::skills`).
 
 use std::fs;
 use std::path::Path;
@@ -25,10 +26,15 @@ pub fn native_dir(adapter_id: &str) -> Option<&'static str> {
     folders(adapter_id).first().copied()
 }
 
-/// Makes `<worktree>/<native_dir>` hold exactly the store's skills (plus any
-/// the repo brings itself). A runtime without a skills folder is a no-op, as
-/// is a missing store.
-pub fn sync(store: &Path, worktree: &Path, adapter_id: &str) -> Result<()> {
+/// Makes `<worktree>/<native_dir>` hold exactly the store's skills, only
+/// those named in `only` when given (plus any the repo brings itself). A
+/// runtime without a skills folder is a no-op, as is a missing store.
+pub fn sync(
+    store: &Path,
+    worktree: &Path,
+    adapter_id: &str,
+    only: Option<&[String]>,
+) -> Result<()> {
     let Some((native, others)) = folders(adapter_id).split_first() else {
         return Ok(());
     };
@@ -44,6 +50,7 @@ pub fn sync(store: &Path, worktree: &Path, adapter_id: &str) -> Result<()> {
             .filter(|e| e.path().join("SKILL.md").is_file())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|name| !name.starts_with('.'))
+            .filter(|name| only.is_none_or(|only| only.contains(name)))
             .filter(|name| {
                 limits
                     .get(name)
@@ -133,13 +140,13 @@ mod tests {
         fs::create_dir_all(work.join(".claude/skills/frontend-design")).unwrap();
         fs::write(work.join(".claude/skills/frontend-design/SKILL.md"), "repo").unwrap();
 
-        sync(store, work, "claude-code").unwrap();
+        sync(store, work, "claude-code", None).unwrap();
         assert!(work.join(".claude/skills/tdd/scripts/run.sh").is_file());
         assert!(ours(&work.join(".claude/skills/tdd")));
         let repo_owned = work.join(".claude/skills/frontend-design/SKILL.md");
         assert_eq!(fs::read_to_string(&repo_owned).unwrap(), "repo");
 
-        sync(store, work, "codex").unwrap();
+        sync(store, work, "codex", None).unwrap();
         assert!(work.join(".agents/skills/tdd/SKILL.md").is_file());
         assert!(
             work.join(".agents/skills/frontend-design/SKILL.md")
@@ -147,12 +154,12 @@ mod tests {
         );
 
         // OpenCode already sees both through `.claude`/`.agents`: no duplicates.
-        sync(store, work, "opencode").unwrap();
+        sync(store, work, "opencode", None).unwrap();
         assert!(!work.join(".opencode/skills").exists());
 
         // Uninstall: the next session drops Sun's copy, never the repo's.
         fs::remove_dir_all(store.join("tdd")).unwrap();
-        sync(store, work, "claude-code").unwrap();
+        sync(store, work, "claude-code", None).unwrap();
         assert!(!work.join(".claude/skills/tdd").exists());
         assert!(repo_owned.is_file());
 
@@ -160,15 +167,26 @@ mod tests {
         let limits = r#"{"frontend-design": ["claude-code"], "tdd": ["codex"]}"#;
         fs::write(store.join(SKILL_RUNTIMES_FILE), limits).unwrap();
         skill(store, "tdd");
-        sync(store, work, "claude-code").unwrap();
+        sync(store, work, "claude-code", None).unwrap();
         assert!(!work.join(".claude/skills/tdd").exists());
-        sync(store, work, "codex").unwrap();
+        sync(store, work, "codex", None).unwrap();
         assert!(work.join(".agents/skills/tdd").is_dir());
         assert!(!work.join(".agents/skills/frontend-design").exists());
         fs::remove_dir_all(store.join("tdd")).unwrap();
 
-        sync(store, work, "fake").unwrap();
-        sync(&store.join("missing"), work, "codex").unwrap();
+        // Only the workspace's installs: `frontend-design` is not one.
+        fs::remove_file(store.join(SKILL_RUNTIMES_FILE)).unwrap();
+        skill(store, "tdd");
+        let only = ["tdd".to_owned()];
+        sync(store, work, "codex", Some(&only)).unwrap();
+        assert!(work.join(".agents/skills/tdd").is_dir());
+        assert!(!work.join(".agents/skills/frontend-design").exists());
+        sync(store, work, "codex", Some(&[])).unwrap();
+        assert!(!work.join(".agents/skills/tdd").exists());
+        fs::remove_dir_all(store.join("tdd")).unwrap();
+
+        sync(store, work, "fake", None).unwrap();
+        sync(&store.join("missing"), work, "codex", None).unwrap();
         assert!(!work.join(".agents/skills/tdd").exists());
         assert_eq!(native_dir("opencode"), Some(".opencode/skills"));
     }

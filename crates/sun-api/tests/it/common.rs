@@ -14,7 +14,7 @@ use sun_core::entitlement::{Entitlement, EntitlementProvider, EntitlementStatus,
 use sun_core::model::{Host, Mail, SmtpSettings};
 use sun_core::{HostId, Mailer, Marketplace, ModCall, ModLink, Result, WorkspaceId};
 use sun_engine::{Caps, Engine, EngineConfig, Principal, Queue, QueueConfig, Slot, WatchdogConfig};
-use sun_store::{HostRepo, Store};
+use sun_store::{HostRepo, Store, WorkspaceItem, WorkspaceRepo};
 
 pub const TOKEN: &str = "test-token";
 pub const SECRET: &str = "host-secret";
@@ -162,9 +162,13 @@ async fn build(
         id: host,
         name: "box".into(),
         capabilities: json!({}),
+        enrolled_by: None,
     })
     .await
     .unwrap();
+    tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(host))
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
     let mcp = Arc::new(sun_context::McpSessions::new());
     let mails = Arc::new(FakeMailer::default());

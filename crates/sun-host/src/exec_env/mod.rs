@@ -322,6 +322,7 @@ pub(crate) mod testing {
         let worktree = dir.join("work/T");
         std::fs::write(worktree.join("fake-claude"), FAKE_CLAUDE).unwrap();
         let spec = SessionSpec {
+            skills: None,
             session_id,
             run_id: RunId::generate(),
             step_key: StepKey::new("implement").unwrap(),

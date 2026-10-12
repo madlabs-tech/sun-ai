@@ -12,13 +12,13 @@ use anyhow::{Context, Result};
 use sun_api::{Api, ApiConfig, HostHub};
 use sun_core::entitlement::EntitlementProvider;
 use sun_core::model::Host;
-use sun_core::{HostId, RuntimeAdapter};
+use sun_core::{HostId, RuntimeAdapter, WorkspaceId};
 use sun_engine::{
     Attention, Caps, DecisionClient, Engine, EngineConfig, McpSessions, Principal, Queue,
     QueueConfig, SessionMcp, Slot, WatchdogConfig,
 };
 use sun_mod::ModHost;
-use sun_store::{HostRepo, SecretRepo, SettingRepo, Store};
+use sun_store::{HostRepo, SecretRepo, SettingRepo, Store, WorkspaceItem, WorkspaceRepo};
 
 use crate::cloud::{CLOUD_TOKEN_ENV, CLOUD_URL_ENV};
 use crate::config::{Config, KernelSecrets, write_private};
@@ -512,9 +512,14 @@ async fn placement_host(
         id: HostId::generate(),
         name: "local".into(),
         capabilities: serde_json::json!({}),
+        enrolled_by: None,
     };
     let mut tx = store.begin().await?;
     tx.insert_host(&host).await?;
+    // ponytail: the kernel's own host takes Main's runs only; a deployment
+    // owner attaches it to other workspaces (`PUT /workspaces/{id}/hosts/{host}`).
+    tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(host.id))
+        .await?;
     tx.commit().await?;
     let credentials = sun_host::Credentials {
         kernel_url: String::new(),

@@ -4,11 +4,12 @@
 use std::fs;
 
 use sun_catalog::{Catalog, Kind, McpServer, detect_stacks};
+use sun_core::WorkspaceId;
 
 #[test]
 fn catalog_index_loads_and_every_skill_has_its_files() {
     let catalog = Catalog::open("/nonexistent").unwrap();
-    let list = catalog.list(&[], &[]).unwrap();
+    let list = catalog.list(&[], &[], None).unwrap();
     assert!(list.iter().any(|l| l.entry.kind == Kind::Skill));
     assert!(list.iter().any(|l| l.entry.kind == Kind::Mcp));
     for l in list.iter().filter(|l| l.entry.kind == Kind::Skill) {
@@ -57,9 +58,9 @@ fn catalog_detects_stacks_and_ranks_suggestions() {
     );
 
     let catalog = Catalog::open("/nonexistent").unwrap();
-    let list = catalog.list(&stacks, &[]).unwrap();
+    let list = catalog.list(&stacks, &[], None).unwrap();
     assert_eq!(list[0].matches, ["frontend"]);
-    let backend = catalog.list(&["go".into()], &[]).unwrap();
+    let backend = catalog.list(&["go".into()], &[], None).unwrap();
     assert!(backend.iter().all(|l| l.matches.is_empty()));
 
     let empty = tempfile::tempdir().unwrap();
@@ -70,7 +71,7 @@ fn catalog_detects_stacks_and_ranks_suggestions() {
 fn ranking_prefers_skills_used_by_workflows() {
     let catalog = Catalog::open("/nonexistent").unwrap();
     let ids = |stacks: &[String], in_use: &[String]| -> Vec<String> {
-        let list = catalog.list(stacks, in_use).unwrap();
+        let list = catalog.list(stacks, in_use, None).unwrap();
         list.into_iter().map(|l| l.entry.id).collect()
     };
     let frontend = ["frontend".to_owned()];
@@ -82,7 +83,7 @@ fn ranking_prefers_skills_used_by_workflows() {
         ids(&frontend, &used)[..3],
         ["diagnosing-bugs", "github", "frontend-design"]
     );
-    let list = catalog.list(&[], &used).unwrap();
+    let list = catalog.list(&[], &used, None).unwrap();
     assert!(list[0].in_workflows && list[1].in_workflows && !list[2].in_workflows);
 }
 
@@ -124,7 +125,7 @@ fn skill_md_needs_a_matching_name_and_a_description() {
 fn catalog_installs_only_what_is_picked_and_uninstalls() {
     let data = tempfile::tempdir().unwrap();
     let catalog = Catalog::open(data.path()).unwrap();
-    catalog.list(&["rust".into()], &[]).unwrap();
+    catalog.list(&["rust".into()], &[], None).unwrap();
     assert!(
         !data.path().join("skills").exists(),
         "listing installs nothing"
@@ -139,7 +140,7 @@ fn catalog_installs_only_what_is_picked_and_uninstalls() {
             .unwrap();
     assert_eq!(server["name"], "playwright");
 
-    let list = catalog.list(&[], &[]).unwrap();
+    let list = catalog.list(&[], &[], None).unwrap();
     let installed: Vec<_> = list
         .iter()
         .filter(|l| l.installed.is_some())
@@ -191,7 +192,7 @@ fn catalog_installs_only_what_is_picked_and_uninstalls() {
     catalog.install("tdd", Some(&codex)).unwrap();
     assert!(!skill.join("old.md").exists());
     let tdd = |c: &Catalog| {
-        c.list(&[], &[])
+        c.list(&[], &[], None)
             .unwrap()
             .into_iter()
             .find(|l| l.entry.id == "tdd")
@@ -257,7 +258,7 @@ fn custom_mcp_servers_share_the_registry_with_catalog_installs() {
     catalog.remove_mcp_server("github").unwrap();
     assert!(
         catalog
-            .list(&[], &[])
+            .list(&[], &[], None)
             .unwrap()
             .iter()
             .all(|l| l.installed.is_none())
@@ -265,4 +266,49 @@ fn custom_mcp_servers_share_the_registry_with_catalog_installs() {
     catalog.remove_mcp_server("docs").unwrap();
     assert!(catalog.mcp_servers().unwrap().is_empty());
     assert!(catalog.mcp_server("docs").is_err());
+}
+
+/// A workspace has the catalog installs it made and its own custom servers;
+/// one from before names no workspace and is Main's.
+#[test]
+fn mcp_servers_and_installs_are_per_workspace() {
+    let data = tempfile::tempdir().unwrap();
+    let catalog = Catalog::open(data.path()).unwrap();
+    catalog.install("github", None).unwrap();
+    catalog.install("tdd", None).unwrap();
+    let ops: WorkspaceId = "01K0000000000000000000000W".parse().unwrap();
+    let server = |name: &str, workspace: Option<WorkspaceId>| McpServer {
+        workspace_id: workspace,
+        ..serde_json::from_value(serde_json::json!(
+            {"name": name, "transport": {"type": "url", "url": "https://docs.example.com/mcp"}}
+        ))
+        .unwrap()
+    };
+    catalog.add_mcp_server(&server("old", None)).unwrap();
+    catalog
+        .add_mcp_server(&server("ops-docs", Some(ops)))
+        .unwrap();
+    let names = |workspace, installs: &[String]| -> Vec<String> {
+        let servers = catalog.mcp_servers_in(workspace, installs).unwrap();
+        servers.into_iter().map(|s| s.name).collect()
+    };
+    let main_installs = ["github".to_owned(), "tdd".to_owned()];
+    assert_eq!(names(WorkspaceId::MAIN, &main_installs), ["github", "old"]);
+    assert_eq!(names(ops, &[]), ["ops-docs"]);
+    assert_eq!(names(ops, &["github".to_owned()]), ["github", "ops-docs"]);
+    assert!(catalog.is_catalog_install("github").unwrap());
+    assert!(!catalog.is_catalog_install("ops-docs").unwrap());
+    let installed = |installs: Option<&[String]>| -> Vec<String> {
+        let list = catalog.list(&[], &[], installs).unwrap();
+        let mut ids: Vec<String> = list
+            .into_iter()
+            .filter(|l| l.installed.is_some())
+            .map(|l| l.entry.id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(installed(None), ["github", "tdd"]);
+    assert_eq!(installed(Some(&["tdd".to_owned()])), ["tdd"]);
+    assert!(installed(Some(&[])).is_empty());
 }

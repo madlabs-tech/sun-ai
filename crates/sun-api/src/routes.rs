@@ -140,6 +140,19 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/runtimes/{id}/readiness", get(crate::hosts::readiness))
         .route("/memory", get(crate::memory::list))
         .route("/memory/metrics", get(crate::memory::metrics))
+        // Its hosts, catalog installs and MCP servers.
+        .route("/hosts", get(crate::hosts::list_hosts))
+        .route("/catalog", get(crate::catalog::list))
+        .route("/catalog/{id}/files", get(crate::catalog::files))
+        .route(
+            "/catalog/{id}/repos/{repo_id}",
+            get(crate::catalog::repo_install),
+        )
+        .route("/mcp_servers", get(crate::catalog::mcp_servers))
+        .route(
+            "/mcp_servers/{name}/tools",
+            get(crate::catalog::mcp_server_tools),
+        )
         .merge(knowledge_routes())
         .route_layer(middleware::from_fn(auth::require_by_method));
     // A workspace's agents and runtimes, by the caller's role there.
@@ -151,8 +164,28 @@ pub(crate) fn router(api: Api) -> Router {
         )
         .route("/runtimes", post(crate::hosts::create_runtime))
         .route("/runtimes/{id}", put(crate::hosts::update_runtime))
+        .route(
+            "/workspaces/{id}/hosts/tokens",
+            post(crate::hosts::create_token),
+        )
+        .route(
+            "/workspaces/{id}/hosts/{host}",
+            put(crate::hosts::attach_host).delete(crate::hosts::detach_host),
+        )
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::ManageRuntimes,
+        ])));
+    // A workspace's catalog installs and MCP servers.
+    let plugin_manage = Router::new()
+        .route("/catalog/{id}/install", post(crate::catalog::install))
+        .route("/catalog/{id}", delete(crate::catalog::uninstall))
+        .route("/mcp_servers", post(crate::catalog::add_mcp_server))
+        .route(
+            "/mcp_servers/{name}",
+            delete(crate::catalog::remove_mcp_server),
+        )
+        .route_layer(middleware::from_fn(auth::require(&[
+            Permission::ManagePlugins,
         ])));
     // A workspace's secrets.
     let secret_manage = Router::new()
@@ -272,9 +305,10 @@ pub(crate) fn router(api: Api) -> Router {
             Permission::ManageSettings,
         ])));
     // The deployment itself, for deployment owners only: its accounts, mail,
-    // sign-in, security, audit, hosts, mods, ecosystem and mod secrets, the
-    // permission mode of each runtime adapter (every workspace's sessions
-    // of it), limits, catalog, usage, its account at Sun and marketplace.
+    // sign-in, security, audit, the kernel's own resources and sessions,
+    // mods, ecosystem and mod secrets, the permission mode of each runtime
+    // adapter (every workspace's sessions of it), limits, dismissed catalog
+    // suggestions, usage, its account at Sun and marketplace.
     let deployment = Router::new()
         .route(
             "/members",
@@ -289,9 +323,7 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/members/{id}/deactivate", post(auth::deactivate_member))
         .route("/members/{id}/activate", post(auth::activate_member))
         .route("/members/{id}/owner", put(auth::set_owner))
-        .route("/hosts", get(crate::hosts::list_hosts))
         .route("/kernel", get(crate::hosts::kernel))
-        .route("/hosts/tokens", post(crate::hosts::create_token))
         .route("/sessions/{id}/kill", post(crate::hosts::kill_session))
         .route("/marketplace/listings", get(crate::marketplace::listings))
         .route(
@@ -359,32 +391,13 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/decisions/export", get(crate::corrections::export))
         .route("/decisions/replay", post(crate::corrections::replay))
         .route(
-            "/mcp_servers",
-            get(crate::catalog::mcp_servers).post(crate::catalog::add_mcp_server),
-        )
-        .route(
-            "/mcp_servers/{name}/tools",
-            get(crate::catalog::mcp_server_tools),
-        )
-        .route(
-            "/mcp_servers/{name}",
-            delete(crate::catalog::remove_mcp_server),
-        )
-        .route(
             "/secrets/{kind}/{id}/{name}",
             put(crate::secrets::put).delete(crate::secrets::remove),
         )
         .route("/mods/{name}/install", post(install_mod))
         .route("/mods/{name}", put(update_mod).delete(remove_mod))
         .route("/mods", get(list_mods))
-        .route("/catalog", get(crate::catalog::list))
-        .route("/catalog/{id}/files", get(crate::catalog::files))
-        .route(
-            "/catalog/{id}/repos/{repo_id}",
-            get(crate::catalog::repo_install),
-        )
-        .route("/catalog/{id}/install", post(crate::catalog::install))
-        .route("/catalog/{id}", delete(crate::catalog::uninstall))
+        // Dismissed suggestions are the deployment's.
         .route(
             "/catalog/{id}/dismissed",
             put(crate::catalog::dismiss).delete(crate::catalog::restore),
@@ -410,6 +423,7 @@ pub(crate) fn router(api: Api) -> Router {
         .merge(invite)
         .merge(knowledge_import)
         .merge(runtime_manage)
+        .merge(plugin_manage)
         .merge(secret_manage)
         .merge(memory_manage)
         .merge(deployment)

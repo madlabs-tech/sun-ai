@@ -81,7 +81,7 @@ async fn view(
 
 /// One agent's view for `caller`, read now.
 async fn one(api: &Api, caller: &Caller, agent: Agent) -> ApiResult<AgentView> {
-    let online = online_adapters(api).await?;
+    let online = online_adapters(api, Some(agent.workspace_id)).await?;
     let counts = api.engine.agent_task_counts(|w| caller.sees(w)).await?;
     let count = counts.get(&agent.id).copied().unwrap_or(0);
     view(api, agent, &online, count).await
@@ -94,7 +94,7 @@ pub(crate) async fn list(
     Query(query): Query<InWorkspace>,
 ) -> ApiResult<Json<Vec<AgentView>>> {
     let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
-    let online = online_adapters(&api).await?;
+    let online = online_adapters(&api, workspace).await?;
     let counts = api.engine.agent_task_counts(|w| caller.sees(w)).await?;
     let mut out = Vec::new();
     for agent in api.engine.agents(workspace).await? {
