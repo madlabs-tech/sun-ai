@@ -79,8 +79,8 @@ ulid_id!(
     SecretId,
     /// `member.id` — a person who signed in.
     MemberId,
-    /// `user_group.id` — a named, editable set of permissions.
-    GroupId,
+    /// `workspace_invitation.id` — an invitation into a workspace.
+    InvitationId,
     /// `audit.id`
     AuditId,
     /// `member_factor.id` — a member's second sign-in step.
@@ -107,15 +107,6 @@ impl WorkspaceId {
     /// Workspace "Main": the migration creates it and puts every older workflow
     /// on it; workflows created without a workspace land here. It can't be deleted.
     pub const MAIN: Self = Self(Ulid(1));
-}
-
-impl GroupId {
-    /// Group "Viewer" (key `viewer`), seeded by the groups migration.
-    pub const VIEWER: Self = Self(Ulid(1));
-    /// Group "Member" (key `member`), seeded by the groups migration.
-    pub const MEMBER: Self = Self(Ulid(2));
-    /// Group "Admin" (key `admin`), seeded by the groups migration.
-    pub const ADMIN: Self = Self(Ulid(3));
 }
 
 /// A step's `id` from the workflow file (e.g. `implement`). Unique within a workflow.
