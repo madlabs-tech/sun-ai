@@ -210,6 +210,58 @@ async fn workspace_reads_forward_the_member_and_the_cloud_token() {
     assert_eq!(cloud.count(), before);
 }
 
+/// An owner of one workspace reaching for another one that exists: every
+/// subscription route, and a checkout naming it in the body, is 404 (as if
+/// it didn't exist), and the cloud never hears of it.
+#[tokio::test]
+async fn another_workspace_s_subscription_is_hidden_from_its_non_members() {
+    let cloud = Cloud::default();
+    let (k, app) = connected(&cloud).await;
+    let new = Some(json!({ "name": "Ops" }));
+    let (status, ops) = call_as(&app, TOKEN, "POST", "/api/v1/workspaces", new).await;
+    assert_eq!(status, StatusCode::CREATED, "{ops}");
+    let ops: WorkspaceId = ops["id"].as_str().unwrap().parse().unwrap();
+    let olga = member_token_in(&k.store, "olga", &[(ops, Role::Owner)]).await;
+
+    let purchase = json!({ "additional_seats": 1, "expected_current_seats": 1,
+        "expected_purchase_version": 0, "accepted_amount_minor": 1000, "currency": "usd",
+        "idempotency_key": "p-1" });
+    for (method, what, body) in [
+        ("GET", "summary", None),
+        ("GET", "prices", None),
+        ("POST", "portal-sessions", None),
+        ("POST", "cancel", None),
+        ("POST", "seats/reconcile", None),
+        (
+            "POST",
+            "seats/purchase-preview",
+            Some(json!({ "additional_seats": 1 })),
+        ),
+        ("POST", "seats/purchases", Some(purchase)),
+    ] {
+        let path = format!("/api/v1/subscriptions/{MAIN}/{what}");
+        let (status, value) = call_as(&app, &olga, method, &path, body).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{what}: {value}");
+    }
+    let checkout = json!({ "workspace_id": MAIN, "plan": "pro", "interval": "month",
+        "seats": 1, "idempotency_key": "c-1" });
+    let path = "/api/v1/subscriptions/checkout-sessions";
+    let (status, _) = call_as(&app, &olga, "POST", path, Some(checkout)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(cloud.count(), 0);
+
+    // Her own workspace's plan she reads and pays.
+    let own = format!("/api/v1/subscriptions/{ops}/summary");
+    let (status, _) = call_as(&app, &olga, "GET", &own, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let checkout = json!({ "workspace_id": ops, "plan": "pro", "interval": "month",
+        "seats": 1, "idempotency_key": "c-1" });
+    let (status, _) = call_as(&app, &olga, "POST", path, Some(checkout)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cloud.count(), 2);
+    assert_eq!(cloud.last().body["workspace_id"], ops.to_string());
+}
+
 #[tokio::test]
 async fn workspace_writes_are_for_owners_and_admins_with_allowlisted_bodies() {
     let cloud = Cloud::default();
