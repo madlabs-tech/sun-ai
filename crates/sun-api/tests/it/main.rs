@@ -13,6 +13,7 @@ mod isolation;
 mod knowledge;
 mod marketplace;
 mod mcp_servers;
+mod membership;
 mod mod_install;
 mod no_secret_leaks;
 mod preview;
