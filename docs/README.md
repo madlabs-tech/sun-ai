@@ -94,6 +94,13 @@ The crate table and the dependency rule are in the README, under [Architecture](
 - The kernel talks to it only when `SUN_CLOUD_URL` and `SUN_CLOUD_TOKEN` are set: credits (a short-lived gateway key per session), plan licenses and the marketplace.
 - Real cloud hosting and live payments are **unproven**.
 
+## Accounts and workspaces
+
+- A deployment has one pool of accounts (people sign up with an emailed code or through a sign-in provider; `SUN_ALLOW_SIGNUP=false` closes sign-up, `SUN_ALLOWED_EMAIL_DOMAINS` limits it) and any number of workspaces.
+- Whoever creates a workspace owns it. Owners and admins invite people into it by email with a role: `owner`, `admin`, `member` or `viewer`. A role grants a fixed set of permissions in that workspace only.
+- The first person to verify an email becomes the deployment owner; deployment owners manage the deployment-wide settings (sign-in providers, SMTP, hosts, mods, security) and can see every workspace. The kernel token from `kernel.json` acts as a deployment owner for the CLI.
+- Invitations are mailed through the deployment's SMTP settings. Without SMTP, the API and `sun user invite` return the invitation link so an admin can pass it on by hand.
+
 ## Process model
 
 - `sun serve` is the kernel. It owns all state.
