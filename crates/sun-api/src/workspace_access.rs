@@ -1,11 +1,13 @@
 //! Workspace access: the one guard that keeps a caller off workspaces they
-//! can't see. A workspace is visible to its members and to deployment owners
-//! ([`sun_engine::Access::workspaces`]).
+//! aren't a member of. A workspace is visible to its members and to
+//! deployment owners ([`sun_engine::Access::workspaces`]).
 //!
 //! [`guard`] (a **Chain of Responsibility** link after `authenticate`) finds
 //! every workspace-scoped thing a request names, resolves where it lives with
 //! [`sun_engine::Engine::reach`], and answers 404, never 403, when any of it
-//! is hidden. It reads:
+//! is hidden or doesn't exist. It stores where the named things live
+//! ([`NamedWorkspaces`]) for [`crate::auth::require`], which checks the
+//! caller's role in each. It reads:
 //! - path ids: `/workspaces/{id}`, `/tasks/{id}/*` (a key there is already
 //!   the task's id: [`crate::tasks::key_paths`]), `/runs/{id}/*`,
 //!   `/workflows/{id}/*`, `/knowledge/sources/{id}/*`, `/knowledge/docs/{id}`,
@@ -29,7 +31,7 @@ use sun_core::{
     ArtifactId, Error, EvalRunId, EvalSetId, OutboxId, ProjectId, RepoId, RunId, TaskId,
     VcsConnectionId, WorkflowId, WorkspaceId,
 };
-use sun_engine::{OnWorkspace, Pick, WorkspaceItem};
+use sun_engine::{OnWorkspace, Pick, Reach, WorkspaceItem};
 
 use crate::Api;
 use crate::auth::Caller;
@@ -56,6 +58,13 @@ struct NamedQuery {
     /// `GET /usage?run_id=`.
     run_id: Option<String>,
 }
+
+/// Where the things a request names live, for a caller who isn't a
+/// deployment owner: one entry per thing, each the workspaces (the caller's
+/// own) any of which may grant the permission (a knowledge source on several
+/// workspaces); an eval over many tasks adds one entry per workspace.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NamedWorkspaces(pub(crate) Vec<Vec<WorkspaceId>>);
 
 /// A workspace-scoped thing named by a request.
 enum Named {
@@ -101,9 +110,10 @@ pub(crate) fn hidden() -> ApiError {
     ApiError::new(StatusCode::NOT_FOUND, "not_found", "Not found.")
 }
 
-/// Middleware: 404 when the request names anything on a workspace the caller
-/// can't see. Malformed or unknown ids pass through to the handler's own
-/// 422 or 404.
+/// Middleware: 404 when the request names anything that doesn't exist or is
+/// on a workspace the caller can't see, else stores [`NamedWorkspaces`].
+/// Malformed ids name nothing (the handler answers 422). Deployment owners
+/// pass without a lookup.
 pub(crate) async fn guard(
     State(api): State<Api>,
     request: Request,
@@ -174,11 +184,26 @@ pub(crate) async fn guard(
     let Some(caller) = parts.extensions.get::<Caller>() else {
         return Err(ApiError::unauthorized());
     };
+    let mut scope = NamedWorkspaces::default();
     for thing in &named {
-        if !visible(&api, caller, thing.on_workspace()).await? {
+        let reach = match api.engine.reach(thing.on_workspace()).await {
+            Ok(reach) => reach,
+            Err(Error::NotFound(_)) => return Err(hidden()),
+            Err(e) => return Err(e.into()),
+        };
+        if !reach.visible(|b| caller.sees(b)) {
             return Err(hidden());
         }
+        match reach {
+            Reach::Any(workspaces) => {
+                scope
+                    .0
+                    .push(workspaces.into_iter().filter(|b| caller.sees(*b)).collect());
+            }
+            Reach::All(workspaces) => scope.0.extend(workspaces.into_iter().map(|b| vec![b])),
+        }
     }
+    parts.extensions.insert(scope);
     Ok(next.run(Request::from_parts(parts, body)).await)
 }
 

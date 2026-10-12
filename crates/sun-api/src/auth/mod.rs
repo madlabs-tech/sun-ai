@@ -28,14 +28,17 @@
 //!   [`Member`], whose workspace roles are read on every request so a change applies
 //!   at once. Sessions are stored (as `sha256(token)` only), so a restart
 //!   signs nobody out; they last [`SESSION_TTL`]. Sign-out deletes the row.
-//! - Every authenticated request carries a [`Caller`] with its role's
-//!   [`Permission`]s in Main (every one for an owner), read per request.
-//!   [`require_by_method`] lets anyone read (`GET`) and writing needs `run`;
-//!   [`require`] guards routes by permission (members and
-//!   settings each have their own); [`require_owner`] guards the owner flag.
-//!   Approvals pass the caller's [`Principal`] (username and role keys)
-//!   to the engine.
+//! - Every authenticated request carries a [`Caller`] with their role in
+//!   each workspace (a deployment owner may do everything), read per
+//!   request. [`crate::workspace_access::guard`] stores the workspaces a
+//!   request names ([`NamedWorkspaces`]); [`require_by_method`] lets anyone
+//!   read (`GET`) and writing needs `run` there; [`require`] guards routes
+//!   by permission in each named workspace (a route naming none is for
+//!   deployment owners); [`require_owner`] guards the deployment's own
+//!   settings and accounts. Approvals pass the caller's [`Principal`] in
+//!   the task's workspace (username and role keys) to the engine.
 
+mod invitations;
 mod members;
 mod passkey;
 mod sso;
@@ -56,15 +59,24 @@ use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sun_core::model::{FIRST_ADMIN_EMAIL, Permission, Role, WorkspaceMember, permissions_of};
+use sun_core::model::{FIRST_ADMIN_EMAIL, Permission, Role, WorkspaceMember, roles_of};
 use sun_core::{Error, MemberId, WorkspaceId};
 use sun_engine::{Access, Principal};
 
 use crate::Api;
 use crate::error::{ApiError, ApiResult};
 use crate::hosts::random_hex;
+use crate::workspace_access::NamedWorkspaces;
 
-pub(crate) use members::{audit_log, list_members, set_owner};
+pub(crate) use invitations::{
+    accept as accept_invitation, create as create_invitation, decline as decline_invitation,
+    list as list_invitations, lookup as look_up_invitation, mine as my_invitations,
+    revoke as revoke_invitation,
+};
+pub(crate) use members::{
+    audit_log, leave_workspace, list_members, remove_workspace_member, set_owner,
+    set_workspace_role, workspace_members,
+};
 pub(crate) use passkey::{confirm as confirm_my_passkey, start as start_my_passkey};
 pub use sso::PresetUrls;
 pub(crate) use sso::{
@@ -80,7 +92,7 @@ pub(crate) use two_step::{
 };
 pub(crate) use users::{
     activate_member, deactivate_member, get_smtp, invite_member, put_smtp, reinvite_member,
-    set_member_password, set_my_email, set_my_password, test_smtp,
+    set_member_password, set_my_email, set_my_password, signup, test_smtp,
 };
 
 const COOKIE_NAME: &str = "sun_token";
@@ -90,15 +102,13 @@ const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 /// Who is calling, resolved by [`authenticate`].
 #[derive(Debug, Clone)]
 pub(crate) struct Caller {
-    /// Matched against approval `who:`.
+    /// Who they are for approvals (`who: user:<name>`); [`Caller::principal_in`]
+    /// adds their role keys in a workspace.
     pub(crate) principal: Principal,
-    /// Owners have every permission and alone grant or touch owners.
+    /// Deployment owners may do everything, everywhere.
     pub(crate) is_owner: bool,
     /// The member's workspaces and role in each (none for the token holder).
     pub(crate) memberships: Vec<WorkspaceMember>,
-    /// Their role's permissions in Main (see [`Caller::member`]); all of
-    /// them for an owner.
-    pub(crate) permissions: Vec<Permission>,
     /// The workspaces they see (their memberships); `None` for every
     /// workspace (deployment owners). Enforced by [`crate::workspace_access::guard`].
     pub(crate) workspaces: Option<Vec<WorkspaceId>>,
@@ -106,6 +116,8 @@ pub(crate) struct Caller {
     /// any provider) or `local` (a password or code).
     via: &'static str,
     email: Option<String>,
+    /// They proved their email (a code or SSO); the token holder always.
+    email_verified: bool,
     /// The member row, `None` for the token holder.
     pub(crate) member_id: Option<MemberId>,
     /// Signed in with an invite code: only `PUT /me/password` until done.
@@ -156,57 +168,31 @@ impl Caller {
             .map(|m| m.role)
     }
 
-    /// True when the caller's role in Main grants `permission` (see [`Caller::member`]).
-    pub(crate) fn can(&self, permission: Permission) -> bool {
-        self.permissions.contains(&permission)
+    /// True when they may `permission` in `workspace`: a deployment owner
+    /// always, anyone else when their role there grants it.
+    pub(crate) fn can_in(&self, workspace: WorkspaceId, permission: Permission) -> bool {
+        self.is_owner
+            || self
+                .role_in(workspace)
+                .is_some_and(|r| r.permissions().contains(&permission))
     }
 
-    /// 403 unless the caller has `permission`.
-    pub(crate) fn need(&self, permission: Permission) -> ApiResult<()> {
-        if self.can(permission) {
-            return Ok(());
+    /// Who they are for an approval on a task in `workspace`: their
+    /// username and the keys of their role there and those below it (every
+    /// key for a deployment owner; the token holder's configured principal).
+    pub(crate) fn principal_in(&self, workspace: WorkspaceId) -> Principal {
+        if self.member_id.is_none() {
+            return self.principal.clone();
         }
-        let what = match permission {
-            Permission::Run => "run tasks",
-            Permission::Approve => "approve",
-            Permission::ManagePlugins => "manage plugins",
-            Permission::ManageExtensions => "manage extensions",
-            Permission::ManageSecrets => "manage secrets",
-            Permission::ManageRuntimes => "manage runtimes",
-            Permission::ManageSettings => "manage settings",
-            Permission::InviteMembers => "invite members",
-            Permission::CreateMembers => "add members with a password",
-            Permission::ViewMembers => "see members",
-            Permission::EditMembers => "edit members",
-            Permission::DeactivateMembers => "deactivate members",
-            Permission::EditWorkspace => "edit workspaces",
-            Permission::DeleteWorkspace => "delete workspaces",
-            Permission::CreateWorkflow => "create workflows",
-            Permission::EditWorkflow => "edit workflows",
-        };
-        Err(forbidden(format!(
-            "Your role can't {what}. Ask a workspace admin for a role with the \
-             `{permission}` permission."
-        )))
-    }
-
-    /// 403 unless the caller has one of `permissions`.
-    fn need_any(&self, permissions: &[Permission]) -> ApiResult<()> {
-        match permissions.iter().find(|p| self.can(**p)) {
-            Some(_) => Ok(()),
-            None => self.need(permissions[0]),
+        let roles: Vec<Role> = self.role_in(workspace).into_iter().collect();
+        Principal {
+            user: self.principal.user.clone(),
+            roles: roles_of(self.is_owner, &roles),
         }
     }
 
-    /// A signed-in member, with their role's permissions in Main; `sso`
-    /// when an SSO sign-in started the session.
-    // ponytail: the role in Main stands for every workspace (permissions
-    // and approval roles) until M2 checks the role in the workspace a route
-    // names; a union would let owning a new workspace grant admin in Main.
+    /// A signed-in member; `sso` when an SSO sign-in started the session.
     fn member(access: Access, sso: bool) -> Self {
-        let principal = access.principal_in(WorkspaceId::MAIN);
-        let main: Vec<Role> = access.role_in(WorkspaceId::MAIN).into_iter().collect();
-        let permissions = permissions_of(access.member.is_owner, &main);
         let Access {
             member,
             memberships,
@@ -215,19 +201,48 @@ impl Caller {
         } = access;
         let via = if sso { "sso" } else { "local" };
         Self {
-            principal,
-            permissions,
+            principal: Principal {
+                user: member.username.clone(),
+                roles: roles_of(member.is_owner, &[]),
+            },
             workspaces,
             is_owner: member.is_owner,
             memberships,
             via,
             needs_email: needs_email(member.email.as_deref()),
+            email_verified: member.email_verified_at.is_some(),
             email: member.email,
             member_id: Some(member.id),
             must_set_password: member.must_set_password,
             must_enroll_two_step: false,
         }
     }
+}
+
+/// The 403 for a role without `permission`.
+fn denied(permission: Permission) -> ApiError {
+    let what = match permission {
+        Permission::Run => "run tasks",
+        Permission::Approve => "approve",
+        Permission::ManagePlugins => "manage plugins",
+        Permission::ManageExtensions => "manage extensions",
+        Permission::ManageSecrets => "manage secrets",
+        Permission::ManageRuntimes => "manage runtimes",
+        Permission::ManageSettings => "manage settings",
+        Permission::InviteMembers => "invite members",
+        Permission::CreateMembers => "add members with a password",
+        Permission::ViewMembers => "see members",
+        Permission::EditMembers => "edit members",
+        Permission::DeactivateMembers => "deactivate members",
+        Permission::EditWorkspace => "edit workspaces",
+        Permission::DeleteWorkspace => "delete workspaces",
+        Permission::CreateWorkflow => "create workflows",
+        Permission::EditWorkflow => "edit workflows",
+    };
+    forbidden(format!(
+        "Your role in this workspace can't {what}. Ask a workspace admin for a role with the \
+         `{permission}` permission."
+    ))
 }
 
 /// Sign-in state shared by every handler: pending SSO logins and the
@@ -239,6 +254,8 @@ pub(crate) struct AuthState {
     limiter: Limiter,
     /// `PUT /me/password` tries per `(member id, client IP)`.
     current_password: Limiter,
+    /// `POST /signup` tries per email.
+    signup: Limiter,
 }
 
 /// Tries per `(key, client IP)` within [`LIMIT_WINDOW`]. Each try reserves
@@ -332,10 +349,10 @@ async fn resolve(api: &Api, headers: &HeaderMap) -> ApiResult<Option<Caller>> {
         principal: api.config.principal.clone(),
         is_owner: true,
         memberships: Vec::new(),
-        permissions: Permission::ALL.to_vec(),
         workspaces: None,
         via: "token",
         email: None,
+        email_verified: true,
         member_id: None,
         must_set_password: false,
         needs_email: false,
@@ -412,31 +429,67 @@ fn gate(caller: &Caller, method: &Method, path: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// Anyone may read; writing needs the `run` permission.
+/// Anyone may read (the guard already hid other workspaces); writing needs
+/// the `run` permission in every workspace the request names.
 pub(crate) async fn require_by_method(request: Request, next: Next) -> ApiResult<Response> {
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
-        caller(&request)?.need(Permission::Run)?;
+        allowed(&request, &[Permission::Run])?;
     }
     Ok(next.run(request).await)
 }
 
-/// Middleware: only callers with one of `permissions`, for every method.
+/// Middleware: one of `permissions` in every workspace the request names
+/// ([`NamedWorkspaces`]), for every method. A request naming none is for
+/// deployment owners only.
 pub(crate) fn require(
     permissions: &'static [Permission],
 ) -> impl Fn(Request, Next) -> std::pin::Pin<Box<dyn Future<Output = ApiResult<Response>> + Send>> + Clone
 {
     move |request, next| {
         Box::pin(async move {
-            caller(&request)?.need_any(permissions)?;
+            allowed(&request, permissions)?;
             Ok(next.run(request).await)
         })
     }
 }
 
-/// Only owners: who else is an owner.
+/// 403 unless the caller is a deployment owner or holds one of
+/// `permissions` in each workspace (group) the request names.
+fn allowed(request: &Request, permissions: &[Permission]) -> ApiResult<()> {
+    let caller = caller(request)?;
+    if caller.is_owner {
+        return Ok(());
+    }
+    let named = request
+        .extensions()
+        .get::<NamedWorkspaces>()
+        .map_or(&[][..], |n| n.0.as_slice());
+    if named.is_empty() {
+        return Err(owner_only());
+    }
+    for any in named {
+        let may = any
+            .iter()
+            .any(|w| permissions.iter().any(|p| caller.can_in(*w, *p)));
+        if !may {
+            return Err(denied(
+                permissions.first().copied().unwrap_or(Permission::Run),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn owner_only() -> ApiError {
+    forbidden("Only a deployment owner can do this.".into())
+}
+
+/// Only deployment owners: the deployment's own settings (SMTP, sign-in,
+/// security, audit, hosts, mods, ecosystem secrets, runtimes, limits,
+/// catalog) and every account on it.
 pub(crate) async fn require_owner(request: Request, next: Next) -> ApiResult<Response> {
     if !caller(&request)?.is_owner {
-        return Err(forbidden("Only an owner can do this.".into()));
+        return Err(owner_only());
     }
     Ok(next.run(request).await)
 }
@@ -531,11 +584,12 @@ pub(crate) async fn sign_out(State(api): State<Api>, headers: HeaderMap) -> ApiR
     Ok((StatusCode::NO_CONTENT, [(SET_COOKIE, cookie)]).into_response())
 }
 
-/// `GET /api/v1/me`: who the caller is, their workspace roles and effective
-/// permissions, whether they are an owner, the role view they picked, and
+/// `GET /api/v1/me`: who the caller is, their workspaces and role in each
+/// (`memberships`), whether they are a deployment owner (`is_owner`) and
+/// proved their email (`email_verified`), the role view they picked, and
 /// what they must do first (`needs_email`, `must_set_password`,
-/// `must_enroll_two_step`). For the
-/// token holder, `needs_email` asks onboarding for the owner's email.
+/// `must_enroll_two_step`). For the token holder, `needs_email` asks
+/// onboarding for the owner's email.
 pub(crate) async fn me(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -546,10 +600,10 @@ pub(crate) async fn me(
         "user": caller.principal.user,
         "is_owner": caller.is_owner,
         "memberships": caller.memberships,
-        "permissions": caller.permissions,
         "via": caller.via,
         "needs_email": needs_email(email.as_deref()),
         "email": email,
+        "email_verified": caller.email_verified,
         "must_set_password": caller.must_set_password,
         "must_enroll_two_step": caller.must_enroll_two_step,
         "view_role": view_role,
