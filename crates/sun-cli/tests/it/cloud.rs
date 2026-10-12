@@ -103,6 +103,7 @@ impl HostLink for Hosts {
 
 fn spec() -> SessionSpec {
     SessionSpec {
+        skills: None,
         session_id: SessionId::generate(),
         run_id: RunId::generate(),
         step_key: StepKey::new("implement").unwrap(),
@@ -179,6 +180,7 @@ async fn assigned(store: &Store, run_id: RunId, attempt: u32, name: &str) -> Ses
         id: HostId::generate(),
         name: "box".into(),
         capabilities: serde_json::json!({}),
+        enrolled_by: None,
     };
     tx.insert_host(&host).await.unwrap();
     tx.insert_session(spec.session_id, host.id).await.unwrap();

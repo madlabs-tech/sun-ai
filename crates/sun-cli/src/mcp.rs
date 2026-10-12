@@ -157,7 +157,11 @@ pub async fn server_command(data_dir: &Path, command: McpServerCommand) -> Resul
                 },
                 (None, None) => bail!("give --url or --command"),
             };
-            let server = McpServer { name, transport };
+            let server = McpServer {
+                name,
+                transport,
+                workspace_id: None,
+            };
             server.validate()?;
             let secrets = secret_values(data_dir, &server).await?;
             let tools = catalog.register_mcp_server(&server, secrets).await?;
@@ -195,14 +199,16 @@ fn print_tools(tools: &[McpTool]) {
     }
 }
 
-/// The ecosystem secrets `server` needs, from the store.
+/// The secrets `server` needs, from its workspace's (Main's for a catalog
+/// install or a server from before), in the store.
 async fn secret_values(data_dir: &Path, server: &McpServer) -> Result<Vec<(String, String)>> {
     let names = server.secret_names();
     if names.is_empty() {
         return Ok(Vec::new());
     }
     let store = Store::open(data_dir).await?;
-    Ok(sun_engine::mcp_secret_values(&store, &names).await?)
+    let workspace = server.workspace_id.unwrap_or(sun_core::WorkspaceId::MAIN);
+    Ok(sun_engine::mcp_secret_values(&store, workspace, &names).await?)
 }
 
 /// `sun mcp proxy <grant>`: serves the granted tools of a registered MCP

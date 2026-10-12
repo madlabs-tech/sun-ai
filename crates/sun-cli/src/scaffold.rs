@@ -28,6 +28,7 @@ pub fn new_mcp_server(name: &str, parent: &Path) -> Result<(PathBuf, McpServer)>
     let entry = parent.join(name).join("server.mjs");
     let server = McpServer {
         name: name.to_owned(),
+        workspace_id: None,
         transport: McpTransport::Command {
             command: entry.to_string_lossy().into_owned(),
             args: Vec::new(),
