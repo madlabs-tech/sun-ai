@@ -153,7 +153,7 @@
 
       {#await providers then p}
         {#each p.providers as provider (provider.id)}
-          <Button variant="secondary" size="lg" block iconLeft="log-in" href={sso_login_url(provider.id) + return_to}>Continue with {provider.name}</Button>
+          <Button variant="secondary" block class="sign-in__provider" iconLeft="log-in" href={sso_login_url(provider.id) + return_to}>Continue with {provider.name}</Button>
         {/each}
         {#if p.providers.length}<div class="sign-in__or"><span>or</span></div>{/if}
       {/await}
@@ -213,6 +213,15 @@
     border: 1.5px solid var(--red-400);
     font-size: 13px;
     color: var(--fg-1);
+  }
+  /* An admin names the provider: a long name wraps inside the 360 px card instead of widening it. */
+  .sign-in :global(.sign-in__provider) {
+    height: auto;
+    min-height: var(--control-md);
+    padding-block: var(--space-2);
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: center;
   }
   .sign-in__or {
     display: flex;
