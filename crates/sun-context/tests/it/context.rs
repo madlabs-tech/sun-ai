@@ -181,6 +181,7 @@ fn handoff_pack_is_built_from_the_ledger() {
 fn memory(scope: MemoryScope, status: MemoryStatus, body: &str) -> MemoryItem {
     MemoryItem {
         id: MemoryItemId::generate(),
+        workspace_id: sun_core::WorkspaceId::MAIN,
         scope,
         scope_id: None,
         body: body.into(),
