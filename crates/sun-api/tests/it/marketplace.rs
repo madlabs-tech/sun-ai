@@ -336,7 +336,11 @@ async fn credits_runtime_needs_sun_cloud() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
-    assert!(body.to_string().contains("Sun Cloud"), "{body}");
+    assert!(
+        body.to_string()
+            .contains("not available on this deployment yet"),
+        "{body}"
+    );
 
     let k = common::kernel_with_market(Arc::new(FakeCloud::default())).await;
     let app = &k.app;

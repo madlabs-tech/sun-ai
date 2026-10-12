@@ -1000,8 +1000,8 @@ fn runtime_of(
         RuntimeSource::Credits if api.sun_cloud => {}
         RuntimeSource::Credits => {
             return Err(ApiError::invalid(
-                "source: Sun credits need Sun Cloud; set SUN_CLOUD_URL and SUN_CLOUD_TOKEN \
-                 on the kernel, or use a BYO key.",
+                "source: Sun credits are not available on this deployment yet; bring your own \
+                 key or runtime.",
             ));
         }
         RuntimeSource::ByoRuntime => {
@@ -1150,7 +1150,9 @@ async fn runtime_readiness(
         RuntimeSource::ByoKey => api.engine.runtime_problem(runtime).await?,
         // The gateway key replaces the CLI's own login.
         RuntimeSource::Credits if api.sun_cloud => None,
-        RuntimeSource::Credits => Some("connect Sun Cloud (SUN_CLOUD_URL, SUN_CLOUD_TOKEN)".into()),
+        RuntimeSource::Credits => {
+            Some("Sun credits are not available on this deployment yet".into())
+        }
         _ if host_logged_in => None,
         _ => Some(format!("log in to {} on a host", runtime.adapter)),
     };
