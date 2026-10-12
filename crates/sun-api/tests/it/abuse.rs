@@ -669,7 +669,7 @@ async fn an_archived_agent_takes_no_task() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn an_agents_task_count_counts_only_visible_tasks() {
+async fn the_agents_list_is_for_deployment_owners_and_counts_every_task() {
     let w = world().await;
     let app = &w.k.app;
     let assign = json!({ "assignee": { "kind": "agent", "id": w.agent } });
@@ -678,6 +678,8 @@ async fn an_agents_task_count_counts_only_visible_tasks() {
         ok(app, "PATCH", &path, Some(assign.clone())).await;
     }
     let bob = member_token(&w.k.store, "bob", Role::Member).await;
-    let (_, agents) = call_as(app, &bob, "GET", "/api/v1/agents", None).await;
-    assert_eq!(agents[0]["task_count"], 1, "{agents}");
+    let (status, _) = call_as(app, &bob, "GET", "/api/v1/agents", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let agents = ok(app, "GET", "/api/v1/agents", None).await;
+    assert_eq!(agents[0]["task_count"], 2, "{agents}");
 }

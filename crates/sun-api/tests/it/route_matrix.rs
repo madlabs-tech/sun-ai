@@ -471,11 +471,11 @@ async fn every_new_route_hides_other_workspaces_and_checks_its_permission() {
             assert_eq!(status, StatusCode::FORBIDDEN, "member: {method} {path}");
         }
     }
-    // Agents: reads are open, writes need `manage_runtimes`.
+    // Agents: reads and writes are for deployment owners.
     let agent = format!("/api/v1/agents/{}", w.agent);
     assert_eq!(
         call_as(app, &viewer, "GET", "/api/v1/agents", None).await.0,
-        StatusCode::OK
+        StatusCode::FORBIDDEN
     );
     let writes = [
         (
@@ -556,4 +556,77 @@ async fn filters_and_bodies_never_reach_into_a_hidden_workspace() {
     let path = format!("/api/v1/tasks/{}", w.main.plain);
     let (status, _) = call_as(app, &member, "PATCH", &path, Some(sneak)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The deployment-wide reads, until they are per workspace: 403 for every
+/// member who isn't a deployment owner (even naming their own workspace),
+/// and open to a deployment owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn deployment_wide_reads_are_for_deployment_owners_only() {
+    let k = kernel().await;
+    let app = &k.app;
+    let reads = [
+        "/runtimes",
+        "/agents",
+        "/hosts",
+        "/kernel",
+        "/mods",
+        "/catalog",
+        "/mcp_servers",
+        "/usage",
+        "/settings/on_limit",
+        "/settings/budget",
+        "/settings/embeddings",
+        "/quality/metrics",
+        "/entitlement",
+        "/memory",
+        "/memory/metrics",
+        "/corrections",
+        "/outbox?status=unknown",
+    ];
+    let repo = ok(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{MAIN}/repos"),
+        Some(json!({ "url": "https://example.com/app" })),
+    )
+    .await;
+    let repo = format!(
+        "/catalog/tdd/repos/{}",
+        repo["repo"]["id"].as_str().unwrap()
+    );
+    // Their own answer for an unknown id, but never the owner guard's 403.
+    let by_id = [
+        "/runtimes/claude-code/readiness",
+        "/catalog/tdd/files",
+        repo.as_str(),
+        "/mcp_servers/nope/tools",
+    ];
+    let mut tokens = Vec::new();
+    for (name, role) in [
+        ("vic", Role::Viewer),
+        ("bob", Role::Member),
+        ("eve", Role::Admin),
+    ] {
+        tokens.push(member_token(&k.store, name, role).await);
+    }
+    for path in reads.iter().chain(&by_id) {
+        let named = if path.contains('?') { '&' } else { '?' };
+        let path = format!("/api/v1{path}{named}workspace={MAIN}");
+        for token in &tokens {
+            let (status, value) = call_as(app, token, "GET", &path, None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {value}");
+        }
+    }
+    for path in reads {
+        let path = format!("/api/v1{path}");
+        let (status, value) = call_as(app, common::TOKEN, "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {value}");
+    }
+    for path in by_id {
+        let path = format!("/api/v1{path}");
+        let (status, value) = call_as(app, common::TOKEN, "GET", &path, None).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{path}: {value}");
+        assert_ne!(status, StatusCode::UNAUTHORIZED, "{path}: {value}");
+    }
 }

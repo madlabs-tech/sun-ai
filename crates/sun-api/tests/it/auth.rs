@@ -1301,7 +1301,7 @@ async fn acl_permissions_are_per_capability() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _, _) = send(app, "GET", "/api/v1/secrets", max, None).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    // So is the ecosystem limit policy; reading it isn't.
+    // So is the ecosystem limit policy, reading it too.
     let on_limit = "/api/v1/settings/on_limit";
     let wait = json!({ "on_limit": "wait_until_reset" });
     let (status, _, _) = send(app, "PUT", on_limit, max, Some(wait.clone())).await;
@@ -1310,7 +1310,9 @@ async fn acl_permissions_are_per_capability() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _, _) = send(app, "PUT", on_limit, None, Some(wait.clone())).await;
     assert_eq!(status, StatusCode::OK);
-    let (_, _, read) = send(app, "GET", on_limit, max, None).await;
+    let (status, _, _) = send(app, "GET", on_limit, max, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, _, read) = send(app, "GET", on_limit, None, None).await;
     assert_eq!(read, wait);
 
     // Only a deployment owner grants it.

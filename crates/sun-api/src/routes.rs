@@ -70,14 +70,11 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/runs/{id}/messages", post(send_message))
         .route("/runs/{id}/steps/{key}/switch", post(switch_runtime))
         .route("/runs/{id}/steps/{key}/retry", post(retry_step))
-        .route("/outbox", get(list_outbox))
         .route("/outbox/{id}/resolve", post(resolve_outbox))
         .route(
             "/tasks/{id}/on_limit",
             get(get_task_on_limit).put(put_task_on_limit),
         )
-        .route("/settings/on_limit", get(get_on_limit))
-        .route("/settings/budget", get(get_spend_cap))
         .route(
             "/tasks/{id}/budget",
             get(get_task_budget).put(put_task_budget),
@@ -97,7 +94,6 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/tasks/{id}/artifacts", get(list_artifacts))
         .route("/tasks/{id}/corrections", get(crate::corrections::of_task))
         .route("/tasks/{id}/decision", post(crate::corrections::decide))
-        .route("/corrections", get(crate::corrections::list))
         .route("/evals", get(crate::evals::list).post(crate::evals::start))
         .route("/evals/{id}", get(crate::evals::get))
         .route(
@@ -107,7 +103,6 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/tasks/{id}/knowledge_flags", get(knowledge_flags))
         .route("/tasks/{id}/quality", get(crate::quality::get))
         .route("/tasks/{id}/quality/check", post(crate::quality::check))
-        .route("/quality/metrics", get(crate::quality::metrics))
         .route(
             "/tasks/{id}/previews",
             get(crate::preview::list)
@@ -131,31 +126,12 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/tasks/{id}/screens", post(crate::pins::attach_screens))
         .route("/tasks/{id}/design", get(crate::pins::design))
         .route("/artifacts/{id}", get(download_artifact))
-        .route("/usage", get(usage))
-        .route("/agents", get(crate::agents::list))
-        .route("/runtimes", get(crate::hosts::list_runtimes))
-        .route("/runtimes/{id}/readiness", get(crate::hosts::readiness))
-        .route("/hosts", get(crate::hosts::list_hosts))
-        .route("/kernel", get(crate::hosts::kernel))
-        .route("/mods", get(list_mods))
-        .route("/catalog", get(crate::catalog::list))
-        .route("/catalog/{id}/files", get(crate::catalog::files))
-        .route(
-            "/catalog/{id}/repos/{repo_id}",
-            get(crate::catalog::repo_install),
-        )
-        .route("/mcp_servers", get(crate::catalog::mcp_servers))
-        .route(
-            "/mcp_servers/{name}/tools",
-            get(crate::catalog::mcp_server_tools),
-        )
         .route(
             "/tasks/{id}/mcp",
             get(crate::catalog::task_mcp).put(crate::catalog::set_task_mcp),
         )
         .route("/me", get(auth::me))
         .route("/features", get(crate::features::get))
-        .route("/entitlement", get(crate::license::get))
         .merge(knowledge_routes())
         .route_layer(middleware::from_fn(auth::require_by_method));
     let workflow_create = Router::new()
@@ -256,7 +232,8 @@ pub(crate) fn router(api: Api) -> Router {
         ])));
     // The deployment itself, for deployment owners only: its accounts, mail,
     // sign-in, security, audit, hosts, mods, ecosystem secrets, runtimes and
-    // agents, limits, catalog, memory, its account at Sun and marketplace.
+    // agents, limits, catalog, memory, usage, its account at Sun and
+    // marketplace.
     let deployment = Router::new()
         .route(
             "/members",
@@ -271,6 +248,8 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/members/{id}/deactivate", post(auth::deactivate_member))
         .route("/members/{id}/activate", post(auth::activate_member))
         .route("/members/{id}/owner", put(auth::set_owner))
+        .route("/hosts", get(crate::hosts::list_hosts))
+        .route("/kernel", get(crate::hosts::kernel))
         .route("/hosts/tokens", post(crate::hosts::create_token))
         .route("/sessions/{id}/kill", post(crate::hosts::kill_session))
         .route("/marketplace/listings", get(crate::marketplace::listings))
@@ -320,7 +299,7 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/audit", get(auth::audit_log))
         .route(
             "/settings/embeddings",
-            put(crate::knowledge::put_embeddings),
+            get(crate::knowledge::get_embeddings).put(crate::knowledge::put_embeddings),
         )
         .route("/account", get(crate::account::get))
         .route("/account/invoices", get(crate::account::invoices))
@@ -338,18 +317,32 @@ pub(crate) fn router(api: Api) -> Router {
             "/runtimes/{id}/policy",
             put(crate::hosts::set_runtime_policy),
         )
-        .route("/runtimes", post(crate::hosts::create_runtime))
-        .route("/agents", post(crate::agents::create))
+        .route(
+            "/runtimes",
+            get(crate::hosts::list_runtimes).post(crate::hosts::create_runtime),
+        )
+        .route("/runtimes/{id}/readiness", get(crate::hosts::readiness))
+        .route(
+            "/agents",
+            get(crate::agents::list).post(crate::agents::create),
+        )
         .route(
             "/agents/{id}",
             patch(crate::agents::update).delete(crate::agents::archive),
         )
         .route("/runtimes/{id}", put(crate::hosts::update_runtime))
-        .route("/settings/on_limit", put(put_on_limit))
-        .route("/settings/budget", put(put_spend_cap))
+        .route("/settings/on_limit", get(get_on_limit).put(put_on_limit))
+        .route("/settings/budget", get(get_spend_cap).put(put_spend_cap))
         .route("/decisions/export", get(crate::corrections::export))
         .route("/decisions/replay", post(crate::corrections::replay))
-        .route("/mcp_servers", post(crate::catalog::add_mcp_server))
+        .route(
+            "/mcp_servers",
+            get(crate::catalog::mcp_servers).post(crate::catalog::add_mcp_server),
+        )
+        .route(
+            "/mcp_servers/{name}/tools",
+            get(crate::catalog::mcp_server_tools),
+        )
         .route(
             "/mcp_servers/{name}",
             delete(crate::catalog::remove_mcp_server),
@@ -361,6 +354,13 @@ pub(crate) fn router(api: Api) -> Router {
         )
         .route("/mods/{name}/install", post(install_mod))
         .route("/mods/{name}", put(update_mod).delete(remove_mod))
+        .route("/mods", get(list_mods))
+        .route("/catalog", get(crate::catalog::list))
+        .route("/catalog/{id}/files", get(crate::catalog::files))
+        .route(
+            "/catalog/{id}/repos/{repo_id}",
+            get(crate::catalog::repo_install),
+        )
         .route("/catalog/{id}/install", post(crate::catalog::install))
         .route("/catalog/{id}", delete(crate::catalog::uninstall))
         .route(
@@ -375,6 +375,12 @@ pub(crate) fn router(api: Api) -> Router {
             post(crate::memory::star_correction),
         )
         .route("/notes/{id}/star", post(crate::memory::star_note))
+        // Deployment-wide reads, until they are per workspace.
+        .route("/usage", get(usage))
+        .route("/quality/metrics", get(crate::quality::metrics))
+        .route("/entitlement", get(crate::license::get))
+        .route("/corrections", get(crate::corrections::list))
+        .route("/outbox", get(list_outbox))
         .route_layer(middleware::from_fn(auth::require_owner));
     let approvals = Router::new()
         .route("/tasks/{id}/approve", post(approve))
@@ -465,7 +471,7 @@ pub(crate) fn router(api: Api) -> Router {
         .with_state(api)
 }
 
-/// Knowledge sources, search, embeddings (read) and task context.
+/// Knowledge sources, search and task context.
 fn knowledge_routes() -> Router<Api> {
     use crate::knowledge as k;
     Router::new()
@@ -484,7 +490,6 @@ fn knowledge_routes() -> Router<Api> {
         .route("/knowledge/sources/{id}/reindex", post(k::reindex))
         .route("/knowledge/docs/{id}", get(k::get_doc))
         .route("/knowledge/search", get(k::search))
-        .route("/settings/embeddings", get(k::get_embeddings))
         .route(
             "/tasks/{id}/context",
             get(k::get_context).put(k::put_context),
