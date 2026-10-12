@@ -1143,6 +1143,11 @@ pub struct Host {
     pub name: String,
     /// Reported capabilities (installed CLIs, simulators, KVM, ...).
     pub capabilities: Value,
+    /// Who minted the enrolment token it joined with (`None`: before hosts
+    /// were per workspace, the kernel's own host, or a leased seller host).
+    /// They may attach it to their other workspaces.
+    #[serde(default)]
+    pub enrolled_by: Option<MemberId>,
 }
 
 /// `session` — an agent session on a host, with its resource use.
