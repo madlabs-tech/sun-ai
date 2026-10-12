@@ -21,11 +21,12 @@
 # Env: SUN_INSTALL_URL (download base), SUN_RELEASE_KEY (trusted signer).
 set -eu
 
-# PLACEHOLDER: the release signing key does not exist yet. Replace
-# it before the first public release.
+# Download contract (get-sun.madlabs.tech redirects to the GitHub Release):
+#   /                          this script
+#   /releases/<version>/<file> <version> = latest or a bare semver (tag v<semver>)
 SUN_INSTALL_URL=${SUN_INSTALL_URL:-https://get-sun.madlabs.tech}
-SUN_RELEASE_KEY=${SUN_RELEASE_KEY:-"ssh-ed25519 PLACEHOLDER-sun-release-public-key"}
-SIGNER=release@sun.dev
+SUN_RELEASE_KEY=${SUN_RELEASE_KEY:-"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEdlEdtxTJKj2DtLkku1zHt97rNmTD8gT9YNS83uw2Mb"}
+SIGNER=release@madlabs.tech
 NAMESPACE=sun-release
 
 version=latest
@@ -55,6 +56,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -n "$version" ] || version=latest
+version=${version#v} # tags are v1.2.3; the URL takes 1.2.3
 
 # ------------------------------------------------------------ undo on failure
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sun-install.XXXXXX")
@@ -112,10 +114,6 @@ fi
 
 # ------------------------------------------------------------ verify
 need ssh-keygen "install OpenSSH (apt install openssh-client); it checks the release signature"
-case "$SUN_RELEASE_KEY" in
-  *PLACEHOLDER*) fail "this installer has no release signing key yet (placeholder)" \
-    "set SUN_RELEASE_KEY to the Sun release public key (ssh-ed25519 ...)" ;;
-esac
 printf '%s %s\n' "$SIGNER" "$SUN_RELEASE_KEY" >"$tmp/allowed_signers"
 ssh-keygen -Y verify -f "$tmp/allowed_signers" -I "$SIGNER" -n "$NAMESPACE" \
   -s "$tmp/sha256.sum.sig" <"$tmp/sha256.sum" >/dev/null 2>&1 ||

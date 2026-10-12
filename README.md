@@ -4,7 +4,7 @@
 
 Sun is an AI orchestrator and workflow engine for individuals and small teams. Anyone on the team (marketing, product, design, engineering, leadership) hands work to agents as tasks. Each task runs through a versioned workflow of steps. The engine decides when a task is done, not the agent. It is source-available, free to self-host as one binary, and can also run hosted in Sun Cloud.
 
-> **Status:** every planned feature has code, and the scope audit counts 107 of 122 user stories as done. Several things are still unproven against real accounts and hardware: a real quota hit, Linux sandbox CI, real VMs and simulators, live payments. The release host and signing key are placeholders, and CI has not run yet. See [Status and known limits](#status-and-known-limits).
+> **Status:** every planned feature has code, and the scope audit counts 107 of 122 user stories as done. Several things are still unproven against real accounts and hardware: a real quota hit, Linux sandbox CI, real VMs and simulators, live payments. No public release exists yet, and CI has not run yet. See [Status and known limits](#status-and-known-limits).
 
 ---
 
@@ -87,7 +87,7 @@ Milestones are planned in phases sized to one agent session, not in weeks.
 
 ## Quick start
 
-> The release signing key is a **placeholder** and `get-sun.madlabs.tech` serves nothing yet. No public release exists yet. Until one does, build from source (below).
+> No public release exists yet, so the installer below has nothing to download. Until one does, build from source (below).
 
 **Install** (Linux x86_64/arm64 with systemd, or macOS arm64 with launchd):
 
@@ -348,8 +348,8 @@ The code side of every story is done; what follows is still unproven.
 - A legal review before the marketplace (M5).
 
 **Placeholders:**
-- `SUN_RELEASE_KEY` in `scripts/install.sh` (the release host `get-sun.madlabs.tech` serves nothing until the first release).
-- Release and license signing keys.
+- No public release yet: `get-sun.madlabs.tech` redirects to GitHub Releases, which stay empty until the first `v*` tag.
+- The license signing key.
 
 **Never run:**
 - The GitHub Actions workflows (`ci`, `footprint`, `release`, `cli-matrix`). Nothing has been pushed.
