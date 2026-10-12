@@ -24,6 +24,8 @@ test('owner: seats, Upgrade to Business yearly on the hosted checkout, back on t
   const form = billing.getByRole('form', { name: 'Upgrade' });
   // On Pro, Business is what's left to upgrade to.
   await expect(form.getByLabel('Plan').locator('option')).toHaveText(['Business']);
+  // Seats start at the people in the workspace.
+  await expect(form.getByLabel('Seats')).toHaveValue('3');
   await form.getByLabel('Seats').fill('0');
   await form.getByRole('button', { name: 'Continue to checkout' }).click();
   await expect(form.getByText('Use a whole number from 1 to 10,000.')).toBeVisible();

@@ -5,7 +5,9 @@
 //! `X-Request-ID`; bodies are rebuilt from allowlists, and writes that
 //! charge send an `Idempotency-Key` derived from the client's
 //! `idempotency_key`, the member and the path. Sun Cloud asks back with
-//! `GET /internal/workspaces/{id}/seat_count` (its own token).
+//! `GET /internal/workspaces/{id}/seat_count` (its own token): it does so
+//! on a reconcile, which the engine asks for before a checkout, a seat
+//! purchase and an owner's or admin's summary.
 //!
 //! - Workspace reads (summary, prices): any member there. Writes (checkout,
 //!   portal, seats): its owners and admins. Support: deployment owners.
@@ -123,6 +125,17 @@ impl CloudBilling {
             refused.headers_mut().insert(header::RETRY_AFTER, value);
         }
         Ok(refused)
+    }
+
+    /// Has the cloud recount `workspace`'s members (it asks [`seat_count`])
+    /// for `user`, so its seat checks see who is there now. `Some` is its
+    /// refusal, already mapped: answer that and go no further.
+    async fn recount(&self, workspace: WorkspaceId, user: MemberId) -> ApiResult<Option<Response>> {
+        let path = format!("/api/v1/subscriptions/{workspace}/seats/reconcile");
+        let answer = self
+            .send(reqwest::Method::POST, &path, user, None, None)
+            .await?;
+        Ok((!answer.status().is_success()).then_some(answer))
     }
 }
 
@@ -301,11 +314,21 @@ async fn read_workspace(api: &Api, caller: &Caller, text: &str, what: &str) -> A
         .await
 }
 
+/// `GET /subscriptions/{id}/summary`. For an owner or admin the cloud
+/// recounts the members first, so `used` is the real count; a recount that
+/// fails still shows the last count (a read never fails on a refresh).
 async fn summary(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Path(text): Path<String>,
 ) -> ApiResult<Response> {
+    let workspace = workspace(&api, &text).await?;
+    if may_pay(&caller, workspace).is_ok() {
+        let (cloud, user) = (cloud(&api)?, person(&caller)?);
+        if let Some(refused) = cloud.recount(workspace, user).await? {
+            tracing::warn!("seat recount for {workspace}: {}", refused.status());
+        }
+    }
     read_workspace(&api, &caller, &text, "summary").await
 }
 
@@ -347,6 +370,9 @@ async fn checkout(
     let seats = seats(input.seats, "seats")?;
     let path = "/api/v1/subscriptions/checkout-sessions";
     let key = idempotency(user, path, &input.idempotency_key)?;
+    if let Some(refused) = cloud.recount(workspace, user).await? {
+        return Ok(refused);
+    }
     let body = json!({
         "workspace_id": workspace,
         "plan": input.plan,
@@ -377,6 +403,12 @@ async fn write_workspace(
     let key = idempotency_key
         .map(|k| idempotency(user, &path, k))
         .transpose()?;
+    // Buying seats is checked against who is there now.
+    if what == "seats/purchases"
+        && let Some(refused) = cloud.recount(workspace, user).await?
+    {
+        return Ok(refused);
+    }
     let body = match (body, &key) {
         (Some(mut body), Some(key)) => {
             body["idempotency_key"] = json!(key);
