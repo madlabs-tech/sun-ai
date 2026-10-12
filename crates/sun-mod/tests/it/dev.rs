@@ -22,6 +22,7 @@ async fn dev_reloads_the_mod_when_its_folder_changes() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_sun-echo-mod"), dir.join("echo")).unwrap();
+    crate::warm(&dir.join("echo"));
     std::fs::write(dir.join("mod.yaml"), manifest("echo")).unwrap();
 
     let host = Arc::new(ModHost::new(HostConfig::default()));

@@ -294,7 +294,7 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
 
 /// Fixtures shared by the env tests.
 #[cfg(test)]
-mod testing {
+pub(crate) mod testing {
     #![allow(clippy::unwrap_used)]
 
     use std::collections::BTreeMap;
@@ -346,8 +346,23 @@ mod testing {
     }
 
     /// Writes an executable script.
+    ///
+    /// ponytail: rust-lang/rust#114554. A fork in another test thread can
+    /// inherit a write fd we hold on the script until its exec closes it
+    /// (O_CLOEXEC), and an exec in that window fails with "Text file busy".
+    /// A `sh` child writes the file, so this process never holds that fd (a
+    /// `--version` warm-up would run the fakes and add lines to the argv logs
+    /// the tests assert on). Drop this once std closes the race.
     pub fn script(path: &Path, text: &str) {
-        write_file(path, text, 0o755).unwrap();
+        use std::io::Write;
+        let mut sh = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+        assert!(sh.wait().unwrap().success(), "{}", path.display());
     }
 
     /// Spawns `program -p` the way the adapters do (cwd, `spec.env`) with one
@@ -407,6 +422,7 @@ mod testing {
 mod detect_tests {
     #![allow(clippy::unwrap_used)]
 
+    use super::testing::script;
     use super::*;
 
     #[tokio::test]
@@ -414,15 +430,13 @@ mod detect_tests {
         let dir = std::env::temp_dir().join(format!("sun-detect-{}", SessionId::generate()));
         std::fs::create_dir_all(&dir).unwrap();
         let docker = dir.join("docker");
-        write_file(
+        script(
             &docker,
             "#!/bin/sh\n[ \"$1\" = --version ] && echo 'Docker version 28.5.1' && exit 0\n\
              echo 'Cannot connect to the Docker daemon' >&2; exit 1\n",
-            0o755,
-        )
-        .unwrap();
+        );
         let lima = dir.join("limactl");
-        write_file(&lima, "#!/bin/sh\necho 'limactl version 1.2.0'\n", 0o755).unwrap();
+        script(&lima, "#!/bin/sh\necho 'limactl version 1.2.0'\n");
         let mut config = HostConfig::new(&dir);
         config.container_cli = docker;
         config.vm_cli = lima;
