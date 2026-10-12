@@ -18,8 +18,16 @@
 //!   [`sun_core::SKILL_RUNTIMES_FILE`]); unlisted skills reach every runtime.
 //! - Installs are pinned: `<data>/catalog/installed.json` holds id → version.
 //!   A newer catalog version is offered (listing shows both), never applied.
+//! - Installs are per workspace, files shared: the files on disk are the
+//!   deployment's, and which workspaces have an entry is the store's
+//!   (`workspace_catalog_install`), passed in as `installs` where it matters
+//!   ([`Catalog::list`], [`Catalog::mcp_servers_in`]).
+// ponytail: one copy of each entry on disk, so a workspace's update (or
+// `runtimes` limit) is every workspace's; per-workspace folders if they diverge.
 //! - `<data>/mcp_servers/` is the one MCP server registry: catalog installs
-//!   and custom servers ([`Catalog::add_mcp_server`]) live side by side.
+//!   and custom servers ([`Catalog::add_mcp_server`]) live side by side. A
+//!   custom server names its workspace (`McpServer::workspace_id`, Main when
+//!   missing); names are unique in the deployment (one file each).
 //! - Dismissed suggestions are kept per ecosystem in
 //!   `<data>/catalog/dismissed.json` ([`Catalog::dismiss`]).
 //!
@@ -33,7 +41,7 @@ use std::sync::Mutex;
 use rust_embed::RustEmbed;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sun_core::{Error, Result, SKILL_RUNTIMES_FILE};
+use sun_core::{Error, Result, SKILL_RUNTIMES_FILE, WorkspaceId};
 pub use sun_mod::{McpClient, McpServer, McpTool, McpTransport, serve_mcp_proxy};
 
 #[derive(RustEmbed)]
@@ -171,9 +179,19 @@ impl Catalog {
 
     /// Every entry, best fit first: named by the workflows in use
     /// (`in_use`, skill and MCP server names), then the most `stacks`
-    /// matched, then the most installs elsewhere, then catalog order.
-    pub fn list(&self, stacks: &[String], in_use: &[String]) -> Result<Vec<Listing>> {
-        let installed = self.installed()?;
+    /// matched, then the most installs elsewhere, then catalog order. With
+    /// `installs` (a workspace's), only those show as installed; `None`
+    /// shows what is on disk.
+    pub fn list(
+        &self,
+        stacks: &[String],
+        in_use: &[String],
+        installs: Option<&[String]>,
+    ) -> Result<Vec<Listing>> {
+        let mut installed = self.installed()?;
+        if let Some(installs) = installs {
+            installed.retain(|id, _| installs.contains(id));
+        }
         let runtimes = self.skill_runtimes()?;
         let mut out: Vec<Listing> = self
             .entries
@@ -411,6 +429,28 @@ impl Catalog {
         }
         servers.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(servers)
+    }
+
+    /// The registered MCP servers `workspace` has: the catalog installs among
+    /// `installs` (the workspace's) and its custom servers.
+    pub fn mcp_servers_in(
+        &self,
+        workspace: WorkspaceId,
+        installs: &[String],
+    ) -> Result<Vec<McpServer>> {
+        let installed = self.installed()?;
+        let mut servers = self.mcp_servers()?;
+        servers.retain(|s| match installed.contains_key(&s.name) {
+            true => installs.contains(&s.name),
+            false => s.workspace_id.unwrap_or(WorkspaceId::MAIN) == workspace,
+        });
+        Ok(servers)
+    }
+
+    /// True when the MCP server `name` is a catalog install (its file is
+    /// shared by the workspaces that installed it), not a custom server.
+    pub fn is_catalog_install(&self, name: &str) -> Result<bool> {
+        Ok(self.installed()?.contains_key(name))
     }
 
     /// One registered MCP server by name.
