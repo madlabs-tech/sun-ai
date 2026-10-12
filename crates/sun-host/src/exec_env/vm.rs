@@ -506,6 +506,11 @@ mod tests {
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(request.as_bytes()).await.unwrap();
+        // The request is all the guest sends. OpenBSD netcat (Linux) exits
+        // only once both stdin and the socket hit EOF; macOS nc exits at the
+        // socket's EOF alone. Closing stdin here makes the reply end at the
+        // proxy's close with either one.
+        drop(stdin);
         let mut out = String::new();
         let mut stdout = child.stdout.take().unwrap();
         let read = stdout.read_to_string(&mut out);
@@ -513,7 +518,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        drop(stdin);
         out
     }
 
