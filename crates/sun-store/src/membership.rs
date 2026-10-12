@@ -117,7 +117,7 @@ impl MembershipRepo for Tx {
     async fn members_of(&mut self, workspace: WorkspaceId) -> Result<Vec<WorkspaceMember>> {
         sqlx::query(
             "SELECT workspace_id, member_id, role, created_at FROM workspace_member
-             WHERE workspace_id = $1 ORDER BY member_id",
+             WHERE workspace_id = $1 ORDER BY created_at, rowid",
         )
         .bind(workspace.to_string())
         .fetch_all(self.conn())
