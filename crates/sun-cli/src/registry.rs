@@ -90,6 +90,19 @@ pub fn asset_url(entry: &Entry) -> String {
     )
 }
 
+/// Refuses a release asset whose `manifest` is not `entry`'s mod, version
+/// and kind (a release can be re-uploaded; the registry pins what installs).
+pub fn check_release(entry: &Entry, manifest: &sun_mod::Manifest) -> Result<()> {
+    let core_kind = crate::mods::core_kind(manifest.kind);
+    if (&manifest.name, &manifest.version, core_kind) == (&entry.name, &entry.version, entry.kind) {
+        return Ok(());
+    }
+    Err(Error::InvalidInput(format!(
+        "{}: the release v{} contains {} {}",
+        entry.name, entry.version, manifest.name, manifest.version
+    )))
+}
+
 /// Downloads [`asset_url`] (a listed mod with no asset for this platform is
 /// `Unavailable`).
 pub fn download(entry: &Entry) -> Result<Vec<u8>> {
@@ -137,5 +150,29 @@ mod tests {
             github.version,
             super::TARGET
         )));
+    }
+
+    /// `sun plugin add <name>` and the UI refuse the same drifted release.
+    #[test]
+    fn a_release_must_be_the_listed_mod_and_version() {
+        let github = super::find("github").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = |name: &str, version: &str| {
+            std::fs::write(
+                dir.path().join("mod.yaml"),
+                format!(
+                    "name: {name}\nkind: plugin\nversion: {version}\napi: \">=1.0 <2.0\"\n\
+                     entry: {{ command: ./run }}\nprovides: {{ actions: [x] }}\n"
+                ),
+            )
+            .unwrap();
+            sun_mod::load_manifest(dir.path()).unwrap()
+        };
+        assert!(super::check_release(github, &manifest("github", &github.version)).is_ok());
+        for (name, version) in [("github", "9.9.9"), ("other", github.version.as_str())] {
+            let err = super::check_release(github, &manifest(name, version)).unwrap_err();
+            let want = format!("the release v{} contains {name} {version}", github.version);
+            assert!(err.to_string().contains(&want), "{err}");
+        }
     }
 }

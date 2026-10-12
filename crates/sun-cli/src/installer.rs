@@ -144,16 +144,7 @@ fn install_asset(
         let out = staging.join("pkg");
         mods::unpack_into(&file, &out).map_err(invalid)?;
         let root = mods::package_root(&out).map_err(invalid)?;
-        let manifest = sun_mod::load_manifest(&root)?;
-        if manifest.name != *name
-            || manifest.version != *version
-            || mods::core_kind(manifest.kind) != entry.kind
-        {
-            return Err(Error::InvalidInput(format!(
-                "{name}: the release v{version} contains {} {}",
-                manifest.name, manifest.version
-            )));
-        }
+        registry::check_release(entry, &sun_mod::load_manifest(&root)?)?;
         let signed = root.join(sun_mod::SIGNATURE_FILE).exists();
         sun_mod::install_package(&root, mods_dir, signed.then_some(keys), granted)
     })();
