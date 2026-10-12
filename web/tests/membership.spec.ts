@@ -197,12 +197,18 @@ test.describe('desktop', () => {
     await expect(page.getByRole('region', { name: 'Invite people' })).toHaveCount(0);
   });
 
-  test('a workspace member sees its agents, runtimes and memory, but no deployment pages', async ({ page }) => {
-    await open(page, 'tasks', '&mock_role=admin');
+  test('a member sees Hosts, Catalog and MCP of the current workspace, not Mods or Marketplace', async ({ page }) => {
+    await open(page, 'tasks', '&mock_role=member');
     await expect(sidebar(page).getByRole('heading')).toHaveText(['Work', 'AI Team']);
-    for (const name of ['Agents', 'Memory', 'Runtimes']) await expect(sidebar(page).getByRole('link', { name })).toHaveCount(1);
-    for (const name of ['Hosts', 'Catalog', 'Mods', 'Marketplace']) await expect(sidebar(page).getByRole('link', { name })).toHaveCount(0);
-    await open(page, 'hosts', '&mock_role=admin');
+    for (const name of ['Agents', 'Memory', 'Runtimes', 'Hosts', 'Catalog']) await expect(sidebar(page).getByRole('link', { name })).toHaveCount(1);
+    for (const name of ['Mods', 'Marketplace']) await expect(sidebar(page).getByRole('link', { name })).toHaveCount(0);
+    await sidebar(page).getByRole('link', { name: 'Hosts' }).click();
+    await expect(page.getByRole('article', { name: 'build-box-01' })).toContainText('Serves Main');
+    await sidebar(page).getByRole('link', { name: 'Catalog' }).click();
+    await page.getByRole('tab', { name: 'MCP servers' }).click();
+    await expect(page.getByRole('article').filter({ hasText: 'github' })).toBeVisible();
+    await expect(page.getByRole('main').getByRole('alert')).toHaveCount(0);
+    await open(page, 'mods', '&mock_role=member');
     await expect(page.getByRole('heading', { name: 'Tasks', level: 1 })).toBeVisible();
     await sidebar(page).getByRole('link', { name: 'Settings' }).click();
     await expect(page.getByRole('navigation', { name: 'Settings' }).getByRole('heading', { level: 2 })).toHaveText(['My Account', 'Main']);

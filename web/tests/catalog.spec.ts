@@ -1,5 +1,7 @@
-// Catalog screen against the in-memory API.
-import { expect, test } from '@playwright/test';
+// Catalog screen against the in-memory API: installs per workspace, and what members, admins and owners may change.
+import { expect, test, type Page } from '@playwright/test';
+
+const sidebar = (page: Page) => page.getByRole('complementary', { name: 'Main' });
 
 test('catalog: suggestions rank by stack, install shows the files first, nothing installs on its own', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
@@ -71,7 +73,7 @@ test('catalog: an MCP server’s secrets are entered write-only in the install d
   const dialog = page.getByRole('dialog');
   const secret = dialog.getByLabel('CONTEXT7_API_KEY');
   await expect(secret).toHaveAttribute('type', 'password');
-  await expect(dialog).toContainText('Write-only, ecosystem-wide');
+  await expect(dialog).toContainText('Write-only, for this workspace');
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
   await secret.fill('ctx7-very-secret-value');
   await dialog.getByRole('button', { name: 'Install' }).click();
@@ -142,7 +144,7 @@ for (const width of [1280, 360]) {
     await row.getByRole('button', { name: 'Install' }).click();
     const dialog = page.getByRole('dialog');
     const scope = dialog.getByRole('group', { name: 'Install into' });
-    await expect(scope.getByLabel('Whole ecosystem')).toBeChecked();
+    await expect(scope.getByLabel('This workspace')).toBeChecked();
 
     await scope.getByText('A repo, by pull request').click();
     await expect(dialog).toContainText('sun/skill-diagnosing-bugs');
@@ -158,7 +160,7 @@ for (const width of [1280, 360]) {
     await expect(dialog.getByRole('button', { name: 'PR requested' })).toBeDisabled();
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
 
-    // The ecosystem store is untouched; reopening shows the same PR.
+    // The workspace's installs are untouched; reopening shows the same PR.
     await dialog.getByRole('button', { name: 'Done' }).click();
     await expect(dialog).toBeHidden();
     await row.getByRole('button', { name: 'Install' }).click();
@@ -166,7 +168,7 @@ for (const width of [1280, 360]) {
     await dialog.getByLabel('Repo', { exact: true }).selectOption({ label: 'madlabs/web' });
     await expect(link).toBeVisible();
 
-    // The repo's installed view lists it with its PR; the ecosystem view doesn't.
+    // The repo's installed view lists it with its PR; the workspace's view doesn't.
     await dialog.getByRole('button', { name: 'Done' }).click();
     await page.getByRole('tab', { name: /Installed/ }).click();
     await expect(page.getByRole('article').filter({ hasText: 'diagnosing-bugs' })).toHaveCount(0);
@@ -179,3 +181,53 @@ for (const width of [1280, 360]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
   });
 }
+
+test('catalog: a member reads the workspace’s installs; installs, the repo scan and dismissals are not theirs', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await page.goto('/?mock=1&mock_role=member#/catalog');
+  const tdd = page.getByRole('article').filter({ hasText: 'tdd' });
+  await expect(tdd).toContainText('Installed');
+  await expect(page.getByLabel('Suggest for a repo')).toHaveCount(0);
+  await expect(tdd.getByRole('button')).toHaveCount(0);
+  await page.getByRole('tab', { name: /Suggested/ }).click();
+  const suggested = page.getByRole('article').filter({ hasText: 'diagnosing-bugs' });
+  await expect(suggested).toBeVisible();
+  await expect(suggested.getByRole('button')).toHaveCount(0);
+  await page.getByRole('tab', { name: 'MCP servers' }).click();
+  await expect(page.getByRole('button', { name: 'Add MCP server' })).toHaveCount(0);
+  await page.getByRole('tab', { name: /Installed/ }).click();
+  await expect(page.getByRole('article').filter({ hasText: 'github' })).toContainText('needs GITHUB_TOKEN');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
+});
+
+test('catalog: a skill installed in another workspace is not installed here', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto('/?mock=1&mock_role=admin#/catalog');
+  // An admin installs and removes, but only owners scan a folder on the kernel's machine or dismiss.
+  const tdd = page.getByRole('article').filter({ hasText: 'tdd' });
+  await expect(tdd.getByRole('button', { name: 'Remove' })).toBeVisible();
+  await expect(page.getByLabel('Suggest for a repo')).toHaveCount(0);
+  await page.getByRole('tab', { name: /Suggested/ }).click();
+  await expect(page.getByRole('button', { name: /^Dismiss / })).toHaveCount(0);
+
+  await sidebar(page).getByRole('button', { name: /^Workspace: / }).click();
+  await sidebar(page).getByRole('menu').getByRole('menuitem', { name: 'New workspace' }).click();
+  await page.getByRole('dialog').getByLabel('Name').fill('Lab');
+  await page.getByRole('dialog').getByRole('button', { name: 'Create workspace' }).click();
+  await sidebar(page).getByRole('link', { name: 'Catalog' }).click();
+  await expect(page.getByText('Nothing installed yet. Pick one under Suggested.')).toBeVisible();
+  await page.getByRole('tab', { name: /Suggested/ }).click();
+  const here = page.getByRole('article').filter({ hasText: 'tdd' });
+  await expect(here).toContainText('v1.2.3');
+  await here.getByRole('button', { name: 'Install' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Install' }).click();
+  await expect(page.getByText('tdd installed')).toBeVisible();
+  await expect(page.getByRole('tab', { name: /Installed/ })).toHaveAttribute('aria-selected', 'true');
+  await here.getByRole('button', { name: 'Remove' }).click();
+  await expect(page.getByText('tdd removed')).toBeVisible();
+
+  // Main keeps its own install.
+  await sidebar(page).getByRole('button', { name: /^Workspace: / }).click();
+  await sidebar(page).getByRole('menu').getByRole('menuitemradio', { name: 'Main', exact: true }).click();
+  await expect(page.getByRole('article').filter({ hasText: 'tdd' }).getByRole('button', { name: 'Remove' })).toBeVisible();
+});
