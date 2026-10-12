@@ -22,8 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
+      # registry-url makes setup-node write NODE_AUTH_TOKEN to ~/.npmrc.
       - uses: actions/setup-node@v4
-        with: { node-version: 24 }
+        with:
+          node-version: 24
+          registry-url: https://npm.pkg.github.com
+          scope: '@hryer'
       - name: Footprint
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
