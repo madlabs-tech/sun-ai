@@ -66,10 +66,16 @@ async fn acl_upgrade_turns_old_roles_into_workspace_roles() {
             [WorkspaceId::MAIN]
         );
     }
-    assert_eq!(roles[0], (Role::Viewer, vec!["viewer".to_owned()]));
-    assert_eq!(roles[1], (Role::Member, vec!["member".to_owned()]));
-    assert_eq!(roles[2], (Role::Admin, vec!["admin".to_owned()]));
-    assert_eq!(roles[3], (Role::Owner, vec!["owner".to_owned()]));
+    let keys = |n: usize| -> Vec<String> {
+        ["viewer", "member", "admin", "owner"][..n]
+            .iter()
+            .map(|k| (*k).to_owned())
+            .collect()
+    };
+    assert_eq!(roles[0], (Role::Viewer, keys(1)));
+    assert_eq!(roles[1], (Role::Member, keys(2)));
+    assert_eq!(roles[2], (Role::Admin, keys(3)));
+    assert_eq!(roles[3], (Role::Owner, keys(4)));
     assert!(tx.get_member(ids[3]).await.unwrap().is_owner);
     assert!(!tx.get_member(ids[2]).await.unwrap().is_owner);
 

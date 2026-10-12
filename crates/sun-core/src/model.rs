@@ -1825,16 +1825,16 @@ pub fn permissions_of(is_owner: bool, roles: &[Role]) -> Vec<Permission> {
 }
 
 /// The role names approval `who: role:<name>` matches for someone with
-/// `roles`: the role keys, plus `owner` for a deployment owner, once each.
+/// `roles`: each role's key and the keys of the roles below it (an admin
+/// also passes `role:member` and `role:viewer`, as when admins were in
+/// every lower group), every key for a deployment owner; in ladder order
+/// (viewer, member, admin, owner), once each.
 pub fn roles_of(is_owner: bool, roles: &[Role]) -> Vec<String> {
-    let mut keys: Vec<String> = Vec::new();
-    let owner = is_owner.then_some(Role::Owner);
-    for role in roles.iter().copied().chain(owner) {
-        if !keys.iter().any(|k| k == role.as_str()) {
-            keys.push(role.as_str().to_owned());
-        }
-    }
-    keys
+    [Role::Viewer, Role::Member, Role::Admin, Role::Owner]
+        .into_iter()
+        .filter(|key| is_owner || roles.iter().any(|r| r.covers(*key)))
+        .map(|key| key.as_str().to_owned())
+        .collect()
 }
 
 /// `workspace_member` — a member's role in one workspace.
@@ -2399,9 +2399,15 @@ mod member_tests {
             Role::Member.permissions()
         );
         assert_eq!(
-            roles_of(true, &[Role::Member, Role::Owner, Role::Member]),
-            ["member", "owner"]
+            roles_of(false, &[Role::Member, Role::Viewer]),
+            ["viewer", "member"]
         );
+        assert_eq!(
+            roles_of(false, &[Role::Admin]),
+            ["viewer", "member", "admin"]
+        );
+        assert_eq!(roles_of(true, &[]), ["viewer", "member", "admin", "owner"]);
+        assert!(roles_of(false, &[]).is_empty());
     }
 
     #[test]
