@@ -679,14 +679,17 @@ pub enum Assignee {
     },
 }
 
-/// `agent` — an ecosystem-wide agent (shared by every workspace). A task
-/// assigned to it runs a hidden system workflow per (agent, workspace): one
-/// `agent` step with its runtime chain, instructions and skills.
+/// `agent` — one workspace's agent. A task there assigned to it runs its
+/// hidden system workflow on that workspace: one `agent` step with its
+/// runtime chain (names of the workspace's runtimes), instructions and skills.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Agent {
     /// Id.
     pub id: AgentId,
-    /// Name, unique among active agents ignoring case (1–64 characters).
+    /// The workspace it belongs to.
+    pub workspace_id: WorkspaceId,
+    /// Name, unique among the workspace's active agents ignoring case
+    /// (1–64 characters).
     pub name: String,
     /// What it is for (at most 1000 characters).
     pub description: String,
@@ -1049,12 +1052,16 @@ string_enum! {
     }
 }
 
-/// `runtime` — a configured runtime that workflow `runtime.chain` entries name.
+/// `runtime` — a configured runtime of one workspace, which `runtime.chain`
+/// entries of that workspace's workflows and agents name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runtime {
     /// Id.
     pub id: RuntimeId,
-    /// Name used in workflow chains, e.g. `opencode-openrouter`.
+    /// The workspace whose chains it serves.
+    pub workspace_id: WorkspaceId,
+    /// Name used in workflow chains, unique in its workspace, e.g.
+    /// `opencode-openrouter`.
     pub name: String,
     /// Adapter id (`RuntimeAdapter::id`), e.g. `opencode`.
     pub adapter: String,
@@ -1064,6 +1071,10 @@ pub struct Runtime {
     /// (`runtime.config_json`).
     #[serde(default)]
     pub byo_key: Option<crate::ByoKey>,
+    /// Who added it; `None` for one a chain or `sun.yaml` named first, or
+    /// one from before runtimes were per workspace.
+    #[serde(default)]
+    pub created_by: Option<crate::MemberId>,
 }
 
 impl Runtime {
@@ -1215,9 +1226,9 @@ pub struct Note {
 }
 
 string_enum! {
-    /// Scope of a [`MemoryItem`].
+    /// Scope of a [`MemoryItem`] within its workspace.
     pub enum MemoryScope {
-        /// Whole ecosystem.
+        /// The whole workspace (the key predates workspaces).
         Ecosystem => "ecosystem",
         /// One repo.
         Repo => "repo",
@@ -1253,10 +1264,12 @@ impl MemoryStatus {
 pub struct MemoryItem {
     /// Id.
     pub id: MemoryItemId,
+    /// The workspace it was learned in; only that workspace's runs get it.
+    pub workspace_id: WorkspaceId,
     /// Scope.
     pub scope: MemoryScope,
     /// The repo id (`repo` scope) or workflow id (`workflow` scope); `None`
-    /// for the ecosystem.
+    /// for the whole workspace.
     pub scope_id: Option<String>,
     /// The instruction, one line, as it goes into packs and AGENTS.md.
     pub body: String,
@@ -1683,6 +1696,39 @@ impl Secret {
     /// True for a [`Self::PLAIN`] name.
     pub fn is_plain(name: &str) -> bool {
         Self::PLAIN.contains(&name)
+    }
+
+    /// The deployment's own secrets, which stay in the ecosystem scope: the
+    /// mail password, the git host apps, the embedding key.
+    pub const DEPLOYMENT: &[&str] = &[
+        "SMTP_PASSWORD",
+        "EMBEDDING_API_KEY",
+        "GITHUB_APP_ID",
+        "GITHUB_APP_SLUG",
+        "GITHUB_APP_PRIVATE_KEY",
+        "GITHUB_APP_WEBHOOK_SECRET",
+        "GITHUB_APP_API_URL",
+        "GITLAB_OAUTH_URL",
+        "GITLAB_OAUTH_CLIENT_ID",
+        "GITLAB_OAUTH_CLIENT_SECRET",
+    ];
+
+    /// Prefix of the workspace secrets the kernel keeps for a git
+    /// connection (`VCS_<connection id>_TOKEN`, `_REFRESH`, `_WEBHOOK`):
+    /// never listed, set or deleted by hand.
+    pub const CONNECTION_PREFIX: &str = "VCS_";
+
+    /// True for a [`Self::CONNECTION_PREFIX`] name.
+    pub fn is_connection(name: &str) -> bool {
+        name.starts_with(Self::CONNECTION_PREFIX)
+    }
+
+    /// True for a deployment secret: a [`Self::DEPLOYMENT`] name or an SSO
+    /// provider's client secret (`SSO_<ID>_SECRET`). Every other secret a
+    /// person sets belongs to a workspace.
+    pub fn is_deployment(name: &str) -> bool {
+        Self::DEPLOYMENT.contains(&name)
+            || (name.starts_with("SSO_") && name.ends_with("_SECRET") && name.len() > 11)
     }
 
     /// Checks a secret name: 1–64 chars of `A-Z a-z 0-9 _`, not starting with
@@ -2443,6 +2489,27 @@ mod runtime_tests {
     use super::*;
 
     #[test]
+    fn secret_deployment_names_stay_in_the_ecosystem() {
+        for name in [
+            "SMTP_PASSWORD",
+            "SSO_GOOGLE_SECRET",
+            "GITHUB_APP_ID",
+            "EMBEDDING_API_KEY",
+        ] {
+            assert!(Secret::is_deployment(name), "{name}");
+        }
+        for name in [
+            "OR_KEY",
+            "SSO__SECRET",
+            "SSO_SECRET",
+            "JIRA_TOKEN",
+            "SMTP_PASSWORD2",
+        ] {
+            assert!(!Secret::is_deployment(name), "{name}");
+        }
+    }
+
+    #[test]
     fn byo_key_runtimes_name_the_field_to_fix() {
         let byo = |endpoint: &str, model: &str, key: Option<&str>| crate::ByoKey {
             kind: crate::ByoKeyKind::OpenaiCompatible,
@@ -2452,10 +2519,12 @@ mod runtime_tests {
         };
         let runtime = |name: &str, adapter: &str, source, b| Runtime {
             id: RuntimeId::generate(),
+            workspace_id: WorkspaceId::MAIN,
             name: name.into(),
             adapter: adapter.into(),
             source,
             byo_key: b,
+            created_by: None,
         };
         let ollama = byo("http://localhost:11434/v1", "qwen2.5-coder:7b", None);
         let ok = runtime("ollama", "opencode", RuntimeSource::ByoKey, Some(ollama));

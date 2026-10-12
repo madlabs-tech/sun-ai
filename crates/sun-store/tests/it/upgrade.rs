@@ -112,8 +112,10 @@ async fn a_pre_t2_data_dir_opens_with_tasks_members_roles_factors_secrets_and_bl
     assert_eq!(totp[0].1, expected["totp"].as_str().unwrap());
     assert!(totp[0].2.is_some(), "the authenticator was confirmed");
     let ecosystem = SecretScope::Ecosystem("00000000000000000000000000".parse().unwrap());
+    // A person's ecosystem secret moved to Main (M4).
+    let main = SecretScope::Workspace(WorkspaceId::MAIN);
     assert_eq!(
-        tx.secret_value(&ecosystem, "API_TOKEN").await.unwrap(),
+        tx.secret_value(&main, "API_TOKEN").await.unwrap(),
         "pre-t2-secret-value-42"
     );
     drop(tx);
@@ -158,7 +160,7 @@ async fn a_pre_t2_data_dir_opens_with_tasks_members_roles_factors_secrets_and_bl
     let (after_upgrade, pending) = rows().await;
     assert_eq!(pending, 0);
     let kinds: Vec<&str> = after_upgrade.iter().map(|r| r.1.as_str()).collect();
-    assert_eq!(kinds, ["ecosystem", "ecosystem"]);
+    assert_eq!(kinds, ["ecosystem", "workspace"]);
 
     // A secret stored as `workspace` after the migration (a per-workspace
     // secret, sealed with its own AAD) is never re-sealed.
@@ -191,11 +193,11 @@ async fn a_pre_t2_data_dir_opens_with_tasks_members_roles_factors_secrets_and_bl
     for _ in 0..2 {
         let store = Store::open(data).await.unwrap();
         let mut tx = store.read().await.unwrap();
-        for (name, value) in [
-            ("API_TOKEN", "pre-t2-secret-value-42"),
-            ("AFTER_T2", "written-after-the-upgrade"),
+        for (scope, name, value) in [
+            (&main, "API_TOKEN", "pre-t2-secret-value-42"),
+            (&ecosystem, "AFTER_T2", "written-after-the-upgrade"),
         ] {
-            assert_eq!(tx.secret_value(&ecosystem, name).await.unwrap(), value);
+            assert_eq!(tx.secret_value(scope, name).await.unwrap(), value);
         }
         drop(tx);
         drop(store);
@@ -213,13 +215,13 @@ async fn a_pre_canary_data_dir_gets_the_canary_and_then_refuses_a_wrong_key() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path();
     unpack_pre_t2(data);
-    let ecosystem = SecretScope::Ecosystem("00000000000000000000000000".parse().unwrap());
+    let main = SecretScope::Workspace(WorkspaceId::MAIN);
     {
         let store = Store::open(data).await.unwrap();
         let mut tx = store.begin().await.unwrap();
         assert!(tx.setting("master_key_canary").await.unwrap().is_some());
         // Only the canary is left to tell the keys apart.
-        assert!(tx.delete_secret(&ecosystem, "API_TOKEN").await.unwrap());
+        assert!(tx.delete_secret(&main, "API_TOKEN").await.unwrap());
         tx.commit().await.unwrap();
     }
     std::fs::write(data.join("master.key"), "ab".repeat(32)).unwrap();

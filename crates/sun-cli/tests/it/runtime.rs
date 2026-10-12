@@ -1,5 +1,5 @@
 //! `sun runtime add --byo-key` / `sun runtime check` through a running kernel,
-//! `sun secret set` in the ecosystem scope (value on stdin), and the
+//! `sun secret set` in a workspace (Main by default; value on stdin), and the
 //! `sun task pause|resume|cancel` interventions and `sun task|runtime on-limit`.
 #![allow(clippy::unwrap_used)]
 
@@ -115,7 +115,7 @@ fn task_pause_resume_journals_both() {
 }
 
 #[test]
-fn byo_key_runtime_add_check_and_ecosystem_secret() {
+fn byo_key_runtime_add_check_and_workspace_secret() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
@@ -172,8 +172,13 @@ fn byo_key_runtime_add_check_and_ecosystem_secret() {
     assert!(!out.status.success());
     assert!(text(&out).contains("`OR_KEY` is not set"), "{}", text(&out));
 
-    // The key goes in on stdin, into the ecosystem scope the runtime reads.
+    // The key goes in on stdin, into Main, where the runtime reads it.
     let out = run(&["secret", "set", "OR_KEY"], "sk-or-0123456789\n");
+    assert!(
+        text(&out).contains("workspace:00000000000000000000000001"),
+        "{}",
+        text(&out)
+    );
     assert!(out.status.success(), "{}", text(&out));
     let out = run(&["secret", "list"], "");
     assert!(text(&out).contains("OR_KEY"), "{}", text(&out));
@@ -185,5 +190,36 @@ fn byo_key_runtime_add_check_and_ecosystem_secret() {
         text(&out).contains("no online host has opencode"),
         "{}",
         text(&out)
+    );
+
+    // Another workspace: its own runtime of that name, and its own key.
+    let out = run(&["workspace", "create", "Ops"], "");
+    assert!(out.status.success(), "{}", text(&out));
+    let mut in_ops = add.to_vec();
+    in_ops.extend(["--workspace", "ops"]);
+    let out = run(&in_ops, "");
+    assert!(out.status.success(), "{}", text(&out));
+    let check = ["runtime", "check", "openrouter", "--workspace", "Ops"];
+    let out = run(&check, "");
+    assert!(
+        text(&out).contains("`OR_KEY` is not set"),
+        "Main's key isn't Ops': {}",
+        text(&out)
+    );
+    let out = run(
+        &["secret", "set", "OR_KEY", "--workspace", "ops"],
+        "sk-or-ops-0123456789\n",
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    let out = run(&check, "");
+    assert!(!text(&out).contains("is not set"), "{}", text(&out));
+    // A deployment secret stays in the ecosystem.
+    let out = run(&["secret", "set", "GITHUB_APP_SLUG"], "sun-app\n");
+    assert!(text(&out).contains("(ecosystem:"), "{}", text(&out));
+    let out = run(&["secret", "list"], "");
+    let listed = text(&out);
+    assert!(
+        listed.contains("GITHUB_APP_SLUG") && listed.contains("OR_KEY"),
+        "{listed}"
     );
 }

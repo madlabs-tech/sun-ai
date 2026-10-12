@@ -73,7 +73,15 @@ async fn memory_repeated_cause_proposes_once_and_waits_for_a_human() {
         )
         .await;
     }
-    let items = || async { store.read().await.unwrap().memory_items().await.unwrap() };
+    let items = || async {
+        store
+            .read()
+            .await
+            .unwrap()
+            .memory_items(None)
+            .await
+            .unwrap()
+    };
     assert!(
         items().await.is_empty(),
         "two of a cause are not a pattern yet"
@@ -121,6 +129,28 @@ async fn memory_repeated_cause_proposes_once_and_waits_for_a_human() {
     tx.commit().await.unwrap();
     let mut tx = store.read().await.unwrap();
     assert_eq!(active_for(&mut tx, &task).await.unwrap().len(), 1);
+    drop(tx);
+
+    // It belongs to the run's workspace; another workspace's active memory,
+    // even for the whole workspace, never reaches this task's pack.
+    assert_eq!(item.workspace_id, task.workspace_id);
+    let elsewhere = MemoryItem {
+        id: MemoryItemId::generate(),
+        workspace_id: WorkspaceId::generate(),
+        scope: MemoryScope::Ecosystem,
+        scope_id: None,
+        status: MemoryStatus::Active,
+        source_run: None,
+        ..item.clone()
+    };
+    let mut tx = store.begin().await.unwrap();
+    tx.insert_memory(&elsewhere, "elsewhere").await.unwrap();
+    tx.commit().await.unwrap();
+    let mut tx = store.read().await.unwrap();
+    let active = active_for(&mut tx, &task).await.unwrap();
+    assert_eq!(active.iter().map(|m| m.id).collect::<Vec<_>>(), [item.id]);
+    let theirs = tx.memory_items(Some(elsewhere.workspace_id)).await.unwrap();
+    assert_eq!(theirs.len(), 1);
 }
 
 #[tokio::test]
@@ -130,7 +160,13 @@ async fn memory_relabel_counts_and_a_rejected_cause_returns_when_it_keeps_recurr
     let run = seed(&store, FLOW).await;
     let task = task_of(&store, run).await;
     let proposals = || async {
-        let items = store.read().await.unwrap().memory_items().await.unwrap();
+        let items = store
+            .read()
+            .await
+            .unwrap()
+            .memory_items(None)
+            .await
+            .unwrap();
         items.into_iter().map(|(m, _)| m).collect::<Vec<_>>()
     };
     for _ in 0..2 {
@@ -245,7 +281,7 @@ async fn memory_starred_correction_opens_a_pr_and_reaches_packs_once_approved() 
         "once"
     );
 
-    let view = engine.memory().await.unwrap();
+    let view = engine.memory(None).await.unwrap();
     let item = view[0].item.clone();
     assert_eq!(
         (item.scope, view[0].scope_name.as_deref()),
@@ -287,7 +323,7 @@ async fn memory_starred_correction_opens_a_pr_and_reaches_packs_once_approved() 
     // The git host mod's `open_pr`, delivered through the outbox.
     let deadline = Instant::now() + Duration::from_secs(10);
     let pr = loop {
-        if let Some(pr) = engine.memory().await.unwrap()[0].pr.clone()
+        if let Some(pr) = engine.memory(None).await.unwrap()[0].pr.clone()
             && pr.status == OutboxStatus::Delivered
         {
             break pr;
@@ -417,7 +453,7 @@ async fn memory_metrics_count_review_rejections() {
         };
         record(&store, &c).await;
     }
-    let got = engine.memory_metrics().await.unwrap().review_rejections;
+    let got = engine.memory_metrics(None).await.unwrap().review_rejections;
     assert_eq!((got.overall.corrections, got.overall.repeats), (2, 1));
     assert_eq!(got.weeks[7].rate.corrections, 2);
     assert_eq!(
@@ -589,7 +625,7 @@ async fn workflow_scope_proposal_opens_a_pr() {
         )
         .await;
     }
-    let item = engine.memory().await.unwrap()[0].item.clone();
+    let item = engine.memory(None).await.unwrap()[0].item.clone();
     assert_eq!(item.scope, MemoryScope::Workflow);
     assert_eq!(item.target.as_deref(), Some(".sun/prompts/fix.md"));
 
@@ -618,7 +654,7 @@ async fn workflow_scope_proposal_opens_a_pr() {
     );
     let deadline = Instant::now() + Duration::from_secs(10);
     let view = loop {
-        let view = engine.memory().await.unwrap().remove(0);
+        let view = engine.memory(None).await.unwrap().remove(0);
         if view
             .pr
             .as_ref()

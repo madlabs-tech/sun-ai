@@ -6,10 +6,12 @@
 //! `sha256(token)` hex; the token itself is never stored.
 
 use serde_json::json;
+use sun_core::model::SecretScope;
 use sun_core::model::{AuditAction, AuditEntry, Member, Runtime, RuntimeSource};
-use sun_core::{AuditId, Error, MemberId, Result};
+use sun_core::{AuditId, Error, MemberId, Result, RuntimeId, WorkspaceId};
 use sun_store::{
     AuditRepo, LoginRepo, MemberRepo, ModInstallRepo, RuntimeRepo, SecretRepo, SettingRepo,
+    WorkspaceRepo,
 };
 
 use crate::Engine;
@@ -124,25 +126,27 @@ impl Engine {
         Ok(self.store.read().await?.permission_modes().await?)
     }
 
-    /// Every `runtime` row, by name.
-    pub async fn runtimes(&self) -> Result<Vec<Runtime>> {
-        Ok(self.store.read().await?.runtimes().await?)
+    /// The `runtime` rows of `workspace` (`None`: of every workspace), by name.
+    pub async fn runtimes(&self, workspace: Option<WorkspaceId>) -> Result<Vec<Runtime>> {
+        Ok(self.store.read().await?.runtimes(workspace).await?)
     }
 
-    /// The runtime named `name`, or `NotFound`.
-    pub async fn runtime(&self, name: &str) -> Result<Runtime> {
+    /// `workspace`'s runtime named `name`, or `NotFound`.
+    pub async fn runtime(&self, workspace: WorkspaceId, name: &str) -> Result<Runtime> {
         self.store
             .read()
             .await?
-            .runtime_by_name(name)
+            .runtime_by_name(workspace, name)
             .await?
             .ok_or_else(|| Error::NotFound(format!("runtime {name}")))
     }
 
     /// Stores a configured runtime (`byo_key`, or `credits` with the
-    /// gateway `model` OpenCode needs) after [`Runtime::validate`], audited
-    /// as `actor`; `false` when the name is taken. `update` replaces the
-    /// existing row's config instead (`false`: no such runtime).
+    /// gateway `model` OpenCode needs) on its workspace after
+    /// [`Runtime::validate`], audited as `actor`; `false` when the workspace
+    /// has the name. `update` replaces the config of the workspace's runtime
+    /// of that name instead (`false`: no such runtime). `NotFound` for a
+    /// missing workspace.
     pub async fn save_runtime(
         &self,
         runtime: &Runtime,
@@ -153,15 +157,26 @@ impl Engine {
         runtime.validate()?;
         let model = credits_model(runtime, model)?;
         let mut tx = self.store.begin().await?;
-        if runtime.source == RuntimeSource::Credits {
-            tx.put_setting(&credits_model_key(&runtime.name), &json!(model))
-                .await?;
-        }
+        tx.get_workspace(runtime.workspace_id).await?;
+        let id = match update {
+            false => runtime.id,
+            true => match tx
+                .runtime_by_name(runtime.workspace_id, &runtime.name)
+                .await?
+            {
+                Some(stored) => stored.id,
+                None => return Ok(false),
+            },
+        };
         let saved = if update {
             tx.update_runtime(runtime).await?
         } else {
             tx.insert_runtime(runtime).await?
         };
+        if saved && runtime.source == RuntimeSource::Credits {
+            tx.put_setting(&credits_model_key(id), &json!(model))
+                .await?;
+        }
         if saved {
             let detail = match (&runtime.byo_key, model) {
                 (Some(byo), _) => format!("{} {} {}", runtime.source, byo.endpoint, byo.model),
@@ -175,20 +190,20 @@ impl Engine {
         Ok(saved)
     }
 
-    /// The gateway model of the `credits` runtime `name`, if it has one.
-    pub async fn credits_model(&self, name: &str) -> Result<Option<String>> {
+    /// The gateway model of the `credits` runtime `id`, if it has one.
+    pub async fn credits_model(&self, id: RuntimeId) -> Result<Option<String>> {
         let value = self
             .store
             .read()
             .await?
-            .setting(&credits_model_key(name))
+            .setting(&credits_model_key(id))
             .await?;
         Ok(value.and_then(|v| v.as_str().map(str::to_owned)))
     }
 
     /// Why `runtime` can't start a session as configured, or `None`: its
     /// config fails [`Runtime::validate`], or its key secret is not stored
-    /// (checked by name; the value is never read).
+    /// in its workspace (checked by name; the value is never read).
     pub async fn runtime_problem(&self, runtime: &Runtime) -> Result<Option<String>> {
         if let Err(Error::InvalidInput(why)) = runtime.validate() {
             return Ok(Some(why));
@@ -196,10 +211,14 @@ impl Engine {
         let Some(name) = runtime.byo_key.as_ref().and_then(|b| b.key_secret.as_ref()) else {
             return Ok(None);
         };
-        let scope = crate::ecosystem_scope()?;
+        let scope = SecretScope::Workspace(runtime.workspace_id);
         let stored = self.store.read().await?.list_secrets(Some(&scope)).await?;
         Ok((!stored.iter().any(|s| &s.name == name)).then(|| {
-            format!("key_secret: `{name}` is not set; set it with `sun secret set {name}`")
+            format!(
+                "key_secret: `{name}` is not set in this workspace; set it with \
+                 `sun secret set {name} --workspace {}`",
+                runtime.workspace_id
+            )
         }))
     }
 
@@ -215,8 +234,8 @@ impl Engine {
 }
 
 /// `kernel_setting` key of a `credits` runtime's gateway model.
-pub fn credits_model_key(name: &str) -> String {
-    format!("credits_model:{name}")
+pub fn credits_model_key(id: RuntimeId) -> String {
+    format!("credits_model:{id}")
 }
 
 /// `model` checked for `runtime`: OpenCode on Sun credits needs one from the

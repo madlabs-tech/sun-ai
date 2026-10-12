@@ -1,16 +1,16 @@
-//! `memory_item`: long-term memory (L3) and its proposals.
+//! `memory_item`: each workspace's long-term memory (L3) and its proposals.
 
 use async_trait::async_trait;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use sun_core::model::{MemoryItem, MemoryStatus, OutboxStatus};
 use sun_core::redact::redact;
-use sun_core::{IdemKey, MemoryItemId};
+use sun_core::{IdemKey, MemoryItemId, WorkspaceId};
 
 use crate::repo::{parse, parse_ts, ts};
 use crate::{Result, SecretRepo, StoreError, Tx};
 
-const COLUMNS: &str = "m.id, m.scope, m.scope_id, m.body, m.target, m.reason, m.source_run, m.status, \
+const COLUMNS: &str = "m.id, m.workspace_id, m.scope, m.scope_id, m.body, m.target, m.reason, m.source_run, m.status, \
                        m.author, m.reviewed_by, m.created_at";
 
 /// Where a repo-scope proposal's PR stands: its outbox row.
@@ -32,10 +32,14 @@ pub trait MemoryRepo {
     async fn memory_status(&mut self, dedupe_key: &str) -> Result<Option<MemoryStatus>>;
     /// One item. `NotFound` when missing.
     async fn get_memory(&mut self, id: MemoryItemId) -> Result<MemoryItem>;
-    /// Every item, newest first, with its PR (repo scope, once enqueued).
-    async fn memory_items(&mut self) -> Result<Vec<(MemoryItem, Option<MemoryPr>)>>;
-    /// Every active item, oldest first.
-    async fn active_memory(&mut self) -> Result<Vec<MemoryItem>>;
+    /// Every item of `workspace` (`None`: of every workspace), newest
+    /// first, with its PR (repo scope, once enqueued).
+    async fn memory_items(
+        &mut self,
+        workspace: Option<WorkspaceId>,
+    ) -> Result<Vec<(MemoryItem, Option<MemoryPr>)>>;
+    /// Every active item of `workspace`, oldest first.
+    async fn active_memory(&mut self, workspace: WorkspaceId) -> Result<Vec<MemoryItem>>;
     /// A human's review: moves `id` to `to` when [`MemoryStatus::can_move`]
     /// allows it, else `InvalidTransition`.
     async fn review_memory(
@@ -58,8 +62,8 @@ impl MemoryRepo for Tx {
         let known: Vec<&str> = known.iter().map(String::as_str).collect();
         let done = sqlx::query(
             "INSERT INTO memory_item (id, scope, scope_id, body, reason, source_run, status, \
-             author, reviewed_by, created_at, dedupe_key, target) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+             author, reviewed_by, created_at, dedupe_key, target, workspace_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
              ON CONFLICT (dedupe_key) DO NOTHING",
         )
         .bind(m.id.to_string())
@@ -74,6 +78,7 @@ impl MemoryRepo for Tx {
         .bind(ts(&m.created_at))
         .bind(dedupe_key)
         .bind(m.target.as_deref())
+        .bind(m.workspace_id.to_string())
         .execute(self.conn())
         .await?;
         Ok(done.rows_affected() == 1)
@@ -99,12 +104,17 @@ impl MemoryRepo for Tx {
         memory_from(&row)
     }
 
-    async fn memory_items(&mut self) -> Result<Vec<(MemoryItem, Option<MemoryPr>)>> {
+    async fn memory_items(
+        &mut self,
+        workspace: Option<WorkspaceId>,
+    ) -> Result<Vec<(MemoryItem, Option<MemoryPr>)>> {
         sqlx::query(&format!(
             "SELECT {COLUMNS}, o.status AS pr_status, o.result_json AS pr_result \
              FROM memory_item m LEFT JOIN outbox o ON o.idem_key = m.pr_key \
+             WHERE $1 IS NULL OR m.workspace_id = $1 \
              ORDER BY m.created_at DESC, m.id DESC"
         ))
+        .bind(workspace.map(|w| w.to_string()))
         .fetch_all(self.conn())
         .await?
         .iter()
@@ -125,10 +135,12 @@ impl MemoryRepo for Tx {
         .collect()
     }
 
-    async fn active_memory(&mut self) -> Result<Vec<MemoryItem>> {
+    async fn active_memory(&mut self, workspace: WorkspaceId) -> Result<Vec<MemoryItem>> {
         sqlx::query(&format!(
-            "SELECT {COLUMNS} FROM memory_item m WHERE m.status = $1 ORDER BY m.created_at, m.id"
+            "SELECT {COLUMNS} FROM memory_item m WHERE m.workspace_id = $1 AND m.status = $2 \
+             ORDER BY m.created_at, m.id"
         ))
+        .bind(workspace.to_string())
         .bind(MemoryStatus::Active.as_str())
         .fetch_all(self.conn())
         .await?
@@ -199,6 +211,7 @@ fn memory_from(row: &SqliteRow) -> Result<MemoryItem> {
     let source_run: Option<String> = row.try_get("source_run")?;
     Ok(MemoryItem {
         id: parse(row.try_get("id")?)?,
+        workspace_id: parse(row.try_get("workspace_id")?)?,
         scope: parse(row.try_get("scope")?)?,
         scope_id: row.try_get("scope_id")?,
         body: row.try_get("body")?,

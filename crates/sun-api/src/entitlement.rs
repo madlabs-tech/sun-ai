@@ -195,8 +195,6 @@ pub(crate) async fn get(
 /// Refuses one more `what` (a [`Quota`]) in `workspace` when `current`
 /// already reach its plan's cap, with a message saying how to get unstuck.
 /// No cap: always allowed (Community has none).
-// ponytail: agents, runtimes and byo_keys carry caps but nothing enforces
-// them yet; M4's per-workspace create handlers add one call each.
 pub(crate) async fn within_plan(
     api: &Api,
     workspace: WorkspaceId,

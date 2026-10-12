@@ -1,6 +1,7 @@
 //! Workspaces, part of the **Facade** for the API. A workspace
 //! owns its workflows, projects, tasks (`task.workspace_id`,
-//! [`Engine::workspace_of_task`]) and repos (`vcs`). Knowledge sources are
+//! [`Engine::workspace_of_task`]), repos (`vcs`), agents, runtimes, secrets
+//! and memory. Knowledge sources are
 //! linked to workspaces; an admin imports one into another workspace as the
 //! same row ([`Engine::import_to_workspace`]). Each change commits with its
 //! audit row.
@@ -15,13 +16,13 @@ use sun_core::model::{
     Workspace,
 };
 use sun_core::{
-    ArtifactId, Error, EvalRunId, EvalSetId, MemberId, OutboxId, ProjectId, RepoId, Result, RunId,
-    TaskId, VcsConnectionId, WorkflowId, WorkspaceId,
+    AgentId, ArtifactId, CorrectionId, Error, EvalRunId, EvalSetId, MemberId, MemoryItemId, NoteId,
+    OutboxId, ProjectId, RepoId, Result, RunId, TaskId, VcsConnectionId, WorkflowId, WorkspaceId,
 };
 use sun_store::{
-    AgentRepo, ArtifactRepo, AuditRepo, EvalRepo, KnowledgeRepo, MemberRepo, MembershipRepo,
-    OutboxRepo, ProjectRepo, RepoRepo, RunRepo, TaskRepo, Tx, VcsRepo, WorkflowRepo, WorkspaceItem,
-    WorkspaceRepo,
+    AgentRepo, ArtifactRepo, AuditRepo, CorrectionRepo, EvalRepo, KnowledgeRepo, MemberRepo,
+    MembershipRepo, MemoryRepo, NoteRepo, OutboxRepo, ProjectRepo, RepoRepo, RunRepo, TaskRepo, Tx,
+    VcsRepo, WorkflowRepo, WorkspaceItem, WorkspaceRepo,
 };
 
 use crate::{Engine, Pick};
@@ -85,6 +86,14 @@ pub enum OnWorkspace<'a> {
     Project(ProjectId),
     /// A git connection: its workspace.
     VcsConnection(VcsConnectionId),
+    /// An agent: its workspace.
+    Agent(AgentId),
+    /// A memory item: its workspace.
+    MemoryItem(MemoryItemId),
+    /// A correction: its task's workspace.
+    Correction(CorrectionId),
+    /// A note: its run's workspace.
+    Note(NoteId),
 }
 
 /// Which workspaces something lives on ([`Engine::reach`]).
@@ -272,6 +281,16 @@ impl Engine {
             }
             OnWorkspace::Pick(pick) => reach_of_pick(&mut tx, pick).await,
             OnWorkspace::VcsConnection(id) => one(tx.get_connection(id).await?.workspace_id),
+            OnWorkspace::Agent(id) => one(tx.get_agent(id).await?.workspace_id),
+            OnWorkspace::MemoryItem(id) => one(tx.get_memory(id).await?.workspace_id),
+            OnWorkspace::Correction(id) => {
+                let task = tx.get_correction(id).await?.task_id;
+                one(workspace_of_task(&mut tx, task).await?)
+            }
+            OnWorkspace::Note(id) => {
+                let run = tx.get_note(id).await?.run_id;
+                one(tx.workspace_of_run(run).await?)
+            }
         }
     }
 

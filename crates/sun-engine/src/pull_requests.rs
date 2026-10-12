@@ -1250,6 +1250,7 @@ mod tests {
             .unwrap();
         let agent = Agent {
             id: AgentId::generate(),
+            workspace_id: WorkspaceId::MAIN,
             name: "dev".into(),
             description: String::new(),
             instructions: String::new(),

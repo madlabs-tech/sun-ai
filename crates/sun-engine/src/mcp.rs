@@ -1,13 +1,14 @@
 //! MCP connectors: the grants an agent session gets — the
 //! workflow's `mcp:`, its step's `mcp:` and the task's own (stored as the
-//! `kernel_setting` [`task_mcp_key`]) — and the ecosystem secrets a
-//! registered MCP server connects with.
+//! `kernel_setting` [`task_mcp_key`]) — and the secrets a registered MCP
+//! server connects with.
 
-use sun_core::{Error, McpGrant, Result, RunId, StepKey, TaskId, render_mcp_config};
+use sun_core::model::SecretScope;
+use sun_core::{Error, McpGrant, Result, RunId, StepKey, TaskId, WorkspaceId, render_mcp_config};
 use sun_store::{RunRepo, SecretRepo, SettingRepo, Store, TaskRepo, WorkflowRepo};
 use sun_workflow::StepKind;
 
-use crate::{Engine, ecosystem_scope};
+use crate::Engine;
 
 /// Most MCP servers one task may enable.
 pub const MAX_TASK_MCP_GRANTS: usize = 32;
@@ -19,10 +20,12 @@ fn task_mcp_key(task_id: TaskId) -> String {
     format!("task_mcp.{task_id}")
 }
 
-/// Values of the ecosystem secrets `names` (an MCP server's
-/// `secret_names()`), in order. A missing one is `InvalidInput` naming it.
+/// Values of the secrets `names` (an MCP server's `secret_names()`), in
+/// order, from Main's. A missing one is `InvalidInput` naming it.
+// ponytail: MCP servers are deployment-wide, so their secrets are Main's;
+// read the task's workspace's once servers are per workspace.
 pub async fn mcp_secret_values(store: &Store, names: &[String]) -> Result<Vec<(String, String)>> {
-    let scope = ecosystem_scope()?;
+    let scope = SecretScope::Workspace(WorkspaceId::MAIN);
     let mut read = store.read().await?;
     let mut values = Vec::with_capacity(names.len());
     for name in names {
@@ -30,7 +33,7 @@ pub async fn mcp_secret_values(store: &Store, names: &[String]) -> Result<Vec<(S
             Ok(value) => values.push((name.clone(), value)),
             Err(Error::NotFound(_)) => {
                 return Err(Error::InvalidInput(format!(
-                    "secret {name} is not set; add it under Settings → Secrets (or `sun secret set {name}`) first"
+                    "secret {name} is not set in Main; add it under Settings → Secrets (or `sun secret set {name}`) first"
                 )));
             }
             Err(e) => return Err(e),
@@ -50,7 +53,7 @@ async fn grants_of(read: &mut impl SettingRepo, task_id: TaskId) -> Result<Vec<M
 }
 
 impl Engine {
-    /// Values of the ecosystem secrets an MCP server needs
+    /// Values of the secrets an MCP server needs
     /// ([`mcp_secret_values`]).
     pub async fn mcp_secrets(&self, names: &[String]) -> Result<Vec<(String, String)>> {
         mcp_secret_values(&self.store, names).await

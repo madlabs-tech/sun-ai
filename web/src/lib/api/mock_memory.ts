@@ -1,10 +1,12 @@
 // In-memory long-term memory for the mock: proposals, active items, reviews, stars
 // and the repeat-mistake rate. Mirrors the kernel's moves and its 409/422 answers.
 import type { MemoryItem, MemoryMetrics } from './types';
+import { MAIN_WORKSPACE } from './types';
 import { MockError, clone, corrections_of, find_task, not_found } from './mock';
 
 const item = (n: number, fields: Partial<MemoryItem>): MemoryItem => ({
   id: `01JAMEM${String(n).padStart(4, '0')}`.padEnd(26, '0'),
+  workspace_id: MAIN_WORKSPACE,
   scope: 'ecosystem',
   scope_id: null,
   scope_name: null,

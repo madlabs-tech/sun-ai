@@ -466,7 +466,7 @@ impl Engine {
         }
         let hosts = read.hosts().await?;
         let context = read.task_context(task.id).await?;
-        let memory = read.active_memory().await?;
+        let memory = read.active_memory(task.workspace_id).await?;
         let recorded = run_events(&mut read, original.id).await?;
         drop(read);
         let transcripts = transcript_events(&recorded);
@@ -514,8 +514,8 @@ impl Engine {
             tx.insert_memory(item, &format!("copy:{}", item.id)).await?;
         }
         for (i, line) in spec.candidate.memory.iter().enumerate() {
-            tx.insert_memory(&candidate_item(line), &format!("candidate:{i}"))
-                .await?;
+            let item = candidate_item(copy.workspace_id, line);
+            tx.insert_memory(&item, &format!("candidate:{i}")).await?;
         }
         tx.insert_run(&run).await?;
         tx.append_event(NewEvent::new(
@@ -793,9 +793,10 @@ fn approver(workflow: &Workflow, key: &StepKey) -> Principal {
     }
 }
 
-fn candidate_item(line: &str) -> MemoryItem {
+fn candidate_item(workspace: sun_core::WorkspaceId, line: &str) -> MemoryItem {
     MemoryItem {
         id: MemoryItemId::generate(),
+        workspace_id: workspace,
         scope: MemoryScope::Ecosystem,
         scope_id: None,
         body: line.trim().to_owned(),

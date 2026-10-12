@@ -169,7 +169,11 @@ async fn assigned(store: &Store, run_id: RunId, attempt: u32, name: &str) -> Ses
         ended_at: None,
     };
     let mut tx = store.begin().await.unwrap();
-    let runtime = tx.runtime_by_name(name).await.unwrap().unwrap();
+    let runtime = tx
+        .runtime_by_name(sun_core::WorkspaceId::MAIN, name)
+        .await
+        .unwrap()
+        .unwrap();
     tx.insert_step(&step).await.unwrap();
     let host = Host {
         id: HostId::generate(),
@@ -206,7 +210,9 @@ async fn credits_sessions_get_a_gateway_key_revoked_on_exit() {
         ("opencode-credits", "opencode", RuntimeSource::Credits),
         ("claude-code", "claude-code", RuntimeSource::ByoRuntime),
     ] {
-        tx.upsert_runtime(name, adapter, source).await.unwrap();
+        tx.upsert_runtime(sun_core::WorkspaceId::MAIN, name, adapter, source)
+            .await
+            .unwrap();
     }
     tx.commit().await.unwrap();
     let calls = Calls::default();

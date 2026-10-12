@@ -222,9 +222,20 @@ impl WorkspaceRepo for Tx {
         // Agents' system workflows here ran no task (there is none): they go too.
         let system =
             "SELECT id FROM workflow WHERE workspace_id = $1 AND system_agent_id IS NOT NULL";
+        // So do its agents, runtimes (their cooldowns and gateway models) and
+        // memory.
+        let runtimes = "SELECT id FROM runtime WHERE workspace_id = $1";
         for sql in [
             format!("DELETE FROM workflow_version WHERE workflow_id IN ({system})"),
             format!("DELETE FROM workflow WHERE id IN ({system})"),
+            "DELETE FROM agent WHERE workspace_id = $1".to_owned(),
+            format!("DELETE FROM runtime_state WHERE runtime_id IN ({runtimes})"),
+            format!(
+                "DELETE FROM kernel_setting \
+                 WHERE key IN (SELECT 'credits_model:' || id FROM ({runtimes}))"
+            ),
+            "DELETE FROM runtime WHERE workspace_id = $1".to_owned(),
+            "DELETE FROM memory_item WHERE workspace_id = $1".to_owned(),
         ] {
             sqlx::query(&sql)
                 .bind(id.to_string())

@@ -133,8 +133,48 @@ pub(crate) fn router(api: Api) -> Router {
         )
         .route("/me", get(auth::me))
         .route("/features", get(crate::features::get))
+        // A workspace's agents, runtimes and memory, for any member there
+        // (`?workspace=`; the guard keeps everyone else out).
+        .route("/agents", get(crate::agents::list))
+        .route("/runtimes", get(crate::hosts::list_runtimes))
+        .route("/runtimes/{id}/readiness", get(crate::hosts::readiness))
+        .route("/memory", get(crate::memory::list))
+        .route("/memory/metrics", get(crate::memory::metrics))
         .merge(knowledge_routes())
         .route_layer(middleware::from_fn(auth::require_by_method));
+    // A workspace's agents and runtimes, by the caller's role there.
+    let runtime_manage = Router::new()
+        .route("/agents", post(crate::agents::create))
+        .route(
+            "/agents/{id}",
+            patch(crate::agents::update).delete(crate::agents::archive),
+        )
+        .route("/runtimes", post(crate::hosts::create_runtime))
+        .route("/runtimes/{id}", put(crate::hosts::update_runtime))
+        .route_layer(middleware::from_fn(auth::require(&[
+            Permission::ManageRuntimes,
+        ])));
+    // A workspace's secrets.
+    let secret_manage = Router::new()
+        .route("/secrets", get(crate::secrets::list))
+        .route(
+            "/secrets/workspace/{id}/{name}",
+            put(crate::secrets::put_in_workspace).delete(crate::secrets::remove_in_workspace),
+        )
+        .route_layer(middleware::from_fn(auth::require(&[
+            Permission::ManageSecrets,
+        ])));
+    // A workspace's memory: reviews and the stars that propose it.
+    let memory_manage = Router::new()
+        .route("/memory/{id}/review", post(crate::memory::review))
+        .route(
+            "/corrections/{id}/star",
+            post(crate::memory::star_correction),
+        )
+        .route("/notes/{id}/star", post(crate::memory::star_note))
+        .route_layer(middleware::from_fn(auth::require(&[
+            Permission::ManageSettings,
+        ])));
     let workflow_create = Router::new()
         .route("/workflows", post(create_workflow))
         .route("/templates/{id}/install", post(install_template))
@@ -232,9 +272,9 @@ pub(crate) fn router(api: Api) -> Router {
             Permission::ManageSettings,
         ])));
     // The deployment itself, for deployment owners only: its accounts, mail,
-    // sign-in, security, audit, hosts, mods, ecosystem secrets, runtimes and
-    // agents, limits, catalog, memory, usage, its account at Sun and
-    // marketplace.
+    // sign-in, security, audit, hosts, mods, ecosystem and mod secrets, the
+    // permission mode of each runtime adapter (every workspace's sessions
+    // of it), limits, catalog, usage, its account at Sun and marketplace.
     let deployment = Router::new()
         .route(
             "/members",
@@ -314,20 +354,6 @@ pub(crate) fn router(api: Api) -> Router {
             "/runtimes/{id}/policy",
             put(crate::hosts::set_runtime_policy),
         )
-        .route(
-            "/runtimes",
-            get(crate::hosts::list_runtimes).post(crate::hosts::create_runtime),
-        )
-        .route("/runtimes/{id}/readiness", get(crate::hosts::readiness))
-        .route(
-            "/agents",
-            get(crate::agents::list).post(crate::agents::create),
-        )
-        .route(
-            "/agents/{id}",
-            patch(crate::agents::update).delete(crate::agents::archive),
-        )
-        .route("/runtimes/{id}", put(crate::hosts::update_runtime))
         .route("/settings/on_limit", get(get_on_limit).put(put_on_limit))
         .route("/settings/budget", get(get_spend_cap).put(put_spend_cap))
         .route("/decisions/export", get(crate::corrections::export))
@@ -344,7 +370,6 @@ pub(crate) fn router(api: Api) -> Router {
             "/mcp_servers/{name}",
             delete(crate::catalog::remove_mcp_server),
         )
-        .route("/secrets", get(crate::secrets::list))
         .route(
             "/secrets/{kind}/{id}/{name}",
             put(crate::secrets::put).delete(crate::secrets::remove),
@@ -364,14 +389,6 @@ pub(crate) fn router(api: Api) -> Router {
             "/catalog/{id}/dismissed",
             put(crate::catalog::dismiss).delete(crate::catalog::restore),
         )
-        .route("/memory", get(crate::memory::list))
-        .route("/memory/metrics", get(crate::memory::metrics))
-        .route("/memory/{id}/review", post(crate::memory::review))
-        .route(
-            "/corrections/{id}/star",
-            post(crate::memory::star_correction),
-        )
-        .route("/notes/{id}/star", post(crate::memory::star_note))
         // Deployment-wide reads, until they are per workspace.
         .route("/usage", get(usage))
         .route("/quality/metrics", get(crate::quality::metrics))
@@ -392,6 +409,9 @@ pub(crate) fn router(api: Api) -> Router {
         .merge(member_edit)
         .merge(invite)
         .merge(knowledge_import)
+        .merge(runtime_manage)
+        .merge(secret_manage)
+        .merge(memory_manage)
         .merge(deployment)
         .merge(approvals)
         // Any signed-in member creates a workspace (the handler applies
@@ -1532,7 +1552,9 @@ async fn usage(State(api): State<Api>, Query(filter): Query<UsageFilter>) -> Api
 async fn usage_by_runtime(api: &Api) -> ApiResult<Vec<Value>> {
     let since = chrono::Utc::now() - chrono::Duration::hours(QUOTA_WINDOW_HOURS);
     let window = api.engine.usage_by_runtime(Some(since)).await?;
-    let runtimes = api.engine.runtimes().await?;
+    // ponytail: deployment-wide usage names a runtime by name; a name two
+    // workspaces share shows the first one's source.
+    let runtimes = api.engine.runtimes(None).await?;
     let rows = api.engine.usage_by_runtime(None).await?;
     Ok(rows
         .into_iter()

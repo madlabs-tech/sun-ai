@@ -6,9 +6,12 @@
 //! - a human stars a correction or a `learning` note
 //!   ([`Engine::star_correction`], [`Engine::star_note`]).
 //!
+//! **Workspace:** an item belongs to the workspace of the run it was
+//! learned from, and only that workspace's runs get it ([`active_for`]).
+//!
 //! **Scope:** a run in exactly one repo gives a `repo` proposal;
-//! otherwise it is `workflow` scope (a correction) or `ecosystem` scope (a
-//! note). Every proposal is an approval card on the Memory screen and, when
+//! otherwise it is `workflow` scope (a correction) or `ecosystem` scope,
+//! the whole workspace (a note). Every proposal is an approval card on the Memory screen and, when
 //! its run has a repo (a `repo` proposal's, else the run's first),
 //! also a PR that adds the line to a file there, pushed from the engine's
 //! host and opened by the git host mod's `open_pr` through the
@@ -23,7 +26,7 @@
 //!
 //! **Nothing becomes active without a human**: only
 //! [`Engine::review_memory`] moves an item, through
-//! [`MemoryStatus::can_move`]. Active items reach every later pack as P3
+//! [`MemoryStatus::can_move`]. Active items reach every later pack of their workspace as P3
 //! ([`active_for`]). [`Engine::memory_metrics`] tracks whether mistakes
 //! still repeat.
 
@@ -40,7 +43,7 @@ use sun_core::model::{
 };
 use sun_core::{
     CorrectionId, Error, IdemKey, MemoryItemId, NoteId, OutboxId, RepoId, Result, RunId, StepKey,
-    TaskId, Timestamp, WorkflowId,
+    TaskId, Timestamp, WorkflowId, WorkspaceId,
 };
 use sun_store::{
     CorrectionRepo, EventLog, MemoryRepo, NoteRepo, OutboxRepo, RepoRepo, RunRepo, RuntimeRepo, Tx,
@@ -91,6 +94,7 @@ pub(crate) async fn on_correction(tx: &mut Tx, c: &Correction) -> Result<()> {
     let (scope, scope_id) = scope_of(&run.repo_ids, MemoryScope::Workflow, c.workflow_id);
     let item = MemoryItem {
         id: MemoryItemId::generate(),
+        workspace_id: tx.workspace_of_run(c.run_id).await?,
         scope,
         scope_id,
         body: rule(c.cause_label, &c.body),
@@ -257,8 +261,9 @@ fn one_line(text: &str, max: usize) -> String {
     out
 }
 
-/// The active items a step of `task` gets as P3: the ecosystem's, the
-/// task's workflow's and its latest run's repos'.
+/// The active items a step of `task` gets as P3, all from the task's
+/// workspace: the whole workspace's, the task's workflow's and its latest
+/// run's repos'.
 pub(crate) async fn active_for(tx: &mut Tx, task: &Task) -> Result<Vec<MemoryItem>> {
     let workflow = task.workflow_id.map(|w| w.to_string());
     let run = tx.runs_of_task(task.id).await?.pop();
@@ -269,7 +274,7 @@ pub(crate) async fn active_for(tx: &mut Tx, task: &Task) -> Result<Vec<MemoryIte
         .map(RepoId::to_string)
         .collect();
     Ok(tx
-        .active_memory()
+        .active_memory(task.workspace_id)
         .await?
         .into_iter()
         .filter(|m| match (m.scope, m.scope_id.as_ref()) {
@@ -563,12 +568,13 @@ fn edit_script(branch: &str) -> String {
 }
 
 impl Engine {
-    /// Every memory item, newest first.
-    pub async fn memory(&self) -> Result<Vec<MemoryView>> {
+    /// The memory items of `workspace` (`None`: of every workspace), newest
+    /// first.
+    pub async fn memory(&self, workspace: Option<WorkspaceId>) -> Result<Vec<MemoryView>> {
         let mut tx = self.store.read().await?;
         let mut names: HashMap<String, Option<String>> = HashMap::new();
         let mut out = Vec::new();
-        for (item, pr) in tx.memory_items().await? {
+        for (item, pr) in tx.memory_items(workspace).await? {
             let scope_name = match (item.scope, item.scope_id.clone()) {
                 (MemoryScope::Ecosystem, _) | (_, None) => None,
                 (scope, Some(id)) => {
@@ -639,6 +645,7 @@ impl Engine {
         let target = target_for(&mut tx, c.run_id, c.step_key.as_ref(), scope, &c.body).await?;
         let item = MemoryItem {
             id: MemoryItemId::generate(),
+            workspace_id: tx.workspace_of_run(c.run_id).await?,
             scope,
             scope_id,
             body: rule(CorrectionCause::Other, &c.body),
@@ -674,6 +681,7 @@ impl Engine {
         let target = target_for(&mut tx, note.run_id, step, scope, &note.body).await?;
         let item = MemoryItem {
             id: MemoryItemId::generate(),
+            workspace_id: tx.workspace_of_run(note.run_id).await?,
             scope,
             scope_id,
             body: one_line(&note.body, MAX_LINE),
@@ -690,12 +698,29 @@ impl Engine {
         Ok(created)
     }
 
-    /// Repeat-mistake rate over time, per workflow and runtime.
-    // ponytail: computed in memory from every correction; aggregate in SQL
-    // when corrections reach the hundreds of thousands.
-    pub async fn memory_metrics(&self) -> Result<MemoryMetrics> {
+    /// Repeat-mistake rate over time, per workflow and runtime, of the runs
+    /// on `workspace` (`None`: on every workspace).
+    // ponytail: computed in memory from every correction, one workspace
+    // lookup per run; aggregate in SQL when corrections reach the hundreds
+    // of thousands.
+    pub async fn memory_metrics(&self, workspace: Option<WorkspaceId>) -> Result<MemoryMetrics> {
         let mut tx = self.store.read().await?;
-        let corrections = tx.corrections(u32::MAX).await?;
+        let mut on: HashMap<RunId, bool> = HashMap::new();
+        let mut corrections = tx.corrections(u32::MAX).await?;
+        let mut gates = tx.events_of_kind("gate_result").await?;
+        if let Some(workspace) = workspace {
+            let runs = corrections.iter().map(|c| c.run_id);
+            for run in runs
+                .chain(gates.iter().map(|e| e.run_id))
+                .collect::<Vec<_>>()
+            {
+                if let std::collections::hash_map::Entry::Vacant(slot) = on.entry(run) {
+                    slot.insert(tx.workspace_of_run(run).await.ok() == Some(workspace));
+                }
+            }
+            corrections.retain(|c| on[&c.run_id]);
+            gates.retain(|e| on[&e.run_id]);
+        }
         let mut names = HashMap::new();
         for c in &corrections {
             if let std::collections::hash_map::Entry::Vacant(e) = names.entry(c.workflow_id) {
@@ -703,7 +728,7 @@ impl Engine {
                 e.insert(name.unwrap_or_else(|_| c.workflow_id.to_string()));
             }
         }
-        let items = tx.memory_items().await?;
+        let items = tx.memory_items(workspace).await?;
         let count = |status| {
             let n = items.iter().filter(|(m, _)| m.status == status).count();
             u32::try_from(n).unwrap_or(u32::MAX)
@@ -716,7 +741,6 @@ impl Engine {
             .cloned()
             .collect();
         let rejected = repeat_metrics(&rejects, Utc::now(), |id| names[&id].clone());
-        let gates = tx.events_of_kind("gate_result").await?;
         let mut run_workflow = HashMap::new();
         // Per run: (start, runtime name) of each agent attempt.
         let mut run_agents: HashMap<RunId, Vec<(Timestamp, String)>> = HashMap::new();

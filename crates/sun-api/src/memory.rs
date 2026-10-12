@@ -1,9 +1,12 @@
-//! Long-term memory: `/api/v1/memory`,
-//! `/memory/{id}/review`, `/memory/metrics`, and the stars that propose it:
-//! `/corrections/{id}/star`, `/notes/{id}/star`.
+//! Long-term memory, per workspace: `/api/v1/memory?workspace=`,
+//! `/memory/{id}/review`, `/memory/metrics?workspace=`, and the stars that
+//! propose it: `/corrections/{id}/star`, `/notes/{id}/star`. Any member
+//! reads; reviewing and starring need `manage_settings` in the item's
+//! workspace (the router). Only a deployment owner may leave out
+//! `?workspace=` (every workspace's).
 
 use axum::Json;
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, Query, State};
 use serde::{Deserialize, Serialize};
 use sun_core::model::{MemoryItem, MemoryStatus};
 use sun_engine::{MemoryMetrics, MemoryView};
@@ -12,13 +15,24 @@ use crate::Api;
 use crate::auth::Caller;
 use crate::error::{ApiError, ApiResult};
 use crate::routes::{Body, id};
+use crate::workspace_access::{InWorkspace, listed_workspace};
 
-pub(crate) async fn list(State(api): State<Api>) -> ApiResult<Json<Vec<MemoryView>>> {
-    Ok(Json(api.engine.memory().await?))
+pub(crate) async fn list(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Query(query): Query<InWorkspace>,
+) -> ApiResult<Json<Vec<MemoryView>>> {
+    let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
+    Ok(Json(api.engine.memory(workspace).await?))
 }
 
-pub(crate) async fn metrics(State(api): State<Api>) -> ApiResult<Json<MemoryMetrics>> {
-    Ok(Json(api.engine.memory_metrics().await?))
+pub(crate) async fn metrics(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Query(query): Query<InWorkspace>,
+) -> ApiResult<Json<MemoryMetrics>> {
+    let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
+    Ok(Json(api.engine.memory_metrics(workspace).await?))
 }
 
 #[derive(Deserialize)]
