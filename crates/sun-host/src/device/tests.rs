@@ -3,7 +3,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::PermissionsExt;
 
 use sun_core::SessionId;
 
@@ -87,8 +86,7 @@ impl Fakes {
                 "#!/bin/sh\nlog='{}'\necho \"{name} $*\" >> \"$log\"\n{body}",
                 log.display()
             );
-            std::fs::write(&path, script).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::exec_env::testing::script(&path, &script);
             path
         };
         let config = DeviceConfig {

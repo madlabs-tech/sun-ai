@@ -45,6 +45,7 @@ impl Fixture {
         let mod_dir = root.join("mod");
         std::fs::create_dir_all(&mod_dir).unwrap();
         std::fs::copy(env!("CARGO_BIN_EXE_sun-evil-mod"), mod_dir.join("evil")).unwrap();
+        crate::warm(&mod_dir.join("evil"));
         std::fs::write(root.join("secret.txt"), "kernel secret").unwrap();
         let pong_port = pong_server();
         let yaml = format!(
@@ -316,6 +317,7 @@ async fn sandbox_runs_an_env_shebang_typescript_extension() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+    crate::warm(&entry);
     let relay = parse_manifest(
         "name: relay\nkind: extension\nversion: 0.1.0\napi: '>=1.0 <2.0'\n\
          entry: { command: ./relay.ts }\nprovides: { step_types: [relay] }\n\

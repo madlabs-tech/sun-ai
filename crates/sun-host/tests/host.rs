@@ -3,7 +3,6 @@
 #![allow(clippy::unwrap_used)] // test helpers
 
 use std::collections::{BTreeMap, HashMap};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -215,6 +214,26 @@ impl Kernel {
             other => panic!("expected event, got {other:?}"),
         }
     }
+}
+
+/// Writes an executable script.
+///
+/// ponytail: rust-lang/rust#114554. A fork in another test thread can inherit
+/// a write fd we hold on the script until its exec closes it (O_CLOEXEC), and
+/// an exec in that window fails with "Text file busy". A `sh` child writes the
+/// file, so this process never holds that fd (a `--version` warm-up would run
+/// the fake and add lines to the argv log the test asserts on). Drop this once
+/// std closes the race.
+fn script(path: &Path, text: &str) {
+    use std::io::Write;
+    let mut sh = std::process::Command::new("sh")
+        .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    sh.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+    assert!(sh.wait().unwrap().success(), "{}", path.display());
 }
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -604,16 +623,14 @@ async fn vm_env_lingers_for_gates_then_is_deleted() {
     let data_dir = temp_dir("vm");
     let log = data_dir.join("limactl.log");
     let limactl = data_dir.join("fake-limactl");
-    std::fs::write(
+    script(
         &limactl,
-        format!(
+        &format!(
             "#!/bin/sh\necho \"$*\" >> '{}'\n[ \"$1\" = shell ] || exit 0\nshift 2\n\
              cd \"$1\"; shift 2; exec \"$@\"\n",
             log.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&limactl, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let mut config = HostConfig::new(&data_dir);
     config.vm_cli = limactl;
     // Each gate must reach the host within the linger after its session

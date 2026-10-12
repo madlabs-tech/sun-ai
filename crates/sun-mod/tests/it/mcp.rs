@@ -74,7 +74,8 @@ fn install_launcher() {
         ONCE.call_once(|| {
             let exe = std::env::current_exe().unwrap();
             let target = exe.parent().unwrap().join("sun-mod-sandbox");
-            std::fs::copy(env!("CARGO_BIN_EXE_sun-mod-sandbox"), target).unwrap();
+            std::fs::copy(env!("CARGO_BIN_EXE_sun-mod-sandbox"), &target).unwrap();
+            crate::warm(&target);
         });
     }
 }
@@ -86,6 +87,7 @@ async fn mcp_command_server_runs_sandboxed_behind_a_read_only_proxy() {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_sun-echo-mcp"), bin.join("echo-mcp")).unwrap();
+    crate::warm(&bin.join("echo-mcp"));
     let secret_file = root.join("secret.txt");
     std::fs::write(&secret_file, "kernel secret").unwrap();
     let server = McpServer {
