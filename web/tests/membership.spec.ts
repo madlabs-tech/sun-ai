@@ -197,13 +197,12 @@ test.describe('desktop', () => {
     await expect(page.getByRole('region', { name: 'Invite people' })).toHaveCount(0);
   });
 
-  test('a workspace member sees no deployment pages in the sidebar or Settings', async ({ page }) => {
+  test('a workspace member sees its agents, runtimes and memory, but no deployment pages', async ({ page }) => {
     await open(page, 'tasks', '&mock_role=admin');
-    await expect(sidebar(page).getByRole('heading')).toHaveText(['Work']);
-    for (const name of ['Agents', 'Memory', 'Runtimes', 'Hosts', 'Catalog', 'Mods', 'Marketplace']) {
-      await expect(sidebar(page).getByRole('link', { name })).toHaveCount(0);
-    }
-    await open(page, 'runtimes', '&mock_role=admin');
+    await expect(sidebar(page).getByRole('heading')).toHaveText(['Work', 'AI Team']);
+    for (const name of ['Agents', 'Memory', 'Runtimes']) await expect(sidebar(page).getByRole('link', { name })).toHaveCount(1);
+    for (const name of ['Hosts', 'Catalog', 'Mods', 'Marketplace']) await expect(sidebar(page).getByRole('link', { name })).toHaveCount(0);
+    await open(page, 'hosts', '&mock_role=admin');
     await expect(page.getByRole('heading', { name: 'Tasks', level: 1 })).toBeVisible();
     await sidebar(page).getByRole('link', { name: 'Settings' }).click();
     await expect(page.getByRole('navigation', { name: 'Settings' }).getByRole('heading', { level: 2 })).toHaveText(['My Account', 'Main']);

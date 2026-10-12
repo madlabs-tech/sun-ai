@@ -11,9 +11,22 @@ test('plan badge: the plan of Main from Sun Cloud, nothing to install', async ({
   await expect(plan.getByRole('textbox')).toHaveCount(0);
 });
 
-test('secrets: set one, listed without its value, per-mod tab, delete after confirming', async ({ page }) => {
-  const value = 'super-secret-value-123';
+test('workspace secrets: its own list, not the deployment’s', async ({ page }) => {
   await page.goto('/?mock=1#/settings/secrets');
+  const secrets = page.getByRole('region', { name: 'Secrets' });
+  await expect(secrets).toContainText('Only this workspace’s agents and runtimes get them.');
+  await expect(secrets.getByRole('tab')).toHaveCount(0);
+  await secrets.getByLabel('Name').fill('OPENAI_KEY');
+  await secrets.getByLabel('Value').fill('sk-workspace-123');
+  await secrets.getByRole('button', { name: 'Save secret' }).click();
+  await expect(secrets.getByText('OPENAI_KEY', { exact: true })).toBeVisible();
+  await page.evaluate(() => (location.hash = '#/settings/deployment-secrets'));
+  await expect(page.getByRole('region', { name: 'Secrets' }).getByText('No secrets here yet.')).toBeVisible();
+});
+
+test('deployment secrets: set one, listed without its value, per-mod tab, delete after confirming', async ({ page }) => {
+  const value = 'super-secret-value-123';
+  await page.goto('/?mock=1#/settings/deployment-secrets');
   const secrets = page.getByRole('region', { name: 'Secrets' });
   await expect(secrets.getByText('No secrets here yet.')).toBeVisible();
 
@@ -30,7 +43,7 @@ test('secrets: set one, listed without its value, per-mod tab, delete after conf
   await secrets.getByRole('tab', { name: 'github' }).click();
   await expect(secrets.getByText('GITHUB_TOKEN', { exact: true })).toBeVisible();
   await expect(secrets.getByText('API_TOKEN')).toHaveCount(0);
-  await secrets.getByRole('tab', { name: 'Ecosystem' }).click();
+  await secrets.getByRole('tab', { name: 'Deployment' }).click();
 
   await secrets.getByRole('button', { name: 'Delete API_TOKEN' }).click();
   const dialog = page.getByRole('dialog');

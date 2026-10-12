@@ -1,7 +1,7 @@
 <script lang="ts">
   import { Badge, Button, Icon } from '@hryer/madlabs-design-system/svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
-  import { app, approve, reject } from '../lib/app_state.svelte';
+  import { app, approve, current_workspace, reject } from '../lib/app_state.svelte';
   import { money, needs_approval } from '../lib/format';
   import { href } from '../lib/router.svelte';
   import { api } from '../lib/api/client';
@@ -13,7 +13,7 @@
   // Memory proposals wait here too; advisory, so an older kernel just shows none.
   let proposals = $state<MemoryItem[]>([]);
   const load_proposals = () =>
-    api.memory().then((items) => (proposals = items.filter((m) => m.status === 'proposed')), () => {});
+    api.memory(current_workspace()).then((items) => (proposals = items.filter((m) => m.status === 'proposed')), () => {});
   load_proposals();
 </script>
 

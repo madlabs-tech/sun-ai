@@ -20,8 +20,8 @@ const secrets: (Secret & { value: string })[] = [
   { id: 'sec_1', scope: { kind: 'mod', id: 'github' }, name: 'GITHUB_TOKEN', updated_at: '2026-10-01T09:00:00Z', value: 'ghp_sample' },
 ];
 
-/** An ecosystem secret of that name is stored (BYO key readiness, MCP server checks). */
-export const has_ecosystem_secret = (name: string) => secrets.some((s) => s.scope.kind === 'ecosystem' && s.name === name);
+/** An ecosystem or workspace secret of that name is stored (BYO key readiness, MCP server checks). */
+export const has_ecosystem_secret = (name: string) => secrets.some((s) => (s.scope.kind === 'ecosystem' || s.scope.kind === 'workspace') && s.name === name);
 
 // A set-up ecosystem answers `switch`; `?fresh=1` starts like a new install, before onboarding asked.
 let on_limit: OnLimit | null = new URLSearchParams(location.search).has('fresh') ? null : 'switch';
@@ -73,10 +73,12 @@ export function settings_route(method: string, parts: string[], params: URLSearc
   if (head === 'entitlement' && method === 'GET') return clone((params.get('workspace') ?? MAIN_WORKSPACE) === MAIN_WORKSPACE ? pro : community);
   if (head !== 'secrets') throw not_found(`${method} /${parts.join('/')}`);
   if (method === 'GET') {
+    const workspace = params.get('workspace');
+    if (workspace) return secrets.filter((s) => s.scope.kind === 'workspace' && s.scope.id === workspace).map(view);
     const [k, i] = [params.get('scope_kind'), params.get('scope_id')];
     return secrets.filter((s) => !k || (s.scope.kind === k && s.scope.id === i)).map(view);
   }
-  if (kind !== 'ecosystem' && kind !== 'mod') throw invalid('Scope is `ecosystem/<id>` or `mod/<mod name>`.');
+  if (kind !== 'ecosystem' && kind !== 'mod' && kind !== 'workspace') throw invalid('Scope is `ecosystem/<id>` or `mod/<mod name>`.');
   const at = secrets.findIndex((s) => s.scope.kind === kind && s.scope.id === id && s.name === name);
   if (method === 'PUT') {
     const value = String(input.value ?? '');

@@ -8,9 +8,9 @@ const settings_nav = (page: Page) => page.getByRole('navigation', { name: 'Setti
 const page_head = (page: Page, title: string) => page.getByRole('heading', { name: title, exact: true }).locator('..');
 
 // Every entry for the deployment owner, in nav order (General and Members are the workspace's, Overview the deployment's).
-const ALL = ['Account', 'General', 'Members', 'Code', 'Plan', 'Overview', 'Users', 'Audit log', 'Billing', 'Support', 'Sign-in & 2-step', 'Email', 'Secrets', 'Usage limits', 'Embeddings'];
+const ALL = ['Account', 'General', 'Members', 'Code', 'Secrets', 'Plan', 'Overview', 'Users', 'Audit log', 'Billing', 'Support', 'Sign-in & 2-step', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
 /** The deployment's pages: nobody but its owners sees them. */
-const DEPLOYMENT = ['Overview', 'Users', 'Audit log', 'Billing', 'Support', 'Sign-in & 2-step', 'Email', 'Secrets', 'Usage limits', 'Embeddings'];
+const DEPLOYMENT = ['Overview', 'Users', 'Audit log', 'Billing', 'Support', 'Sign-in & 2-step', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
 
 const no_overflow = async (page: Page) =>
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
@@ -57,19 +57,19 @@ test('360 px: the list, then a page with a back link, then the list again', asyn
   await page.setViewportSize({ width: 360, height: 740 });
   await open(page, 'settings');
   const nav = settings_nav(page);
-  await expect(nav.getByRole('link', { name: 'Secrets' })).toBeVisible();
+  await expect(nav.getByRole('link', { name: 'Secrets', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Account', exact: true })).toBeHidden();
   await no_overflow(page);
 
-  await nav.getByRole('link', { name: 'Secrets' }).click();
-  await expect(page_head(page, 'Secrets')).toContainText('Deployment');
+  await nav.getByRole('link', { name: 'Secrets', exact: true }).click();
+  await expect(page_head(page, 'Secrets')).toContainText('Workspace');
   await expect(page.getByRole('region', { name: 'Secrets' })).toBeVisible();
   await expect(nav).toBeHidden();
   await no_overflow(page);
 
   await page.getByRole('link', { name: 'Settings', exact: true }).click();
   await expect(page).toHaveURL(/#\/settings(\?|$)/);
-  await expect(nav.getByRole('link', { name: 'Secrets' })).toBeVisible();
+  await expect(nav.getByRole('link', { name: 'Secrets', exact: true })).toBeVisible();
 });
 
 const IDS: Record<string, string> = {
@@ -82,15 +82,16 @@ const IDS: Record<string, string> = {
   'Sign-in & 2-step': 'sign-in',
   Email: 'email',
   Secrets: 'secrets',
+  'Deployment secrets': 'deployment-secrets',
   'Usage limits': 'usage',
   Embeddings: 'embeddings',
 };
 const without = (...hidden: string[]) => ALL.filter((l) => !hidden.includes(l));
 
-// Code needs edit_workspace (an admin); the Deployment group needs a deployment owner, whatever the role.
+// Code needs edit_workspace and Secrets manage_secrets (an admin); the Deployment group needs a deployment owner.
 const ROLES: [who: string, query: string, visible: string[]][] = [
-  ['a viewer', '&mock_role=viewer', without('Code', ...DEPLOYMENT)],
-  ['a member', '&mock_role=member', without('Code', ...DEPLOYMENT)],
+  ['a viewer', '&mock_role=viewer', without('Code', 'Secrets', ...DEPLOYMENT)],
+  ['a member', '&mock_role=member', without('Code', 'Secrets', ...DEPLOYMENT)],
   ['a workspace admin', '&mock_role=admin', without(...DEPLOYMENT)],
   ['a workspace admin with knowledge off', '&mock_role=admin&features_off=knowledge', without(...DEPLOYMENT)],
 ];
@@ -158,7 +159,7 @@ test('every Settings page loads its icons (no /icons/ miss)', async ({ page }) =
   page.on('requestfailed', (r) => {
     if (r.url().includes('/icons/')) bad.push(`failed ${r.url()}`);
   });
-  for (const id of ['account', 'workspace', 'members', 'code', 'plan', 'overview', 'users', 'audit', 'billing', 'support', 'sign-in', 'email', 'secrets', 'usage', 'embeddings']) {
+  for (const id of ['account', 'workspace', 'members', 'code', 'plan', 'overview', 'users', 'audit', 'billing', 'support', 'sign-in', 'email', 'secrets', 'deployment-secrets', 'usage', 'embeddings']) {
     await open(page, `settings/${id}`);
     await page.waitForLoadState('networkidle');
     await expect(settings_nav(page).locator('[aria-current="page"]')).toHaveAttribute('href', new RegExp(`^#/settings/${id}(\\?|$)`));

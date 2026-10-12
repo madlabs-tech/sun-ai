@@ -1,6 +1,6 @@
 // In-memory fake of the /api/v1 kernel API (Fake transport for the client).
 // Sample data mirrors the Madlabs orchestrator UI kit. State resets on reload.
-import type { OutboxItem,
+import type { OutboxItem, Agent, MemoryItem,
   Workspace,
   Project,
   ApiError,
@@ -879,12 +879,17 @@ function route(method: string, full_path: string, body: unknown): unknown {
   if (parts.at(-1) === 'on_limit') return on_limit_route(method, parts, input);
   if (parts.at(-1) === 'budget') return budget_route(method, parts, input);
   if (parts[0] === 'knowledge' || parts[0] === 'settings' || (parts[0] === 'tasks' && parts[2] === 'context')) return knowledge_route(method, parts, params, input);
+  // Per workspace: `?workspace=` keeps that workspace's agents and memory (none: every workspace's, as for owners).
+  const in_workspace = <T extends { workspace_id: string }>(rows: T[]) => rows.filter((r) => !params.get('workspace') || r.workspace_id === params.get('workspace'));
+  if (method === 'GET' && path === '/memory') return in_workspace(memory_route(method, parts, input) as MemoryItem[]);
   if (parts[0] === 'memory' || (['corrections', 'notes'].includes(parts[0]) && parts[2] === 'star')) return memory_route(method, parts, input);
   if (parts[0] === 'evals' || parts[0] === 'eval_sets') return eval_route(method, parts, input);
   if (parts[0] === 'marketplace') return market_route(method, parts, input, params);
   if (parts[0] === 'account') return account_route(method, parts, input);
   if (is_vcs_route(method, parts)) return vcs_route(method, parts, params, input);
   if (parts[0] === 'tasks' && (parts[2] === 'pull_requests' || parts[2] === 'pr_auto_complete')) return pull_request_route(method, parts, input);
+  if (method === 'GET' && path === '/agents') return in_workspace(agents_route(method, parts, input) as Agent[]);
+  if (method === 'POST' && path === '/agents') return agents_route(method, parts, input, params.get('workspace') ?? MAIN_WORKSPACE);
   if (parts[0] === 'agents') return agents_route(method, parts, input);
   const key = `${method} /${parts[0] ?? ''}${parts.length > 1 ? '/:id' : ''}${parts[2] ? '/' + parts[2] : ''}`;
 

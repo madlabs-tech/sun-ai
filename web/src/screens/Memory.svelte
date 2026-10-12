@@ -6,7 +6,7 @@
   import MemoryCard from '../lib/ui/MemoryCard.svelte';
   import { api } from '../lib/api/client';
   import type { MemoryItem, MemoryMetrics, PassRate, RepeatRate } from '../lib/api/types';
-  import { error_text } from '../lib/app_state.svelte';
+  import { current_workspace, error_text } from '../lib/app_state.svelte';
   import { day } from '../lib/format';
 
   let items = $state<MemoryItem[]>([]);
@@ -16,7 +16,7 @@
 
   async function load() {
     try {
-      [items, metrics] = await Promise.all([api.memory(), api.memory_metrics()]);
+      [items, metrics] = await Promise.all([api.memory(current_workspace()), api.memory_metrics(current_workspace())]);
       error = '';
     } catch (e) {
       error = error_text(e);

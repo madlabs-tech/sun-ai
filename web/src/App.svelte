@@ -89,7 +89,8 @@
     {:else if route.page === 'projects' && route.id && Page}
       <Tasks on_new={open_new} project_id={route.id} />
     {:else if Page}
-      <Page />
+      <!-- A page loads its workspace's data when it opens: a switch opens it afresh. -->
+      {#key app.workspace}<Page />{/key}
     {:else}
       <Tasks on_new={open_new} />
     {/if}

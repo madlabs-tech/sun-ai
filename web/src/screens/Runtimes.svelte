@@ -1,7 +1,7 @@
-<!-- Runtimes: readiness per agent CLI and, for admins, the permission mode every new session
-     of it gets on any host (PUT /runtimes/{id}/policy, audited). Bypass needs a second click.
-     "Add runtime" stores a BYO key runtime: a provider key (OpenAI-compatible, Anthropic
-     or Google) run through OpenCode, Claude Code or Codex; its key is an ecosystem secret picked by name
+<!-- Runtimes: the open workspace's, with readiness per agent CLI and, for deployment owners, the permission mode
+     every new session of a host's CLI gets (PUT /runtimes/{id}/policy, audited). Bypass needs a second click.
+     With manage_runtimes, "Add runtime" stores a BYO key runtime: a provider key (OpenAI-compatible, Anthropic
+     or Google) run through OpenCode, Claude Code or Codex; its key is a secret of the workspace picked by name
      (POST /runtimes), and "Check" shows its readiness. With Sun Cloud connected it can also add a runtime paid
      with Sun credits: Claude Code or Codex for premium models, OpenCode with a gateway model. -->
 <script lang="ts">
@@ -22,7 +22,7 @@
     type RuntimeStatus,
     type RuntimeUsage,
   } from '../lib/api/types';
-  import { error_text, toast } from '../lib/app_state.svelte';
+  import { can, current_workspace, error_text, is_owner, toast } from '../lib/app_state.svelte';
   import { SOURCE_LABEL, clock, money, tokens } from '../lib/format';
 
   const STATUS: Record<RuntimeStatus, ['success' | 'info' | 'warning' | 'neutral', string]> = {
@@ -38,7 +38,9 @@
     bypass_permissions: ['Anything', 'Runs any command without asking.'],
   };
 
-  let load = $state(api.list_runtimes());
+  const workspace = current_workspace();
+  const list = () => api.list_runtimes(workspace);
+  let load = $state(list());
   /** Sun Cloud is connected (the account answers as a cloud ecosystem): credits runtimes can be added. */
   let cloud = $state(false);
   api.get_account().then(
@@ -75,12 +77,12 @@
     }
     saving = false;
     bypass = null;
-    load = api.list_runtimes();
+    load = list();
   }
 
   function cancel_bypass() {
     bypass = null;
-    load = api.list_runtimes(); // puts the select back
+    load = list(); // puts the select back
   }
 
   // Add runtime. The kernel validates; a 422 message starts with the field to fix (`endpoint: …`).
@@ -151,10 +153,11 @@
               source: 'byo_key',
               config: { kind: form.kind, endpoint: form.endpoint.trim(), model: form.model.trim(), key_secret: form.key_secret || null },
             },
+        workspace,
       );
       adding = false;
       toast('success', `${name} added`, 'Use it in a workflow’s runtime.chain. Check shows whether it can take work.');
-      load = api.list_runtimes();
+      load = list();
     } catch (err) {
       const [, field, why] = /^(\w+): (.+)$/s.exec(err instanceof ApiFailure ? err.message : '') ?? [];
       errors = (FIELDS as readonly string[]).includes(field)
@@ -170,7 +173,7 @@
   async function check(r: Runtime) {
     checks[r.id] = null;
     try {
-      checks[r.id] = await api.runtime_readiness(r.id);
+      checks[r.id] = await api.runtime_readiness(r.id, workspace);
     } catch (err) {
       delete checks[r.id];
       toast('danger', `${r.name} not checked`, error_text(err));
@@ -186,7 +189,7 @@
 </script>
 
 <PageHeader title="Runtimes" subtitle="Agent CLIs Sun can dispatch to, and what their sessions may do.">
-  <Button variant="ice" iconLeft="plus" onclick={open_add}>Add runtime</Button>
+  {#if can('manage_runtimes')}<Button variant="ice" iconLeft="plus" onclick={open_add}>Add runtime</Button>{/if}
 </PageHeader>
 
 <div class="sun-page">
@@ -235,7 +238,7 @@
           <Button class="runtime__mode" size="sm" variant="secondary" iconLeft="activity" loading={ready === null} onclick={() => check(r)}>
             Check
           </Button>
-        {:else}
+        {:else if is_owner()}
           <Select
             class="runtime__mode"
             size="sm"
@@ -295,14 +298,14 @@
         error={errors.endpoint}
       />
       <Input label="Model" mono placeholder={MODEL_EXAMPLE[form.kind]} autocomplete="off" bind:value={form.model} error={errors.model} />
-      <SecretPicker bind:value={form.key_secret} none_label="None (local endpoint)" error={errors.key_secret} />
+      <SecretPicker scope={{ kind: 'workspace', id: workspace }} bind:value={form.key_secret} none_label="None (local endpoint)" error={errors.key_secret} />
     {:else if form.source === 'credits'}
       <Input label="Name" mono placeholder="claude-credits" hint="Workflows pick it in runtime.chain." autocomplete="off" bind:value={form.name} error={errors.name} />
       <Select
         label="Runs on"
         bind:value={form.adapter}
         options={CREDITS_ADAPTERS}
-        hint={form.adapter === 'opencode' ? 'Open models, on the Individual and Business plans.' : 'Premium models, on the Business plan.'}
+        hint={form.adapter === 'opencode' ? 'Open models, on the Pro and Business plans.' : 'Premium models, on the Business plan.'}
         error={errors.adapter}
       />
       {#if form.adapter === 'opencode'}

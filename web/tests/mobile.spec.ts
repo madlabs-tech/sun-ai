@@ -111,7 +111,7 @@ test('notification link: reply to a running agent', async ({ page }) => {
 // Icon-only buttons in the top-right corner and at a row's right edge.
 const TIPS: [route: string, tab: string | null, label: string][] = [
   ['tasks/SUN-142', null, 'Send'],
-  ['settings/secrets', 'github', 'Delete GITHUB_TOKEN'],
+  ['settings/deployment-secrets', 'github', 'Delete GITHUB_TOKEN'],
 ];
 
 for (const [route, tab, label] of TIPS) {

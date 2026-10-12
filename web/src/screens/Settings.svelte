@@ -1,5 +1,5 @@
 <!-- Settings shell: a sub-nav ("My Account", then a group named after the open workspace: its General, Members
-     Code and Plan, then "Deployment": Overview and the deployment's own pages with Security / Agents sub-headings, for
+     Code, Secrets and Plan, then "Deployment": Overview and the deployment's own pages with Security / Agents sub-headings, for
      deployment owners only) and one page per entry at #/settings/<id>. Pages the signed-in person can't use are hidden;
      an unknown or hidden id opens the first visible page. Phones (< 768 px): #/settings is the list, a page has a
      back link to it. The section components own their cards; this file only picks and frames them. -->
@@ -36,6 +36,8 @@
     subgroup?: string;
     show: () => boolean;
     parts: Component[];
+    /** Given to each part. */
+    props?: Record<string, unknown>;
   }
 
   const always = () => true;
@@ -43,13 +45,14 @@
   const owner = is_owner;
   const workspace = $derived(workspace_of(current_workspace()));
   /** The open workspace's pages: only with a workspace, and `edit_workspace` for all but General. */
-  const in_workspace = (permission?: 'edit_workspace') => () => !!workspace && (!permission || can(permission));
+  const in_workspace = (permission?: 'edit_workspace' | 'manage_secrets') => () => !!workspace && (!permission || can(permission));
 
   const PAGES: SettingsPage[] = [
     { id: 'account', label: 'Account', icon: 'user', group: 'account', show: always, parts: [SettingsAccount] },
     { id: 'workspace', label: 'General', icon: 'settings', group: 'workspace', show: in_workspace(), parts: [SettingsWorkspace] },
     { id: 'members', label: 'Members', icon: 'users', group: 'workspace', show: in_workspace(), parts: [Members] },
     { id: 'code', label: 'Code', icon: 'git-branch', group: 'workspace', show: in_workspace('edit_workspace'), parts: [SettingsCode] },
+    { id: 'secrets', label: 'Secrets', icon: 'key-round', group: 'workspace', show: in_workspace('manage_secrets'), parts: [SettingsSecrets], get props() { return { workspace: current_workspace() }; } },
     { id: 'plan', label: 'Plan', icon: 'shield-check', group: 'workspace', show: in_workspace(), parts: [SettingsPlan] },
     { id: 'overview', label: 'Overview', icon: 'settings', group: 'deployment', show: owner, parts: [SettingsGeneral] },
     { id: 'users', label: 'Users', icon: 'user-cog', group: 'deployment', show: owner, parts: [SettingsAccounts] },
@@ -58,7 +61,7 @@
     { id: 'support', label: 'Support', icon: 'life-buoy', group: 'deployment', show: owner, parts: [SettingsSupport] },
     { id: 'sign-in', label: 'Sign-in & 2-step', icon: 'shield-check', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSignIn, SettingsTwoStep] },
     { id: 'email', label: 'Email', icon: 'mail', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsEmail] },
-    { id: 'secrets', label: 'Secrets', icon: 'key-round', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSecrets] },
+    { id: 'deployment-secrets', label: 'Deployment secrets', icon: 'key-round', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSecrets] },
     { id: 'usage', label: 'Usage limits', icon: 'gauge', group: 'deployment', subgroup: 'Agents', show: owner, parts: [SettingsLimit, SettingsSpend] },
     { id: 'embeddings', label: 'Embeddings', icon: 'sparkles', group: 'deployment', subgroup: 'Agents', show: () => feature_on('knowledge') && owner(), parts: [SettingsEmbeddings] },
   ];
@@ -112,7 +115,7 @@
 
       <!-- A workspace's pages start over when the workspace changes. -->
       {#key active.group === 'workspace' ? workspace?.id : ''}
-        {#each active.parts as Part, i (i)}<Part />{/each}
+        {#each active.parts as Part, i (i)}<Part {...active.props} />{/each}
       {/key}
     </div>
   </div>

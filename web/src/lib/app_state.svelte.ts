@@ -174,9 +174,9 @@ export async function load_workspace() {
     // Agents are advisory here: an older kernel without them shows tasks all the same.
     [app.tasks, app.runtimes, app.agents] = await Promise.all([
       api.list_tasks(workspace || undefined),
-      // Deployment owners' only until runtimes and agents are per workspace.
-      api.list_runtimes().catch(() => [] as Runtime[]),
-      api.list_agents().catch(() => app.agents),
+      // The workspace's; with no workspace yet (onboarding) there are none.
+      workspace ? api.list_runtimes(workspace) : ([] as Runtime[]),
+      workspace ? api.list_agents(workspace).catch(() => app.agents) : ([] as Agent[]),
     ]);
     app.workspace = workspace;
     app.error = '';

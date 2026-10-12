@@ -1,4 +1,4 @@
-<!-- Agents: shared by every workspace. A task assigned to one runs its instructions on its runtime chain
+<!-- Agents: the open workspace's. A task assigned to one runs its instructions on its runtime chain
      (failover order) with its skills. Ready = some runtime of the chain is logged in on an online host;
      not ready says why per runtime. Creating, editing and archiving need manage_runtimes; an edit gives
      running tasks nothing new (they keep their version). -->
@@ -10,16 +10,17 @@
   import IconButton from '../lib/ui/IconButton.svelte';
   import { api } from '../lib/api/client';
   import type { Agent, AgentFields } from '../lib/api/types';
-  import { app, can, error_text, toast } from '../lib/app_state.svelte';
+  import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
 
+  const workspace = current_workspace();
   const manage = $derived(can('manage_runtimes'));
   /** The list, also kept for the assignee pickers and cards. */
-  const fetch_agents = () => api.list_agents().then((list) => (app.agents = list));
+  const fetch_agents = () => api.list_agents(workspace).then((list) => (app.agents = list));
   let load = $state(fetch_agents());
   /** Suggestions: runtime ids, and the catalog's installed skills. */
   let runtimes = $state<string[]>([]);
   let skills = $state<string[]>([]);
-  api.list_runtimes().then(
+  api.list_runtimes(workspace).then(
     (rows) => (runtimes = rows.map((r) => r.id)),
     () => {},
   );
@@ -58,7 +59,7 @@
         await api.update_agent(editing.id, fields);
         toast('success', `${fields.name} saved`, 'New runs use it; running tasks keep what they started with.');
       } else {
-        await api.create_agent(fields);
+        await api.create_agent(fields, workspace);
         toast('success', `${fields.name} created`, 'Assign it to a task to start it.');
       }
       open = false;

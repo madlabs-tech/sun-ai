@@ -5,7 +5,7 @@
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import { api } from '../lib/api/client';
   import type { EvalOutcome, EvalPick, EvalRun, EvalSet, Runtime, Workflow } from '../lib/api/types';
-  import { error_text, toast } from '../lib/app_state.svelte';
+  import { current_workspace, error_text, toast } from '../lib/app_state.svelte';
   import { CAUSE_BADGE, day } from '../lib/format';
   import { go, href, route } from '../lib/router.svelte';
 
@@ -27,7 +27,7 @@
   }
   load();
   api.list_workflows().then((w) => (workflows = w), () => {});
-  api.list_runtimes().then((r) => (runtimes = r), () => {});
+  api.list_runtimes(current_workspace()).then((r) => (runtimes = r), () => {});
 
   // ponytail: polls while a replay runs; an eval SSE stream would replace this.
   const running = $derived(evals.some((e) => e.status === 'running'));

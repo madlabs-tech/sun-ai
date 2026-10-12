@@ -72,11 +72,11 @@ test('workspaces: switch, create, rename, delete; workflows and tasks stay on th
   await expect(page).toHaveURL(new RegExp(`workspace=${marketing}`));
   await expect(page.locator('a.sun-row')).toHaveCount(1);
 
-  // The new-task dialog offers only this workspace's workflows: its one, then the two agents and None.
+  // The new-task dialog offers only this workspace's workflows and agents: its one workflow (no agents yet), then None.
   await sidebar.getByRole('button', { name: 'New task' }).click();
   dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: /^Assignee:/ }).click();
-  await expect(page.getByRole('menu', { name: 'Assignee' }).getByRole('menuitemradio')).toHaveCount(4);
+  await expect(page.getByRole('menu', { name: 'Assignee' }).getByRole('menuitemradio')).toHaveCount(2);
   await page.keyboard.press('Escape');
   await dialog.getByRole('button', { name: 'Close' }).click();
 
