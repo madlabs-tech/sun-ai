@@ -1,5 +1,5 @@
 // Display rules shared by every screen: task columns, status labels, money, time.
-import type { Account, Agent, Currency, OnLimit, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
+import type { Agent, OnLimit, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
 
 /** `list` with `item` added (`on`) or removed, once. */
 export const toggle = <T,>(list: T[], item: T, on: boolean) => (on ? [...list.filter((x) => x !== item), item] : list.filter((x) => x !== item));
@@ -130,18 +130,12 @@ export const runtime_name = (runtimes: Runtime[], id: string | null) =>
 
 export const money = (usd: number) => `$${usd.toFixed(2)}`;
 
-const IDR = new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 });
-const USD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
-/** A price in minor units (whole rupiah, US cents): Rp 199.000, $12.00. */
-export const price = (currency: Currency, minor: number) => (currency === 'idr' ? IDR.format(minor) : USD.format(minor / 100));
-
-const whole_number = new Intl.NumberFormat('en');
-/** Sun credit points: 2,450,000 points. */
-export const points = (n: number) => `${whole_number.format(n)} points`;
-
-/** Points a USD cost comes to on Sun credits, at most (the priciest model's margin, rounded up). */
-export const points_for = (usd: number, rate: Account['points']) =>
-  Math.ceil(Math.round(usd * rate.per_usd * (1 + rate.max_margin_percent / 100) * 1e6) / 1e6);
+/** A price in the currency's minor units (whole rupiah, US cents): Rp 199.000, $12.00. */
+export function price(currency: string, minor: number): string {
+  const idr = currency.toLowerCase() === 'idr';
+  const format = new Intl.NumberFormat(idr ? 'id-ID' : 'en-US', { style: 'currency', currency: currency.toUpperCase(), maximumFractionDigits: idr ? 0 : 2 });
+  return format.format(idr ? minor : minor / 100);
+}
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 export const tokens = (n: number) => compact.format(n);

@@ -1,5 +1,5 @@
 <!-- Settings shell: a sub-nav ("My Account", then a group named after the open workspace: its General, Members
-     Code, Secrets and Plan, then "Deployment": Overview and the deployment's own pages with Security / Agents sub-headings, for
+     Code, Secrets and Plan & billing, then "Deployment": Overview and the deployment's own pages with Security / Agents sub-headings, for
      deployment owners only) and one page per entry at #/settings/<id>. Pages the signed-in person can't use are hidden;
      an unknown or hidden id opens the first visible page. Phones (< 768 px): #/settings is the list, a page has a
      back link to it. The section components own their cards; this file only picks and frames them. -->
@@ -12,7 +12,6 @@
   import Members from './Members.svelte';
   import SettingsAudit from './SettingsAudit.svelte';
   import SettingsPlan from './SettingsPlan.svelte';
-  import SettingsBilling from './SettingsBilling.svelte';
   import SettingsSupport from './SettingsSupport.svelte';
   import SettingsSignIn from './SettingsSignIn.svelte';
   import SettingsTwoStep from './SettingsTwoStep.svelte';
@@ -53,11 +52,11 @@
     { id: 'members', label: 'Members', icon: 'users', group: 'workspace', show: in_workspace(), parts: [Members] },
     { id: 'code', label: 'Code', icon: 'git-branch', group: 'workspace', show: in_workspace('edit_workspace'), parts: [SettingsCode] },
     { id: 'secrets', label: 'Secrets', icon: 'key-round', group: 'workspace', show: in_workspace('manage_secrets'), parts: [SettingsSecrets], get props() { return { workspace: current_workspace() }; } },
-    { id: 'plan', label: 'Plan', icon: 'shield-check', group: 'workspace', show: in_workspace(), parts: [SettingsPlan] },
+    // With Sun Cloud billing the page also checks out, manages and buys seats.
+    { id: 'plan', get label() { return feature_on('billing') ? 'Plan & billing' : 'Plan'; }, icon: 'shield-check', group: 'workspace', show: in_workspace(), parts: [SettingsPlan] },
     { id: 'overview', label: 'Overview', icon: 'settings', group: 'deployment', show: owner, parts: [SettingsGeneral] },
     { id: 'users', label: 'Users', icon: 'user-cog', group: 'deployment', show: owner, parts: [SettingsAccounts] },
     { id: 'audit', label: 'Audit log', icon: 'scroll-text', group: 'deployment', show: owner, parts: [SettingsAudit] },
-    { id: 'billing', label: 'Billing', icon: 'credit-card', group: 'deployment', show: owner, parts: [SettingsBilling] },
     { id: 'support', label: 'Support', icon: 'life-buoy', group: 'deployment', show: owner, parts: [SettingsSupport] },
     { id: 'sign-in', label: 'Sign-in & 2-step', icon: 'shield-check', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSignIn, SettingsTwoStep] },
     { id: 'email', label: 'Email', icon: 'mail', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsEmail] },

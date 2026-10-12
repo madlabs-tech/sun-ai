@@ -51,7 +51,7 @@ import { LineCounter, isMap, isSeq, parse, parseDocument, stringify } from 'yaml
 import { DESIGN_WORKSPACE, mock_join, mock_me, need } from './auth';
 import { eval_route } from './mock_evals';
 import { market_route } from './mock_market';
-import { account_route, sun_cloud } from './mock_account';
+import { billing_route } from './mock_billing';
 import { knowledge_route, link_source } from './mock_knowledge';
 import { memory_route } from './mock_memory';
 import { is_vcs_route, vcs_route } from './mock_vcs';
@@ -899,7 +899,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
   if (parts[0] === 'memory' || (['corrections', 'notes'].includes(parts[0]) && parts[2] === 'star')) return memory_route(method, parts, input);
   if (parts[0] === 'evals' || parts[0] === 'eval_sets') return eval_route(method, parts, input);
   if (parts[0] === 'marketplace') return market_route(method, parts, input, params);
-  if (parts[0] === 'account') return account_route(method, parts, input);
+  if (parts[0] === 'subscriptions' || parts[0] === 'support') return billing_route(method, parts, input);
   if (is_vcs_route(method, parts)) return vcs_route(method, parts, params, input);
   if (parts[0] === 'tasks' && (parts[2] === 'pull_requests' || parts[2] === 'pr_auto_complete')) return pull_request_route(method, parts, input);
   if (method === 'GET' && path === '/agents') return in_workspace(agents_route(method, parts, input) as Agent[]);
@@ -1208,9 +1208,9 @@ function route(method: string, full_path: string, body: unknown): unknown {
       return clone(t);
     }
     case 'GET /features': {
-      // `?features_off=knowledge,canvas` tries the UI with features off (sun.yaml `features:`).
+      // `?features_off=knowledge,billing` tries the UI with features off (sun.yaml `features:`, or no Sun Cloud for billing).
       const off = new URLSearchParams(location.search).get('features_off')?.split(',') ?? [];
-      return Object.fromEntries(['knowledge', 'canvas', 'evals', 'market', 'catalog'].map((f) => [f, !off.includes(f)]));
+      return Object.fromEntries(['knowledge', 'canvas', 'evals', 'market', 'catalog', 'billing'].map((f) => [f, !off.includes(f)]));
     }
     case 'GET /usage': {
       if (params.get('by') === 'runtime')
@@ -1333,19 +1333,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
       const invalid = (message: string) => new MockError(422, { error: { code: 'invalid_input', message } });
       if (!/^[a-z0-9_-]{1,64}$/.test(name)) throw invalid('name: 1–64 lowercase letters, digits, - or _, e.g. ollama-qwen');
       if (RUNTIMES.some((r) => r.id === name)) throw new MockError(409, { error: { code: 'conflict', message: `name: a runtime named \`${name}\` already exists.` } });
-      if (source === 'credits') {
-        if (!sun_cloud()) throw invalid('source: Sun credits need Sun Cloud; set SUN_CLOUD_URL and SUN_CLOUD_TOKEN on the kernel, or use a BYO key.');
-        const model = String((input as { model?: string | null }).model ?? '').trim() || null;
-        if (adapter === 'opencode' && !model) throw invalid('model: OpenCode on Sun credits needs a model from the price table');
-        if (adapter === 'opencode' && model && (model.length > 200 || /\s/.test(model))) throw invalid('model: up to 200 characters, no spaces');
-        if (adapter !== 'opencode' && model) throw invalid('model: only OpenCode takes a model; Claude Code and Codex pick their own');
-        const r: Runtime = {
-          id: name, name, adapter, source, status: 'ready', cooldown_until: null, sessions: 0, max_sessions: 0,
-          permission_mode: null, allow_bypass: true, config: null, model,
-        };
-        RUNTIMES.push(r);
-        return clone(r);
-      }
+      if (source === 'credits') throw invalid('source: Sun credits are not available on this deployment yet; bring your own key or runtime.');
       const { config } = input as { config?: ByoKeyConfig };
       const { kind = 'openai_compatible', endpoint = '', model = '', key_secret = null } = config ?? {};
       if (!BYO_KEY_ADAPTERS[kind]?.includes(adapter))

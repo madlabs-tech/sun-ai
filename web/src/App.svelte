@@ -27,6 +27,7 @@
   import Canvas from './screens/Canvas.svelte';
   import Projects from './screens/Projects.svelte';
   import Agents from './screens/Agents.svelte';
+  import BillingReturn from './screens/BillingReturn.svelte';
 
   load_workspace();
 
@@ -42,7 +43,7 @@
     return () => clearInterval(timer);
   });
 
-  const PAGES = { projects: Projects, agents: Agents, approvals: Approvals, runtimes: Runtimes, hosts: Hosts, workflows: Workflows, mods: Mods, catalog: Catalog, knowledge: Knowledge, memory: Memory, evals: Evals, market: Market, settings: Settings, more: More };
+  const PAGES = { projects: Projects, agents: Agents, approvals: Approvals, runtimes: Runtimes, hosts: Hosts, workflows: Workflows, mods: Mods, catalog: Catalog, knowledge: Knowledge, memory: Memory, evals: Evals, market: Market, settings: Settings, more: More, billing: BillingReturn };
   // A turned-off feature's page, or a deployment page for someone who isn't its owner (an old link), falls back to Tasks.
   const Page = $derived(page_on(route.page) ? PAGES[route.page as keyof typeof PAGES] : undefined);
   const tabs = $derived([...visible_nav().slice(0, TAB_COUNT), { id: 'more', label: 'More', icon: 'ellipsis' }]);

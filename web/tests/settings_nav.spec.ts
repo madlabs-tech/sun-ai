@@ -8,9 +8,9 @@ const settings_nav = (page: Page) => page.getByRole('navigation', { name: 'Setti
 const page_head = (page: Page, title: string) => page.getByRole('heading', { name: title, exact: true }).locator('..');
 
 // Every entry for the deployment owner, in nav order (General and Members are the workspace's, Overview the deployment's).
-const ALL = ['Account', 'General', 'Members', 'Code', 'Secrets', 'Plan', 'Overview', 'Users', 'Audit log', 'Billing', 'Support', 'Sign-in & 2-step', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
+const ALL = ['Account', 'General', 'Members', 'Code', 'Secrets', 'Plan & billing', 'Overview', 'Users', 'Audit log', 'Support', 'Sign-in & 2-step', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
 /** The deployment's pages: nobody but its owners sees them. */
-const DEPLOYMENT = ['Overview', 'Users', 'Audit log', 'Billing', 'Support', 'Sign-in & 2-step', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
+const DEPLOYMENT = ['Overview', 'Users', 'Audit log', 'Support', 'Sign-in & 2-step', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
 
 const no_overflow = async (page: Page) =>
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
@@ -43,7 +43,7 @@ test('desktop: the groups with sub-headings, Account first, deep links to each p
   await expect(page_head(page, 'Code')).toContainText('Workspace');
   await expect(nav.getByRole('link', { name: 'Code' })).toHaveAttribute('aria-current', 'page');
   await open(page, 'settings/plan');
-  await expect(page_head(page, 'Plan')).toContainText('Workspace');
+  await expect(page_head(page, 'Plan & billing')).toContainText('Workspace');
   await expect(page.getByRole('region', { name: /Plan/ })).toBeVisible();
   await open(page, 'settings/nope');
   await expect(page.getByRole('heading', { name: 'Account', exact: true })).toBeVisible();
@@ -77,7 +77,6 @@ const IDS: Record<string, string> = {
   Overview: 'overview',
   Users: 'users',
   'Audit log': 'audit',
-  Billing: 'billing',
   Support: 'support',
   'Sign-in & 2-step': 'sign-in',
   Email: 'email',
@@ -159,7 +158,7 @@ test('every Settings page loads its icons (no /icons/ miss)', async ({ page }) =
   page.on('requestfailed', (r) => {
     if (r.url().includes('/icons/')) bad.push(`failed ${r.url()}`);
   });
-  for (const id of ['account', 'workspace', 'members', 'code', 'plan', 'overview', 'users', 'audit', 'billing', 'support', 'sign-in', 'email', 'secrets', 'deployment-secrets', 'usage', 'embeddings']) {
+  for (const id of ['account', 'workspace', 'members', 'code', 'plan', 'overview', 'users', 'audit', 'support', 'sign-in', 'email', 'secrets', 'deployment-secrets', 'usage', 'embeddings']) {
     await open(page, `settings/${id}`);
     await page.waitForLoadState('networkidle');
     await expect(settings_nav(page).locator('[aria-current="page"]')).toHaveAttribute('href', new RegExp(`^#/settings/${id}(\\?|$)`));

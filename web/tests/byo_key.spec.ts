@@ -9,14 +9,14 @@ const no_overflow = async (page: Page) =>
 const field = (page: Page, label: string) => page.getByRole('dialog').locator('.ml-field', { has: page.getByLabel(label, { exact: true }) });
 
 async function add_ollama(page: Page, name: string) {
-  await page.goto('/?mock=1&self_hosted=1#/runtimes');
+  await page.goto('/?mock=1#/runtimes');
   await page.getByRole('button', { name: 'Add runtime' }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('heading', { name: 'Add a runtime' })).toBeVisible();
 
-  // Credits need Sun Cloud, so a self-hosted install can't pick them; BYO key is the default.
+  // This deployment sells no Sun credits yet, so they can't be picked; BYO key is the default.
   await expect(dialog.getByRole('radio', { name: /Sun credits/ })).toBeDisabled();
-  await expect(dialog.getByText('Needs Sun Cloud. A self-hosted install uses your subscription or API key.')).toBeVisible();
+  await expect(dialog.getByText('Sun credits are not available on this deployment yet; bring your own key or runtime.')).toBeVisible();
   await expect(dialog.getByRole('radio', { name: /BYO key/ })).toBeChecked();
   await expect(field(page, 'Endpoint')).toContainText('OpenAI-compatible base URL, e.g. http://localhost:11434/v1 for Ollama');
 

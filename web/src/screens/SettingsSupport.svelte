@@ -1,27 +1,22 @@
-<!-- Support from people: the plan's answer target, a form to ask Sun, and the
-     conversations so far. Free and Community point to the community instead. -->
+<!-- Support from people at Sun (deployment owners): a form to ask, and the conversations so far.
+     Without Sun Cloud it points to the community instead. -->
 <script lang="ts">
   import { Badge, Button, Icon, Input } from '@hryer/madlabs-design-system/svelte';
   import { api } from '../lib/api/client';
-  import type { Account, Ticket } from '../lib/api/types';
+  import type { Ticket } from '../lib/api/types';
   import { error_text, toast } from '../lib/app_state.svelte';
   import { clock, day } from '../lib/format';
 
-  const PLAN_NAME = { community: 'Community', free: 'Free', pro: 'Pro', business: 'Business' };
   const MAX_MESSAGE = 5000;
 
-  let account = $state<Account | null>(null);
   let unavailable = $state(false);
-  let tickets = $state<Ticket[]>([]);
+  let tickets = $state<Ticket[] | null>(null);
   let form = $state({ subject: '', body: '' });
   let errors = $state<{ subject?: string; body?: string }>({});
   let sending = $state(false);
 
-  api.get_account().then(
-    async (a) => {
-      account = a;
-      if (a.support.target_hours) tickets = await api.list_tickets().catch(() => []);
-    },
+  api.list_tickets().then(
+    (t) => (tickets = t),
     () => (unavailable = true),
   );
 
@@ -37,7 +32,7 @@
     sending = true;
     try {
       const ticket = await api.open_ticket(form.subject.trim(), form.body.trim());
-      tickets = [ticket, ...tickets];
+      tickets = [ticket, ...(tickets ?? [])];
       form = { subject: '', body: '' };
       toast('success', 'Sent to Sun', ticket.respond_by ? `We answer by ${when(ticket.respond_by)}.` : undefined);
     } catch (err) {
@@ -50,19 +45,14 @@
 <section class="sun-row" aria-labelledby="support-head">
   <span class="sun-tile"><Icon name="life-buoy" size={18} /></span>
   <div class="sun-row__body">
-    <div class="sun-row__title" id="support-head">
-      Support
-      {#if account?.support.target_hours}<Badge tone="info">Answer within {account.support.target_hours} h</Badge>{/if}
-    </div>
-    {#if unavailable || (account && !account.support.target_hours)}
+    <div class="sun-row__title" id="support-head">Support</div>
+    {#if unavailable}
       <p class="sun-row__meta support__copy">
-        Support from people comes with the Pro and Business plans (answers within 48 and 24 hours). Until then, the community
-        forum and the docs answer most questions.
+        Support from people needs this deployment connected to Sun Cloud. Until then, the community forum and the docs answer
+        most questions.
       </p>
-    {:else if account}
-      <p class="sun-row__meta support__copy">
-        {PLAN_NAME[account.plan]} plan: a person at Sun answers within {account.support.target_hours} hours. Never paste secrets here.
-      </p>
+    {:else if tickets}
+      <p class="sun-row__meta support__copy">A person at Sun reads every question. Never paste secrets here.</p>
       <form class="support__form" aria-label="Ask Sun" onsubmit={send} novalidate>
         <Input label="Subject" maxlength={200} placeholder="e.g. Codex steps stop after an hour" bind:value={form.subject} error={errors.subject} />
         <label class="ml-field">

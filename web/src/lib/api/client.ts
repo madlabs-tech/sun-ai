@@ -6,11 +6,12 @@ import type { OnLimit, OutboxItem, Resolution,
   Workspace,
   WorkspaceProfileChange,
   Project,
-  Account,
-  Currency,
-  Invoice,
+  CheckoutSession,
+  Interval,
   PaidPlan,
-  PayMethod,
+  PlanPrices,
+  SeatPreview,
+  SubscriptionSummary,
   Ticket,
   ApiError,
   CatalogFile,
@@ -398,16 +399,29 @@ export const api = {
   /** No workspace: Main. */
   get_entitlement: (workspace?: string) =>
     request<Entitlement>('GET', workspace ? `/entitlement?workspace=${encodeURIComponent(workspace)}` : '/entitlement'),
-  /** The account at Sun (plan, credits, support); 503 when this ecosystem isn't connected to Sun. */
-  get_account: () => request<Account>('GET', '/account'),
-  /** Admin. The invoice's `checkout_url` is Sun's hosted payment page; the plan applies once paid. */
-  subscribe: (order: { plan: PaidPlan; seats: number; currency: Currency; method: PayMethod }) =>
-    request<Invoice>('POST', '/account/subscription', order),
-  /** Admin. One catalog credit pack. */
-  top_up: (order: { points: number; currency: Currency; method: PayMethod }) => request<Invoice>('POST', '/account/top-ups', order),
-  list_invoices: () => request<Invoice[]>('GET', '/account/invoices'),
-  list_tickets: () => request<Ticket[]>('GET', '/account/support'),
-  open_ticket: (subject: string, body: string) => request<Ticket>('POST', '/account/support', { subject, body }),
+  /** A member of `workspace`. 503 `billing_unavailable` when Sun Cloud can't answer (never "Free"). */
+  subscription_summary: (workspace: string) => request<SubscriptionSummary>('GET', `/subscriptions/${id_path(workspace)}/summary`),
+  subscription_prices: (workspace: string) => request<PlanPrices>('GET', `/subscriptions/${id_path(workspace)}/prices`),
+  /** Owner or admin. The same `idempotency_key` never starts a second checkout. */
+  start_checkout: (order: { workspace_id: string; plan: PaidPlan; interval: Interval; seats: number; idempotency_key: string }) =>
+    request<CheckoutSession>('POST', '/subscriptions/checkout-sessions', order),
+  /** Owner or admin: the provider's billing portal. */
+  billing_portal: (workspace: string) => request<{ url: string }>('POST', `/subscriptions/${id_path(workspace)}/portal-sessions`),
+  preview_seats: (workspace: string, additional_seats: number) =>
+    request<SeatPreview>('POST', `/subscriptions/${id_path(workspace)}/seats/purchase-preview`, { additional_seats }),
+  /** Buys the previewed seats at the previewed amount. */
+  buy_seats: (workspace: string, preview: SeatPreview & { additional_seats: number; idempotency_key: string }) =>
+    request<unknown>('POST', `/subscriptions/${id_path(workspace)}/seats/purchases`, {
+      additional_seats: preview.additional_seats,
+      expected_current_seats: preview.expected_current_seats,
+      expected_purchase_version: preview.expected_purchase_version,
+      accepted_amount_minor: preview.amount_minor,
+      currency: preview.currency,
+      idempotency_key: preview.idempotency_key,
+    }),
+  /** Deployment owners; 503 without Sun Cloud. */
+  list_tickets: () => request<Ticket[]>('GET', '/support'),
+  open_ticket: (subject: string, body: string) => request<Ticket>('POST', '/support', { subject, body }),
   /** Write-only: the value goes in, never comes back. */
   set_secret: (scope: SecretScope, name: string, value: string) =>
     request<Secret>('PUT', `/secrets/${scope.kind}/${id_path(scope.id)}/${id_path(name)}`, { value }),
