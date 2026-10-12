@@ -1,5 +1,5 @@
-//! `agent`: the ecosystem's agents, and their hidden system workflows
-//! (`workflow.system_agent_id`, one per agent and workspace).
+//! `agent`: each workspace's agents, and their hidden system workflows
+//! (`workflow.system_agent_id`, on the agent's workspace).
 
 use async_trait::async_trait;
 use sqlx::Row;
@@ -12,17 +12,17 @@ use crate::{Result, StoreError, Tx};
 
 /// **Repository** for `agent` rows and system workflows. Fields are checked
 /// with [`Agent`]'s `clean_*` helpers by the caller; here names must be
-/// unique among active agents ignoring case.
+/// unique among the workspace's active agents ignoring case.
 #[async_trait]
 pub trait AgentRepo {
     /// Inserts an agent; `InvalidInput` when an active agent has the name.
     async fn insert_agent(&mut self, agent: &Agent) -> Result<()>;
     /// One agent (archived too), or `NotFound`.
     async fn get_agent(&mut self, id: AgentId) -> Result<Agent>;
-    /// The active agents, by name.
-    async fn agents(&mut self) -> Result<Vec<Agent>>;
-    /// Saves an agent's fields (`archived_at` too); `NotFound` or
-    /// `InvalidInput` (name taken).
+    /// The active agents of `workspace` (`None`: of every workspace), by name.
+    async fn agents(&mut self, workspace: Option<WorkspaceId>) -> Result<Vec<Agent>>;
+    /// Saves an agent's fields (`archived_at` too; never its workspace);
+    /// `NotFound` or `InvalidInput` (name taken).
     async fn update_agent(&mut self, agent: &Agent) -> Result<()>;
     /// The number of open tasks (not Done or Cancelled) assigned to each
     /// agent, per workspace.
@@ -44,17 +44,18 @@ pub trait AgentRepo {
     async fn system_agent_of(&mut self, workflow: WorkflowId) -> Result<Option<AgentId>>;
 }
 
-const COLUMNS: &str =
-    "id, name, description, instructions, runtime_chain, skill_ids, created_at, archived_at";
+const COLUMNS: &str = "id, workspace_id, name, description, instructions, runtime_chain, \
+                       skill_ids, created_at, archived_at";
 
 #[async_trait]
 impl AgentRepo for Tx {
     async fn insert_agent(&mut self, agent: &Agent) -> Result<()> {
         name_free(self, agent).await?;
         sqlx::query(&format!(
-            "INSERT INTO agent ({COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+            "INSERT INTO agent ({COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
         ))
         .bind(agent.id.to_string())
+        .bind(agent.workspace_id.to_string())
         .bind(&agent.name)
         .bind(&agent.description)
         .bind(&agent.instructions)
@@ -76,10 +77,13 @@ impl AgentRepo for Tx {
         agent_from(&row)
     }
 
-    async fn agents(&mut self) -> Result<Vec<Agent>> {
+    async fn agents(&mut self, workspace: Option<WorkspaceId>) -> Result<Vec<Agent>> {
         sqlx::query(&format!(
-            "SELECT {COLUMNS} FROM agent WHERE archived_at IS NULL ORDER BY lower(name)"
+            "SELECT {COLUMNS} FROM agent
+             WHERE archived_at IS NULL AND ($1 IS NULL OR workspace_id = $1)
+             ORDER BY lower(name), workspace_id"
         ))
+        .bind(workspace.map(|w| w.to_string()))
         .fetch_all(self.conn())
         .await?
         .iter()
@@ -186,12 +190,15 @@ impl AgentRepo for Tx {
     }
 }
 
-/// `InvalidInput` when another active agent has the name (any case).
+/// `InvalidInput` when another active agent of the workspace has the name
+/// (any case).
 async fn name_free(tx: &mut Tx, agent: &Agent) -> Result<()> {
     let taken: Option<String> = sqlx::query_scalar(
         "SELECT id FROM agent
-         WHERE lower(name) = lower($1) AND id <> $2 AND archived_at IS NULL",
+         WHERE workspace_id = $1 AND lower(name) = lower($2) AND id <> $3
+           AND archived_at IS NULL",
     )
+    .bind(agent.workspace_id.to_string())
     .bind(&agent.name)
     .bind(agent.id.to_string())
     .fetch_optional(tx.conn())
@@ -209,6 +216,7 @@ async fn name_free(tx: &mut Tx, agent: &Agent) -> Result<()> {
 fn agent_from(row: &SqliteRow) -> Result<Agent> {
     Ok(Agent {
         id: parse(row.try_get("id")?)?,
+        workspace_id: parse(row.try_get("workspace_id")?)?,
         name: row.try_get("name")?,
         description: row.try_get("description")?,
         instructions: row.try_get("instructions")?,
@@ -217,4 +225,54 @@ fn agent_from(row: &SqliteRow) -> Result<Agent> {
         created_at: parse_ts(row.try_get("created_at")?)?,
         archived_at: parse_ts_opt(row.try_get("archived_at")?)?,
     })
+}
+
+/// Data step of `20261102090100_agent_copies` ([`crate::DATA_STEPS`]): each
+/// agent used on a workspace other than its own, by a task assigned to it or
+/// a system workflow, gets a copy there (a new id, the same fields), and that
+/// workspace's tasks and system workflow move to the copy.
+pub(crate) async fn copy_agents_into_their_workspaces(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<()> {
+    let used: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT a.id, u.workspace_id FROM agent a JOIN (
+             SELECT system_agent_id AS agent_id, workspace_id FROM workflow
+             WHERE system_agent_id IS NOT NULL
+             UNION
+             SELECT assignee_agent_id, workspace_id FROM task WHERE assignee_agent_id IS NOT NULL
+         ) u ON u.agent_id = a.id
+         WHERE u.workspace_id <> a.workspace_id
+         ORDER BY a.id, u.workspace_id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for (agent, workspace) in used {
+        let copy = AgentId::generate().to_string();
+        sqlx::query(&format!(
+            "INSERT INTO agent ({COLUMNS})
+             SELECT $1, $2, name, description, instructions, runtime_chain, skill_ids,
+                    created_at, archived_at
+             FROM agent WHERE id = $3"
+        ))
+        .bind(&copy)
+        .bind(&workspace)
+        .bind(&agent)
+        .execute(&mut *conn)
+        .await?;
+        for table in [
+            ("workflow", "system_agent_id"),
+            ("task", "assignee_agent_id"),
+        ] {
+            sqlx::query(&format!(
+                "UPDATE {0} SET {1} = $1 WHERE {1} = $2 AND workspace_id = $3",
+                table.0, table.1
+            ))
+            .bind(&copy)
+            .bind(&agent)
+            .bind(&workspace)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
 }

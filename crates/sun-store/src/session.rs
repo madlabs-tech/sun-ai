@@ -1,36 +1,43 @@
 //! `runtime`, `runtime_state`, `session` and `handoff_pack`:
-//! which runtime a chain name means, its cooldown (survives a restart), the
+//! which runtime a chain name means in a workspace, its cooldown (survives a restart), the
 //! sessions steps run in, and the hand-off packs between them.
 
 use async_trait::async_trait;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use sun_core::model::{HandoffPack, Runtime, RuntimeSource, RuntimeStatus};
-use sun_core::{HostId, RuntimeId, SessionHandle, SessionId, Timestamp};
+use sun_core::{HostId, RuntimeId, SessionHandle, SessionId, Timestamp, WorkspaceId};
 
 use crate::repo::{json, parse, parse_ts, ts};
 use crate::{Result, StoreError, Tx};
 
-/// **Repository** for `runtime` and `runtime_state` rows.
+/// **Repository** for `runtime` and `runtime_state` rows. A runtime
+/// belongs to one workspace; names are unique per workspace.
 #[async_trait]
 pub trait RuntimeRepo {
-    /// The runtime named `name` (a workflow `runtime.chain` entry); created
-    /// as `{name, adapter, source}` when missing. An existing row is kept.
+    /// `workspace`'s runtime named `name` (a `runtime.chain` entry there);
+    /// created as `{name, adapter, source}` when missing. An existing row is
+    /// kept.
     async fn upsert_runtime(
         &mut self,
+        workspace: WorkspaceId,
         name: &str,
         adapter: &str,
         source: RuntimeSource,
     ) -> Result<Runtime>;
-    /// The runtime named `name`, if configured.
-    async fn runtime_by_name(&mut self, name: &str) -> Result<Option<Runtime>>;
-    /// Every runtime row, by name.
-    async fn runtimes(&mut self) -> Result<Vec<Runtime>>;
+    /// `workspace`'s runtime named `name`, if configured.
+    async fn runtime_by_name(
+        &mut self,
+        workspace: WorkspaceId,
+        name: &str,
+    ) -> Result<Option<Runtime>>;
+    /// The runtime rows of `workspace` (`None`: of every workspace), by name.
+    async fn runtimes(&mut self, workspace: Option<WorkspaceId>) -> Result<Vec<Runtime>>;
     /// Stores a configured runtime (validated by the caller); `false` when
-    /// the name is taken.
+    /// its workspace has the name.
     async fn insert_runtime(&mut self, runtime: &Runtime) -> Result<bool>;
     /// Replaces the adapter, source and config of the runtime named
-    /// `runtime.name`; `false` when there is none.
+    /// `runtime.name` in `runtime.workspace_id`; `false` when there is none.
     async fn update_runtime(&mut self, runtime: &Runtime) -> Result<bool>;
     /// One runtime, or `NotFound`.
     async fn get_runtime(&mut self, id: RuntimeId) -> Result<Runtime>;
@@ -61,29 +68,36 @@ pub trait SessionRepo {
 impl RuntimeRepo for Tx {
     async fn upsert_runtime(
         &mut self,
+        workspace: WorkspaceId,
         name: &str,
         adapter: &str,
         source: RuntimeSource,
     ) -> Result<Runtime> {
         sqlx::query(
-            "INSERT INTO runtime (id, name, adapter, source) VALUES ($1, $2, $3, $4) \
-             ON CONFLICT (name) DO NOTHING",
+            "INSERT INTO runtime (id, workspace_id, name, adapter, source) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (workspace_id, name) DO NOTHING",
         )
         .bind(RuntimeId::generate().to_string())
+        .bind(workspace.to_string())
         .bind(name)
         .bind(adapter)
         .bind(source.as_str())
         .execute(self.conn())
         .await?;
-        self.runtime_by_name(name)
+        self.runtime_by_name(workspace, name)
             .await?
             .ok_or_else(|| StoreError::not_found("runtime", name))
     }
 
-    async fn runtime_by_name(&mut self, name: &str) -> Result<Option<Runtime>> {
+    async fn runtime_by_name(
+        &mut self,
+        workspace: WorkspaceId,
+        name: &str,
+    ) -> Result<Option<Runtime>> {
         sqlx::query(&format!(
-            "SELECT {RUNTIME_COLUMNS} FROM runtime WHERE name = $1"
+            "SELECT {RUNTIME_COLUMNS} FROM runtime WHERE workspace_id = $1 AND name = $2"
         ))
+        .bind(workspace.to_string())
         .bind(name)
         .fetch_optional(self.conn())
         .await?
@@ -91,10 +105,12 @@ impl RuntimeRepo for Tx {
         .transpose()
     }
 
-    async fn runtimes(&mut self) -> Result<Vec<Runtime>> {
+    async fn runtimes(&mut self, workspace: Option<WorkspaceId>) -> Result<Vec<Runtime>> {
         let rows = sqlx::query(&format!(
-            "SELECT {RUNTIME_COLUMNS} FROM runtime ORDER BY name"
+            "SELECT {RUNTIME_COLUMNS} FROM runtime WHERE $1 IS NULL OR workspace_id = $1 \
+             ORDER BY name, workspace_id"
         ))
+        .bind(workspace.map(|w| w.to_string()))
         .fetch_all(self.conn())
         .await?;
         rows.iter().map(runtime_from).collect()
@@ -102,14 +118,16 @@ impl RuntimeRepo for Tx {
 
     async fn insert_runtime(&mut self, runtime: &Runtime) -> Result<bool> {
         let done = sqlx::query(&format!(
-            "INSERT INTO runtime ({RUNTIME_COLUMNS}) VALUES ($1, $2, $3, $4, $5) \
-             ON CONFLICT (name) DO NOTHING"
+            "INSERT INTO runtime ({RUNTIME_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7) \
+             ON CONFLICT (workspace_id, name) DO NOTHING"
         ))
         .bind(runtime.id.to_string())
+        .bind(runtime.workspace_id.to_string())
         .bind(runtime.name.as_str())
         .bind(runtime.adapter.as_str())
         .bind(runtime.source.as_str())
         .bind(config_json(runtime)?)
+        .bind(runtime.created_by.map(|m| m.to_string()))
         .execute(self.conn())
         .await?;
         Ok(done.rows_affected() > 0)
@@ -117,11 +135,13 @@ impl RuntimeRepo for Tx {
 
     async fn update_runtime(&mut self, runtime: &Runtime) -> Result<bool> {
         let done = sqlx::query(
-            "UPDATE runtime SET adapter = $1, source = $2, config_json = $3 WHERE name = $4",
+            "UPDATE runtime SET adapter = $1, source = $2, config_json = $3 \
+             WHERE workspace_id = $4 AND name = $5",
         )
         .bind(runtime.adapter.as_str())
         .bind(runtime.source.as_str())
         .bind(config_json(runtime)?)
+        .bind(runtime.workspace_id.to_string())
         .bind(runtime.name.as_str())
         .execute(self.conn())
         .await?;
@@ -255,7 +275,7 @@ impl SessionRepo for Tx {
     }
 }
 
-const RUNTIME_COLUMNS: &str = "id, name, adapter, source, config_json";
+const RUNTIME_COLUMNS: &str = "id, workspace_id, name, adapter, source, config_json, created_by";
 
 fn config_json(runtime: &Runtime) -> Result<Option<String>> {
     Ok(runtime
@@ -267,11 +287,14 @@ fn config_json(runtime: &Runtime) -> Result<Option<String>> {
 
 fn runtime_from(row: &SqliteRow) -> Result<Runtime> {
     let config: Option<String> = row.try_get("config_json")?;
+    let created_by: Option<String> = row.try_get("created_by")?;
     Ok(Runtime {
         id: parse(row.try_get("id")?)?,
+        workspace_id: parse(row.try_get("workspace_id")?)?,
         name: row.try_get("name")?,
         adapter: row.try_get("adapter")?,
         source: parse(row.try_get("source")?)?,
         byo_key: config.map(json).transpose()?,
+        created_by: created_by.map(parse).transpose()?,
     })
 }

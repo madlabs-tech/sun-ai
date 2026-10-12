@@ -10,6 +10,7 @@ use sun_store::{AgentRepo, Store, StoreError, TaskRepo, WorkflowRepo};
 fn agent(name: &str) -> Agent {
     Agent {
         id: AgentId::generate(),
+        workspace_id: WorkspaceId::MAIN,
         name: name.into(),
         description: String::new(),
         instructions: "Be brief.".into(),
@@ -36,10 +37,13 @@ async fn agent_names_are_unique_while_active_and_tasks_name_real_agents() {
     // Archived: off the list, and its name is free again.
     ada.archived_at = Some(chrono::Utc::now());
     tx.update_agent(&ada).await.unwrap();
-    assert!(tx.agents().await.unwrap().is_empty());
+    assert!(tx.agents(Some(WorkspaceId::MAIN)).await.unwrap().is_empty());
     let ada2 = agent("ada");
     tx.insert_agent(&ada2).await.unwrap();
-    assert_eq!(tx.agents().await.unwrap(), std::slice::from_ref(&ada2));
+    assert_eq!(
+        tx.agents(Some(WorkspaceId::MAIN)).await.unwrap(),
+        std::slice::from_ref(&ada2)
+    );
 
     // A task names an agent that exists.
     let mut task = Task::new(WorkspaceId::MAIN, "x");

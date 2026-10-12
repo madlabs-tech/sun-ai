@@ -17,7 +17,7 @@ use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use sun_core::model::{Secret, SecretScope};
 use sun_core::redact::MIN_SECRET_LEN;
-use sun_core::{SecretId, Timestamp};
+use sun_core::{SecretId, Timestamp, WorkspaceId};
 
 use crate::repo::{parse_ts, ts};
 use crate::{Result, StoreError, Tx};
@@ -213,6 +213,71 @@ pub(crate) async fn reseal_old_ecosystem_secrets(
         sqlx::query("UPDATE secret SET sealed = $1 WHERE id = $2")
             .bind(sealed)
             .bind(&id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Data step of `20261102090300_secret_workspace` ([`crate::DATA_STEPS`]):
+/// moves every ecosystem secret but the deployment's own
+/// ([`Secret::is_deployment`]) to Main's workspace scope, re-sealed for it
+/// (the AAD names the scope), unless Main already holds the name; and moves
+/// the names an import left to re-enter ([`crate::SECRETS_TO_REENTER`]) the
+/// same way.
+pub(crate) async fn move_ecosystem_secrets_to_main(
+    conn: &mut sqlx::SqliteConnection,
+    key: &MasterKey,
+) -> Result<()> {
+    let main = SecretScope::Workspace(WorkspaceId::MAIN);
+    let rows: Vec<(String, String, String, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, scope_id, name, sealed FROM secret WHERE scope_kind = 'ecosystem' ORDER BY id",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, scope_id, name, sealed) in rows {
+        if Secret::is_deployment(&name) {
+            continue;
+        }
+        let taken: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM secret WHERE scope_kind = $1 AND scope_id = $2 AND name = $3",
+        )
+        .bind(main.kind())
+        .bind(main.id())
+        .bind(&name)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if taken.is_some() {
+            continue;
+        }
+        let old = SecretScope::from_parts("ecosystem", &scope_id)?;
+        let value = key.open(&aad(&old, &name), &sealed)?;
+        let sealed = key.seal(&aad(&main, &name), value.as_bytes())?;
+        sqlx::query("UPDATE secret SET scope_kind = $1, scope_id = $2, sealed = $3 WHERE id = $4")
+            .bind(main.kind())
+            .bind(main.id())
+            .bind(sealed)
+            .bind(&id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    let listed: Option<String> =
+        sqlx::query_scalar("SELECT value_json FROM kernel_setting WHERE key = $1")
+            .bind(crate::SECRETS_TO_REENTER)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if let Some(listed) = listed {
+        let mut listed: Vec<crate::SecretToReenter> = serde_json::from_str(&listed)?;
+        for secret in &mut listed {
+            if matches!(secret.scope, SecretScope::Ecosystem(_))
+                && !Secret::is_deployment(&secret.name)
+            {
+                secret.scope = main.clone();
+            }
+        }
+        sqlx::query("UPDATE kernel_setting SET value_json = $1 WHERE key = $2")
+            .bind(serde_json::to_string(&listed)?)
+            .bind(crate::SECRETS_TO_REENTER)
             .execute(&mut *conn)
             .await?;
     }

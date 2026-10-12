@@ -15,3 +15,4 @@ mod task;
 mod upgrade;
 mod workspace;
 mod workspace_member;
+mod workspace_scoped;

@@ -182,6 +182,8 @@ pub trait RunRepo {
     async fn insert_run(&mut self, run: &Run) -> Result<()>;
     /// The run, or `NotFound`.
     async fn get_run(&mut self, id: RunId) -> Result<Run>;
+    /// The workspace of the run's task, or `NotFound`.
+    async fn workspace_of_run(&mut self, id: RunId) -> Result<WorkspaceId>;
     /// Every run in a non-terminal status, oldest first — what resume-on-boot loads.
     async fn active_runs(&mut self) -> Result<Vec<Run>>;
     /// Every run of a task, oldest first.
@@ -700,6 +702,17 @@ impl RunRepo for Tx {
             .await?
             .ok_or_else(|| StoreError::not_found("run", id))?;
         run_from(&row)
+    }
+
+    async fn workspace_of_run(&mut self, id: RunId) -> Result<WorkspaceId> {
+        let workspace: String = sqlx::query_scalar(
+            "SELECT t.workspace_id FROM run r JOIN task t ON t.id = r.task_id WHERE r.id = $1",
+        )
+        .bind(id.to_string())
+        .fetch_optional(self.conn())
+        .await?
+        .ok_or_else(|| StoreError::not_found("run", id))?;
+        parse(workspace)
     }
 
     async fn active_runs(&mut self) -> Result<Vec<Run>> {
