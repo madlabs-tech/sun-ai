@@ -5,19 +5,23 @@
 //! `X-Request-ID`; bodies are rebuilt from allowlists, and writes that
 //! charge send an `Idempotency-Key` derived from the client's
 //! `idempotency_key`, the member and the path. Sun Cloud asks back with
-//! `GET /internal/workspaces/{id}/seat_count` (its own token).
+//! `GET /internal/workspaces/{id}/seat_count` (its own token): it does so
+//! on a reconcile, which the engine asks for before a checkout, a seat
+//! purchase and an owner's or admin's summary.
 //!
 //! - Workspace reads (summary, prices): any member there. Writes (checkout,
-//!   portal, seats): its owners and admins. Support: deployment owners.
-//!   The kernel token (a machine) gets 403 on all of it.
+//!   portal, seats): its owners and admins. Support: any signed-in person
+//!   (the cloud answers 403, with why, to one who pays for no plan). The
+//!   kernel token (a machine) gets 403 on all of it.
 //! - The cloud's 404 (or any failure to answer) is `503 billing_unavailable`,
-//!   never the Free plan; 402, 409 and 429 pass through with their code.
+//!   never the Free plan, except on cancel and portal, where it is `404
+//!   no_subscription`; 402, 409 and 429 pass through with their code.
 // ponytail: wallets (`/billing/*`) are deferred with credits; add them here
 // when sun.madlabs.tech sells credits.
 
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -113,16 +117,38 @@ impl CloudBilling {
             let status = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
             return Ok((status, Json(answer)).into_response());
         }
-        if !matches!(status, 402 | 403 | 409 | 429 | 400 | 422) {
+        // Canceling or managing a plan there isn't: the cloud's 404 says so.
+        let no_plan =
+            status == 404 && (path.ends_with("/cancel") || path.ends_with("/portal-sessions"));
+        if !no_plan && !matches!(status, 402 | 403 | 409 | 429 | 400 | 422) {
             tracing::warn!("Sun Cloud {path}: answered {status}");
         }
-        let mut refused = refusal(status, &answer).into_response();
+        let refused = match no_plan {
+            true => ApiError::new(
+                StatusCode::NOT_FOUND,
+                "no_subscription",
+                "This workspace has no subscription.",
+            ),
+            false => refusal(status, &answer),
+        };
+        let mut refused = refused.into_response();
         if let Some(seconds) = retry_after.filter(|_| status == 429)
             && let Ok(value) = HeaderValue::from_str(&seconds)
         {
             refused.headers_mut().insert(header::RETRY_AFTER, value);
         }
         Ok(refused)
+    }
+
+    /// Has the cloud recount `workspace`'s members (it asks [`seat_count`])
+    /// for `user`, so its seat checks see who is there now. `Some` is its
+    /// refusal, already mapped: answer that and go no further.
+    async fn recount(&self, workspace: WorkspaceId, user: MemberId) -> ApiResult<Option<Response>> {
+        let path = format!("/api/v1/subscriptions/{workspace}/seats/reconcile");
+        let answer = self
+            .send(reqwest::Method::POST, &path, user, None, None)
+            .await?;
+        Ok((!answer.status().is_success()).then_some(answer))
     }
 }
 
@@ -259,6 +285,31 @@ fn seats(n: u32, field: &str) -> ApiResult<u32> {
     }
 }
 
+/// `usd` or `idr`, the currencies Sun Cloud prices in (any case).
+fn currency(text: &str) -> ApiResult<&'static str> {
+    match text.to_ascii_lowercase().as_str() {
+        "usd" => Ok("usd"),
+        "idr" => Ok("idr"),
+        _ => Err(ApiError::invalid("`currency` must be `usd` or `idr`.")),
+    }
+}
+
+/// `?currency=`: which of the cloud's currencies to show prices in.
+#[derive(Deserialize)]
+struct InCurrency {
+    currency: Option<String>,
+}
+
+impl InCurrency {
+    /// The query to pass on: `?currency=usd`, or nothing.
+    fn query(&self) -> ApiResult<String> {
+        Ok(match self.currency.as_deref() {
+            Some(text) => format!("?currency={}", currency(text)?),
+            None => String::new(),
+        })
+    }
+}
+
 /// A token the cloud made (a purchase version): short and URL-safe.
 fn token_like(text: &str, field: &str) -> ApiResult<()> {
     let valid = !text.is_empty()
@@ -301,20 +352,35 @@ async fn read_workspace(api: &Api, caller: &Caller, text: &str, what: &str) -> A
         .await
 }
 
+/// `GET /subscriptions/{id}/summary?currency=`. For an owner or admin the cloud
+/// recounts the members first, so `used` is the real count; a recount that
+/// fails still shows the last count (a read never fails on a refresh).
 async fn summary(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Path(text): Path<String>,
+    Query(query): Query<InCurrency>,
 ) -> ApiResult<Response> {
-    read_workspace(&api, &caller, &text, "summary").await
+    let what = format!("summary{}", query.query()?);
+    let workspace = workspace(&api, &text).await?;
+    if may_pay(&caller, workspace).is_ok() {
+        let (cloud, user) = (cloud(&api)?, person(&caller)?);
+        if let Some(refused) = cloud.recount(workspace, user).await? {
+            tracing::warn!("seat recount for {workspace}: {}", refused.status());
+        }
+    }
+    read_workspace(&api, &caller, &text, &what).await
 }
 
+/// `GET /subscriptions/{id}/prices?currency=`: the plans in that currency.
 async fn prices(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
     Path(text): Path<String>,
+    Query(query): Query<InCurrency>,
 ) -> ApiResult<Response> {
-    read_workspace(&api, &caller, &text, "prices").await
+    let what = format!("prices{}", query.query()?);
+    read_workspace(&api, &caller, &text, &what).await
 }
 
 #[derive(Deserialize)]
@@ -325,6 +391,8 @@ struct NewCheckout {
     interval: String,
     seats: u32,
     idempotency_key: String,
+    #[serde(default)]
+    currency: Option<String>,
 }
 
 /// `POST /subscriptions/checkout-sessions`: `{checkout_url, session_id}`;
@@ -345,9 +413,13 @@ async fn checkout(
         return Err(ApiError::invalid("`interval` must be `month` or `year`."));
     }
     let seats = seats(input.seats, "seats")?;
+    let currency = input.currency.as_deref().map(currency).transpose()?;
     let path = "/api/v1/subscriptions/checkout-sessions";
     let key = idempotency(user, path, &input.idempotency_key)?;
-    let body = json!({
+    if let Some(refused) = cloud.recount(workspace, user).await? {
+        return Ok(refused);
+    }
+    let mut body = json!({
         "workspace_id": workspace,
         "plan": input.plan,
         "interval": input.interval,
@@ -355,6 +427,9 @@ async fn checkout(
         "idempotency_key": key,
         "customer_email": caller.email(),
     });
+    if let Some(currency) = currency {
+        body["currency"] = json!(currency);
+    }
     cloud
         .send(reqwest::Method::POST, path, user, Some(body), Some(&key))
         .await
@@ -377,6 +452,12 @@ async fn write_workspace(
     let key = idempotency_key
         .map(|k| idempotency(user, &path, k))
         .transpose()?;
+    // Buying seats is checked against who is there now.
+    if what == "seats/purchases"
+        && let Some(refused) = cloud.recount(workspace, user).await?
+    {
+        return Ok(refused);
+    }
     let body = match (body, &key) {
         (Some(mut body), Some(key)) => {
             body["idempotency_key"] = json!(key);
@@ -505,7 +586,7 @@ async fn as_person(
     cloud.send(method, path, user, body, None).await
 }
 
-/// `GET /support` (deployment owners): the tickets they opened at Sun.
+/// `GET /support` (any signed-in person): the tickets they opened at Sun.
 pub(crate) async fn tickets(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -527,7 +608,8 @@ pub(crate) struct NewTicket {
     body: String,
 }
 
-/// `POST /support` `{subject, body}` (deployment owners): 201 the ticket.
+/// `POST /support` `{subject, body}` (any signed-in person): 201 the
+/// ticket, or the cloud's 403 for one who pays for no plan.
 pub(crate) async fn open_ticket(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,

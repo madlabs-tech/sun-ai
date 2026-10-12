@@ -8,6 +8,7 @@ import type { OnLimit, OutboxItem, Resolution,
   Project,
   CheckoutSession,
   Interval,
+  Currency,
   PaidPlan,
   PlanPrices,
   SeatPreview,
@@ -143,6 +144,7 @@ export async function request<T>(method: string, path: string, body?: unknown): 
 }
 
 const id_path = (id: string) => encodeURIComponent(id);
+const in_currency = (currency?: string) => (currency ? `?currency=${currency}` : '');
 
 /** `?a=1&b=2` of the set values, or ''. */
 const query = (params: Record<string, string | undefined>) => {
@@ -399,11 +401,14 @@ export const api = {
   /** No workspace: Main. */
   get_entitlement: (workspace?: string) =>
     request<Entitlement>('GET', workspace ? `/entitlement?workspace=${encodeURIComponent(workspace)}` : '/entitlement'),
-  /** A member of `workspace`. 503 `billing_unavailable` when Sun Cloud can't answer (never "Free"). */
-  subscription_summary: (workspace: string) => request<SubscriptionSummary>('GET', `/subscriptions/${id_path(workspace)}/summary`),
-  subscription_prices: (workspace: string) => request<PlanPrices>('GET', `/subscriptions/${id_path(workspace)}/prices`),
+  /** A member of `workspace`. 503 `billing_unavailable` when Sun Cloud can't answer (never "Free"). No currency: the
+   *  subscription's, else the cloud's default. */
+  subscription_summary: (workspace: string, currency?: Currency) =>
+    request<SubscriptionSummary>('GET', `/subscriptions/${id_path(workspace)}/summary${in_currency(currency)}`),
+  subscription_prices: (workspace: string, currency?: Currency) =>
+    request<PlanPrices>('GET', `/subscriptions/${id_path(workspace)}/prices${in_currency(currency)}`),
   /** Owner or admin. The same `idempotency_key` never starts a second checkout. */
-  start_checkout: (order: { workspace_id: string; plan: PaidPlan; interval: Interval; seats: number; idempotency_key: string }) =>
+  start_checkout: (order: { workspace_id: string; plan: PaidPlan; interval: Interval; seats: number; idempotency_key: string; currency?: Currency }) =>
     request<CheckoutSession>('POST', '/subscriptions/checkout-sessions', order),
   /** Owner or admin: the provider's billing portal. */
   billing_portal: (workspace: string) => request<{ url: string }>('POST', `/subscriptions/${id_path(workspace)}/portal-sessions`),

@@ -4,7 +4,7 @@
 //! support tickets, and the cloud's own `seat_count` endpoint.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::Router;
 use axum::body::Body;
@@ -32,11 +32,15 @@ struct Seen {
 }
 
 /// A Sun Cloud that records every call and answers `replies[path]`, else
-/// 200 `{"ok": true}`.
+/// 200 `{"ok": true}`. Given the `kernel`, it counts too: a reconcile asks
+/// the kernel's `seat_count`, a summary shows it as `used`, and a checkout
+/// for fewer seats is 409 `seat_capacity_overcommitted`.
 #[derive(Clone, Default)]
 struct Cloud {
     seen: Arc<Mutex<Vec<Seen>>>,
     replies: Arc<Mutex<Vec<(String, u16, Value)>>>,
+    kernel: Arc<OnceLock<Router>>,
+    members: Arc<Mutex<Option<u64>>>,
 }
 
 impl Cloud {
@@ -55,6 +59,40 @@ impl Cloud {
         self.seen.lock().unwrap().len()
     }
 
+    /// What a counting cloud answers at `path`, if it counts.
+    async fn counted(&self, path: &str, body: &Value) -> Option<(u16, Value)> {
+        let kernel = self.kernel.get()?;
+        let members = *self.members.lock().unwrap();
+        if let Some(workspace) = path
+            .strip_prefix("/api/v1/subscriptions/")
+            .and_then(|p| p.strip_suffix("/seats/reconcile"))
+        {
+            let ask = axum::http::Request::get(format!(
+                "/api/v1/internal/workspaces/{workspace}/seat_count"
+            ))
+            .header(header::AUTHORIZATION, format!("Bearer {CLOUD_TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+            let response = common::respond(kernel, ask).await;
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let count: Value = serde_json::from_slice(&bytes).unwrap();
+            *self.members.lock().unwrap() = count["seat_count"].as_u64();
+            return Some((
+                200,
+                json!({ "seat_capacity": { "used": count["seat_count"] } }),
+            ));
+        }
+        if path.ends_with("/summary") {
+            return Some((200, json!({ "seat_capacity": { "used": members } })));
+        }
+        let short = members.is_some_and(|n| body["seats"].as_u64().is_some_and(|s| s < n));
+        if path == "/api/v1/subscriptions/checkout-sessions" && short {
+            let refused = json!({ "error": "more members than seats", "code": "seat_capacity_overcommitted" });
+            return Some((409, refused));
+        }
+        None
+    }
+
     async fn start(&self) -> String {
         let cloud = self.clone();
         let app = Router::new().fallback(move |request: Request| {
@@ -63,11 +101,12 @@ impl Cloud {
                 let (parts, body) = request.into_parts();
                 let bytes = body.collect().await.unwrap().to_bytes();
                 let path = parts.uri.path_and_query().unwrap().to_string();
+                let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
                 cloud.seen.lock().unwrap().push(Seen {
                     method: parts.method.to_string(),
                     path: path.clone(),
                     headers: parts.headers,
-                    body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+                    body: body.clone(),
                 });
                 let reply = cloud
                     .replies
@@ -77,6 +116,10 @@ impl Cloud {
                     .rev()
                     .find(|(p, _, _)| *p == path)
                     .map(|(_, s, b)| (*s, b.clone()));
+                let reply = match reply {
+                    Some(reply) => Some(reply),
+                    None => cloud.counted(&path, &body).await,
+                };
                 let (status, body) = reply.unwrap_or((200, json!({ "ok": true })));
                 let mut response =
                     (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response();
@@ -258,7 +301,8 @@ async fn another_workspace_s_subscription_is_hidden_from_its_non_members() {
         "seats": 1, "idempotency_key": "c-1" });
     let (status, _) = call_as(&app, &olga, "POST", path, Some(checkout)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cloud.count(), 2);
+    // Each after a recount of her members.
+    assert_eq!(cloud.count(), 4);
     assert_eq!(cloud.last().body["workspace_id"], ops.to_string());
 }
 
@@ -396,7 +440,7 @@ async fn workspace_writes_are_for_owners_and_admins_with_allowlisted_bodies() {
 }
 
 #[tokio::test]
-async fn refusals_keep_their_meaning_and_support_stays_the_owners() {
+async fn refusals_keep_their_meaning_and_support_is_any_person_s() {
     let cloud = Cloud::default();
     let (k, app) = connected(&cloud).await;
     let admin = member_token(&k.store, "ada", Role::Admin).await;
@@ -423,6 +467,24 @@ async fn refusals_keep_their_meaning_and_support_stays_the_owners() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"]["code"], "billing_unavailable");
 
+    // Cancel or portal where the cloud has no subscription: 404, said so;
+    // any other failure there is still unavailable.
+    for what in ["cancel", "portal-sessions"] {
+        let path = format!("/api/v1/subscriptions/{MAIN}/{what}");
+        cloud.reply(&path, 404, json!({ "error": "no subscription" }));
+        let (status, body) = call_as(&app, &admin, "POST", &path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{what}: {body}");
+        assert_eq!(body["error"]["code"], "no_subscription");
+        assert_eq!(
+            body["error"]["message"],
+            "This workspace has no subscription."
+        );
+        cloud.reply(&path, 500, json!({}));
+        let (status, body) = call_as(&app, &admin, "POST", &path, None).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{what}");
+        assert_eq!(body["error"]["code"], "billing_unavailable");
+    }
+
     // 429 keeps its Retry-After.
     let summary = format!("/api/v1/subscriptions/{MAIN}/summary");
     cloud.reply(&summary, 429, json!({}));
@@ -434,31 +496,150 @@ async fn refusals_keep_their_meaning_and_support_stays_the_owners() {
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(response.headers()[header::RETRY_AFTER], "7");
 
-    // Support stays the deployment owners', at the cloud's `/account/support`.
+    // Support is any signed-in person's, at the cloud's `/account/support`,
+    // as that person; the kernel token is a machine.
+    let before = cloud.count();
+    let (status, _) = call_as(&app, TOKEN, "GET", "/api/v1/support", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let ticket = json!({ "subject": "Help", "body": "It broke." });
+    let (status, _) = call_as(&app, TOKEN, "POST", "/api/v1/support", Some(ticket.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(cloud.count(), before);
     let lone = member_token_in(&k.store, "lou", &[]).await;
     let (status, _) = call_as(&app, &lone, "GET", "/api/v1/support", None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let owner = deployment_owner(&k).await;
-    let (status, _) = call_as(&app, &owner, "GET", "/api/v1/support", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(cloud.last().path, "/account/support");
-    let ticket = json!({ "subject": "Help", "body": "It broke." });
-    let (status, _) = call_as(&app, &owner, "POST", "/api/v1/support", Some(ticket)).await;
-    assert_eq!(status, StatusCode::OK);
+    let seen = cloud.last();
+    assert_eq!(seen.path, "/account/support");
     assert_eq!(
-        cloud.last().body,
-        json!({ "subject": "Help", "body": "It broke." })
+        seen.headers["x-user-id"],
+        member_id(&k, "lou").await.as_str()
     );
+    let (status, _) = call_as(&app, &lone, "POST", "/api/v1/support", Some(ticket.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cloud.last().body, ticket);
+    // One who pays for no plan: the cloud's 403 and its reason.
+    let why = "support from people comes with the Pro and Business plans";
+    cloud.reply(
+        "/account/support",
+        403,
+        json!({ "error": why, "code": "forbidden" }),
+    );
+    let (status, body) = call_as(&app, &lone, "POST", "/api/v1/support", Some(ticket)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["message"], why);
 }
 
-/// A session token of a deployment owner (a person, not the kernel token).
-async fn deployment_owner(k: &common::Kernel) -> String {
-    let token = member_token_in(&k.store, "dee", &[]).await;
-    let mut tx = k.store.begin().await.unwrap();
-    let dee = tx.member_by_email("dee@corp.io").await.unwrap().unwrap();
-    tx.set_member_owner(dee.id, true).await.unwrap();
-    tx.commit().await.unwrap();
-    token
+/// The cloud recounts members before a checkout or a seat purchase, and
+/// before an owner's or admin's summary: so a checkout for fewer seats than
+/// people is refused, and the page shows the real `used`.
+#[tokio::test]
+async fn checkouts_and_seat_purchases_follow_a_recount() {
+    let cloud = Cloud::default();
+    let (k, app) = connected(&cloud).await;
+    cloud.kernel.set(app.clone()).unwrap();
+    let admin = member_token(&k.store, "ada", Role::Admin).await;
+    let viewer = member_token(&k.store, "vic", Role::Viewer).await;
+    member_token(&k.store, "mia", Role::Member).await;
+    let members = main_members(&k).await;
+    assert!(members >= 3, "{members}");
+
+    let checkout = json!({ "workspace_id": MAIN, "plan": "pro", "interval": "month",
+        "seats": 1, "idempotency_key": "c-1" });
+    let path = "/api/v1/subscriptions/checkout-sessions";
+    let (status, body) = call_as(&app, &admin, "POST", path, Some(checkout)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"]["code"], "seat_capacity_overcommitted");
+    let reconcile = format!("/api/v1/subscriptions/{MAIN}/seats/reconcile");
+    let paths: Vec<String> = cloud
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.path.clone())
+        .collect();
+    assert_eq!(paths, [reconcile.as_str(), path]);
+    let ada_id = member_id(&k, "ada").await;
+    let first = cloud.seen.lock().unwrap()[0].clone();
+    assert_eq!(first.headers["x-user-id"], ada_id.as_str());
+
+    // The admin's summary is recounted first; a viewer's is read as is.
+    let summary = format!("/api/v1/subscriptions/{MAIN}/summary");
+    let (status, body) = call_as(&app, &admin, "GET", &summary, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["seat_capacity"]["used"], members);
+    let before = cloud.count();
+    call_as(&app, &viewer, "GET", &summary, None).await;
+    assert_eq!(cloud.count(), before + 1);
+    assert_eq!(cloud.last().path, summary);
+
+    // A recount that fails stops the checkout and the purchase there; the
+    // summary still shows the last count.
+    cloud.reply(
+        &reconcile,
+        503,
+        json!({ "error": "x", "code": "kernel_unavailable" }),
+    );
+    let checkout = json!({ "workspace_id": MAIN, "plan": "pro", "interval": "month",
+        "seats": 9, "idempotency_key": "c-2" });
+    let (status, body) = call_as(&app, &admin, "POST", path, Some(checkout)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "kernel_unavailable");
+    let buy = json!({ "additional_seats": 2, "expected_current_seats": 3,
+        "expected_purchase_version": 4, "accepted_amount_minor": 1, "currency": "usd",
+        "idempotency_key": "s-1" });
+    let purchase = format!("/api/v1/subscriptions/{MAIN}/seats/purchases");
+    let (status, _) = call_as(&app, &admin, "POST", &purchase, Some(buy)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(cloud.last().path, reconcile);
+    let (status, body) = call_as(&app, &admin, "GET", &summary, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["seat_capacity"]["used"], members);
+}
+
+/// `?currency=` on summary and prices, and `currency` in a checkout, pass
+/// through when they are `usd` or `idr`; anything else stops here.
+#[tokio::test]
+async fn currencies_pass_through_from_the_allowlist() {
+    let cloud = Cloud::default();
+    let (k, app) = connected(&cloud).await;
+    let bob = member_token(&k.store, "bob", Role::Viewer).await;
+    let admin = member_token(&k.store, "ada", Role::Admin).await;
+    for what in ["summary", "prices"] {
+        let base = format!("/api/v1/subscriptions/{MAIN}/{what}");
+        let (status, _) = call_as(&app, &bob, "GET", &format!("{base}?currency=IDR"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(cloud.last().path, format!("{base}?currency=idr"));
+        call_as(&app, &bob, "GET", &format!("{base}?currency=usd&x=1"), None).await;
+        assert_eq!(cloud.last().path, format!("{base}?currency=usd"));
+        call_as(&app, &bob, "GET", &base, None).await;
+        assert_eq!(cloud.last().path, base);
+        let before = cloud.count();
+        for bad in ["eur", "usd%26plan%3Dfree", ""] {
+            let path = format!("{base}?currency={bad}");
+            let (status, body) = call_as(&app, &bob, "GET", &path, None).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {body}");
+        }
+        assert_eq!(cloud.count(), before);
+    }
+    // An admin's summary in a currency: the recount, then the summary in it.
+    let base = format!("/api/v1/subscriptions/{MAIN}/summary");
+    call_as(&app, &admin, "GET", &format!("{base}?currency=idr"), None).await;
+    assert_eq!(cloud.last().path, format!("{base}?currency=idr"));
+
+    let path = "/api/v1/subscriptions/checkout-sessions";
+    let checkout = |currency: Value| {
+        json!({ "workspace_id": MAIN, "plan": "pro", "interval": "month", "seats": 5,
+            "idempotency_key": "c-1", "currency": currency })
+    };
+    let (status, _) = call_as(&app, &admin, "POST", path, Some(checkout(json!("IDR")))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cloud.last().body["currency"], "idr");
+    let before = cloud.count();
+    for bad in [json!("eur"), json!(""), json!(5)] {
+        let (status, body) = call_as(&app, &admin, "POST", path, Some(checkout(bad.clone()))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad}: {body}");
+    }
+    assert_eq!(cloud.count(), before);
 }
 
 #[tokio::test]

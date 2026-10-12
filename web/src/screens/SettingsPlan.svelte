@@ -1,12 +1,13 @@
 <!-- Plan & billing of the open workspace. The plan badge: which plan it runs on, where it comes from, and its
      limits. With Sun Cloud billing (`features.billing`), its subscription too: status, seats purchased / used /
-     available, and for its owners and admins Upgrade (plan + interval + seats, then the hosted checkout),
+     available, and for its owners and admins Upgrade (plan + interval + seats, and the currency when the cloud
+     prices in more than one, then the hosted checkout),
      Manage billing (the provider's portal), Buy seats (a price preview first) and Cancel plan (confirmed first).
      Members read only. -->
 <script lang="ts">
   import { Badge, Button, Dialog, Icon, Input, Select } from '@hryer/madlabs-design-system/svelte';
   import { ApiFailure, api } from '../lib/api/client';
-  import type { Entitlement, Interval, PaidPlan, PlanPrices, SeatPreview, SubscriptionSummary } from '../lib/api/types';
+  import type { Currency, Entitlement, Interval, PaidPlan, PlanPrices, SeatPreview, SubscriptionSummary } from '../lib/api/types';
   import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
   import { clock, day, price, whole } from '../lib/format';
 
@@ -21,6 +22,10 @@
     { value: 'month', label: 'Monthly' },
     { value: 'year', label: 'Yearly' },
   ];
+  const CURRENCIES: { value: Currency; label: string }[] = [
+    { value: 'usd', label: 'US dollar (USD)' },
+    { value: 'idr', label: 'Indonesian rupiah (IDR)' },
+  ];
 
   const workspace = current_workspace();
   let current = $state<Entitlement | null>(null);
@@ -34,11 +39,33 @@
   let summary = $state<SubscriptionSummary | null>(null);
   let prices = $state<PlanPrices | null>(null);
   let billing_error = $state('');
+  /** The currency picked for prices; none: the subscription's, else the cloud's default. */
+  let currency = $state<Currency | undefined>();
+  /** The currencies the cloud has prices in; a switch shows when there are two. */
+  let currencies = $state<Currency[]>([]);
+  const fetch_billing = () => Promise.all([api.subscription_summary(workspace, currency), api.subscription_prices(workspace, currency)]);
   async function load_billing() {
     try {
-      [summary, prices] = await Promise.all([api.subscription_summary(workspace), api.subscription_prices(workspace)]);
+      [summary, prices] = await fetch_billing();
     } catch (e) {
       billing_error = error_text(e);
+      return;
+    }
+    if (currencies.length || !may_pay) return;
+    // Asked for a currency it has no prices in, the cloud answers in its default one.
+    const shown = prices!;
+    const priced = await Promise.all(
+      CURRENCIES.map(({ value }) => (value === shown.currency ? shown : api.subscription_prices(workspace, value).catch(() => null))),
+    );
+    currencies = CURRENCIES.map((c) => c.value).filter((c, i) => priced[i]?.currency === c && priced[i]!.plans.length > 0);
+    currency = shown.currency as Currency;
+  }
+  async function switch_currency(picked: string) {
+    currency = picked as Currency;
+    try {
+      [summary, prices] = await fetch_billing();
+    } catch (e) {
+      toast('danger', 'Prices not loaded', error_text(e));
     }
   }
   let started = false;
@@ -127,7 +154,9 @@
     busy = 'checkout';
     try {
       const { plan, interval } = upgrading;
-      const session = await api.start_checkout({ workspace_id: workspace, plan, interval, seats, idempotency_key: `${upgrading.nonce}-${plan}-${interval}-${seats}` });
+      const in_currency = prices?.currency as Currency | undefined;
+      const idempotency_key = `${upgrading.nonce}-${plan}-${interval}-${seats}-${in_currency ?? ''}`;
+      const session = await api.start_checkout({ workspace_id: workspace, plan, interval, seats, idempotency_key, currency: in_currency });
       location.assign(session.checkout_url);
     } catch (err) {
       toast('danger', 'Checkout not started', error_text(err));
@@ -258,6 +287,14 @@
           <form class="billing__form" aria-label="Upgrade" onsubmit={checkout} novalidate>
             <Select label="Plan" bind:value={upgrading.plan} options={offered.map((p) => ({ value: p, label: PLAN[p] }))} />
             <Select label="Billed" bind:value={upgrading.interval} options={INTERVALS} />
+            {#if currencies.length > 1}
+              <Select
+                label="Currency"
+                value={currency}
+                options={CURRENCIES.filter((c) => currencies.includes(c.value))}
+                onchange={(e: Event) => switch_currency((e.currentTarget as HTMLSelectElement).value)}
+              />
+            {/if}
             <Input label="Seats" type="number" inputmode="numeric" min="1" max="10000" hint="One per person in the workspace." bind:value={upgrading.seats} error={seats_error} />
             {#if total}<p class="billing__total">Total: <strong>{total}</strong></p>{/if}
             <div class="billing__actions">
