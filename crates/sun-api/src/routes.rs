@@ -98,20 +98,12 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/tasks/{id}/corrections", get(crate::corrections::of_task))
         .route("/tasks/{id}/decision", post(crate::corrections::decide))
         .route("/corrections", get(crate::corrections::list))
-        .route(
-            "/corrections/{id}/star",
-            post(crate::memory::star_correction),
-        )
-        .route("/notes/{id}/star", post(crate::memory::star_note))
         .route("/evals", get(crate::evals::list).post(crate::evals::start))
         .route("/evals/{id}", get(crate::evals::get))
         .route(
             "/eval_sets",
             get(crate::evals::sets).post(crate::evals::save_set),
         )
-        .route("/memory", get(crate::memory::list))
-        .route("/memory/metrics", get(crate::memory::metrics))
-        .route("/memory/{id}/review", post(crate::memory::review))
         .route("/tasks/{id}/knowledge_flags", get(knowledge_flags))
         .route("/tasks/{id}/quality", get(crate::quality::get))
         .route("/tasks/{id}/quality/check", post(crate::quality::check))
@@ -148,15 +140,9 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/mods", get(list_mods))
         .route("/catalog", get(crate::catalog::list))
         .route("/catalog/{id}/files", get(crate::catalog::files))
-        .route("/catalog/{id}/install", post(crate::catalog::install))
         .route(
             "/catalog/{id}/repos/{repo_id}",
             get(crate::catalog::repo_install),
-        )
-        .route("/catalog/{id}", delete(crate::catalog::uninstall))
-        .route(
-            "/catalog/{id}/dismissed",
-            put(crate::catalog::dismiss).delete(crate::catalog::restore),
         )
         .route("/mcp_servers", get(crate::catalog::mcp_servers))
         .route(
@@ -170,19 +156,6 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/me", get(auth::me))
         .route("/features", get(crate::features::get))
         .route("/entitlement", get(crate::license::get))
-        .route("/account", get(crate::account::get))
-        .route("/account/invoices", get(crate::account::invoices))
-        .route(
-            "/account/support",
-            get(crate::account::tickets).post(crate::account::open_ticket),
-        )
-        .route("/marketplace/listings", get(crate::marketplace::listings))
-        .route("/marketplace/leases", get(crate::marketplace::leases))
-        .route("/marketplace/policy", get(crate::marketplace::policy))
-        .route(
-            "/marketplace/listings/mine",
-            get(crate::marketplace::my_listings),
-        )
         .merge(knowledge_routes())
         .route_layer(middleware::from_fn(auth::require_by_method));
     let workflow_create = Router::new()
@@ -194,14 +167,6 @@ pub(crate) fn router(api: Api) -> Router {
     let workflow_edit = Router::new()
         .route("/workflows/{id}/versions", post(save_workflow_version))
         .route_layer(middleware::from_fn(auth::require(&[
-            Permission::EditWorkflow,
-        ])));
-    // The builder's checks: for whoever may create or edit workflows.
-    let workflow_check = Router::new()
-        .route("/workflows/validate", post(validate_workflow))
-        .route("/workflows/dry-run", post(dry_run_workflow))
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::CreateWorkflow,
             Permission::EditWorkflow,
         ])));
     let workspace_edit = Router::new()
@@ -258,41 +223,69 @@ pub(crate) fn router(api: Api) -> Router {
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::DeleteWorkspace,
         ])));
-    // Members: one permission per verb.
-    let member_read = Router::new()
-        .route("/members", get(auth::list_members))
+    // A workspace's members and invitations, by the caller's role there.
+    let member_edit = Router::new()
+        .route(
+            "/workspaces/{id}/members/{member}",
+            put(auth::set_workspace_role).delete(auth::remove_workspace_member),
+        )
         .route_layer(middleware::from_fn(auth::require(&[
-            Permission::ViewMembers,
+            Permission::EditMembers,
         ])));
-    // `invite_members` without a password, `create_members` with one: the
-    // handler checks which.
-    let member_create = Router::new()
-        .route("/members", post(auth::invite_member))
+    let invite = Router::new()
+        .route(
+            "/workspaces/{id}/invitations",
+            get(auth::list_invitations).post(auth::create_invitation),
+        )
+        .route(
+            "/workspaces/{id}/invitations/{invitation}",
+            delete(auth::revoke_invitation),
+        )
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::InviteMembers,
-            Permission::CreateMembers,
         ])));
-    let member_edit = Router::new()
+    // Importing a knowledge source needs `manage_settings` in both workspaces.
+    let knowledge_import = Router::new()
+        .route(
+            "/workspaces/{id}/knowledge_sources/{source_id}",
+            post(crate::workspaces::import_knowledge_source)
+                .delete(crate::workspaces::detach_knowledge_source),
+        )
+        .route_layer(middleware::from_fn(auth::require(&[
+            Permission::ManageSettings,
+        ])));
+    // The deployment itself, for deployment owners only: its accounts, mail,
+    // sign-in, security, audit, hosts, mods, ecosystem secrets, runtimes and
+    // agents, limits, catalog, memory, its account at Sun and marketplace.
+    let deployment = Router::new()
+        .route(
+            "/members",
+            get(auth::list_members).post(auth::invite_member),
+        )
         .route("/members/{id}/password", put(auth::set_member_password))
         .route("/members/{id}/invite", post(auth::reinvite_member))
         .route(
             "/members/{id}/two_step",
             delete(auth::reset_member_two_step),
         )
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::EditMembers,
-        ])));
-    let member_deactivate = Router::new()
         .route("/members/{id}/deactivate", post(auth::deactivate_member))
         .route("/members/{id}/activate", post(auth::activate_member))
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::DeactivateMembers,
-        ])));
-    let settings = Router::new()
+        .route("/members/{id}/owner", put(auth::set_owner))
         .route("/hosts/tokens", post(crate::hosts::create_token))
         .route("/sessions/{id}/kill", post(crate::hosts::kill_session))
-        .route("/marketplace/leases", post(crate::marketplace::lease))
-        .route("/marketplace/policy", put(crate::marketplace::set_policy))
+        .route("/marketplace/listings", get(crate::marketplace::listings))
+        .route(
+            "/marketplace/leases",
+            get(crate::marketplace::leases).post(crate::marketplace::lease),
+        )
+        .route(
+            "/marketplace/policy",
+            get(crate::marketplace::policy).put(crate::marketplace::set_policy),
+        )
+        .route(
+            "/marketplace/listings/mine",
+            get(crate::marketplace::my_listings),
+        )
         .route(
             "/marketplace/listings/{id}/status",
             post(crate::marketplace::set_listing_status),
@@ -313,11 +306,6 @@ pub(crate) fn router(api: Api) -> Router {
             "/marketplace/leases/{id}/dispute",
             post(crate::marketplace::dispute),
         )
-        .route(
-            "/workspaces/{id}/knowledge_sources/{source_id}",
-            post(crate::workspaces::import_knowledge_source)
-                .delete(crate::workspaces::detach_knowledge_source),
-        )
         .route("/smtp", get(auth::get_smtp).put(auth::put_smtp))
         .route("/smtp/test", post(auth::test_smtp))
         .route(
@@ -334,23 +322,18 @@ pub(crate) fn router(api: Api) -> Router {
             "/settings/embeddings",
             put(crate::knowledge::put_embeddings),
         )
+        .route("/account", get(crate::account::get))
+        .route("/account/invoices", get(crate::account::invoices))
+        .route(
+            "/account/support",
+            get(crate::account::tickets).post(crate::account::open_ticket),
+        )
         .route("/account/subscription", post(crate::account::subscribe))
         .route("/account/top-ups", post(crate::account::top_up))
         .route(
             "/license",
             put(crate::license::put).delete(crate::license::remove),
         )
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::ManageSettings,
-        ])));
-    let owner = Router::new()
-        .route("/members/{id}/owner", put(auth::set_owner))
-        .route_layer(middleware::from_fn(auth::require_owner));
-    let approvals = Router::new()
-        .route("/tasks/{id}/approve", post(approve))
-        .route("/tasks/{id}/reject", post(reject))
-        .route_layer(middleware::from_fn(auth::require(&[Permission::Approve])));
-    let runtimes = Router::new()
         .route(
             "/runtimes/{id}/policy",
             put(crate::hosts::set_runtime_policy),
@@ -366,48 +349,63 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/settings/budget", put(put_spend_cap))
         .route("/decisions/export", get(crate::corrections::export))
         .route("/decisions/replay", post(crate::corrections::replay))
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::ManageRuntimes,
-        ])));
-    let plugins = Router::new()
         .route("/mcp_servers", post(crate::catalog::add_mcp_server))
         .route(
             "/mcp_servers/{name}",
             delete(crate::catalog::remove_mcp_server),
         )
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::ManagePlugins,
-        ])));
-    let secrets = Router::new()
         .route("/secrets", get(crate::secrets::list))
         .route(
             "/secrets/{kind}/{id}/{name}",
             put(crate::secrets::put).delete(crate::secrets::remove),
         )
-        .route_layer(middleware::from_fn(auth::require(&[
-            Permission::ManageSecrets,
-        ])));
+        .route("/mods/{name}/install", post(install_mod))
+        .route("/mods/{name}", put(update_mod).delete(remove_mod))
+        .route("/catalog/{id}/install", post(crate::catalog::install))
+        .route("/catalog/{id}", delete(crate::catalog::uninstall))
+        .route(
+            "/catalog/{id}/dismissed",
+            put(crate::catalog::dismiss).delete(crate::catalog::restore),
+        )
+        .route("/memory", get(crate::memory::list))
+        .route("/memory/metrics", get(crate::memory::metrics))
+        .route("/memory/{id}/review", post(crate::memory::review))
+        .route(
+            "/corrections/{id}/star",
+            post(crate::memory::star_correction),
+        )
+        .route("/notes/{id}/star", post(crate::memory::star_note))
+        .route_layer(middleware::from_fn(auth::require_owner));
+    let approvals = Router::new()
+        .route("/tasks/{id}/approve", post(approve))
+        .route("/tasks/{id}/reject", post(reject))
+        .route_layer(middleware::from_fn(auth::require(&[Permission::Approve])));
     let protected = protected
         .merge(workflow_create)
         .merge(workflow_edit)
-        .merge(workflow_check)
         .merge(workspace_edit)
         .merge(workspace_delete)
         .merge(repo_edit)
         .merge(vcs_manage)
-        .merge(member_read)
-        .merge(member_create)
         .merge(member_edit)
-        .merge(member_deactivate)
-        .merge(settings)
-        .merge(owner)
+        .merge(invite)
+        .merge(knowledge_import)
+        .merge(deployment)
         .merge(approvals)
-        .merge(runtimes)
-        .merge(plugins)
-        .merge(secrets)
         // Any signed-in member creates a workspace (the handler applies
         // `SUN_DISABLE_WORKSPACE_CREATION`).
         .route("/workspaces", post(crate::workspaces::create))
+        // Any member of a workspace sees its members and may leave it (the
+        // guard keeps everyone else out).
+        .route("/workspaces/{id}/members", get(auth::workspace_members))
+        .route("/workspaces/{id}/leave", post(auth::leave_workspace))
+        // The caller's own invitations.
+        .route("/me/invitations", get(auth::my_invitations))
+        .route("/invitations/{id}/accept", post(auth::accept_invitation))
+        .route("/invitations/{id}/decline", post(auth::decline_invitation))
+        // The builder's checks change nothing: any signed-in member.
+        .route("/workflows/validate", post(validate_workflow))
+        .route("/workflows/dry-run", post(dry_run_workflow))
         // Any signed-in member sets their own view.
         .route("/me/view_role", put(auth::set_view_role))
         // Any signed-in member sets their own password, and an email once.
@@ -425,9 +423,6 @@ pub(crate) fn router(api: Api) -> Router {
         )
         .route("/me/two_step/challenge", post(auth::my_two_step_challenge))
         .route("/me/two_step/{id}", delete(auth::remove_my_two_step))
-        // Needs manage_plugins or manage_extensions by the mod's kind.
-        .route("/mods/{name}/install", post(install_mod))
-        .route("/mods/{name}", put(update_mod).delete(remove_mod))
         // Runs after `authenticate`: 404 for anything on a hidden workspace.
         .route_layer(middleware::from_fn_with_state(
             api.clone(),
@@ -441,6 +436,9 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/session", post(auth::sign_in).delete(auth::sign_out))
         .route("/session/two_step", post(auth::sign_in_two_step))
         .route("/session/two_step/email", post(auth::mail_two_step_code))
+        .route("/signup", post(auth::signup))
+        // The invitation link's page: the token is the credential.
+        .route("/invitations/{id}", get(auth::look_up_invitation))
         .route("/auth", get(auth::providers))
         .route("/auth/sso/{id}/login", get(auth::sso_login))
         .route("/auth/sso/{id}/callback", get(auth::sso_callback))
@@ -579,9 +577,9 @@ struct InstallMod {
     permissions: Vec<String>,
 }
 
-/// `POST /api/v1/mods/{name}/install` (admin): installs a mod of the mod
-/// registry from its GitHub Release with the approved permissions and loads
-/// it at once.
+/// `POST /api/v1/mods/{name}/install` (deployment owner): installs a mod of
+/// the mod registry from its GitHub Release with the approved permissions
+/// and loads it at once.
 async fn install_mod(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -592,13 +590,6 @@ async fn install_mod(
     if input.permissions.len() > 256 || input.permissions.iter().any(|p| p.len() > 512) {
         return Err(ApiError::invalid("Too many or too long permissions."));
     }
-    let kind = installer
-        .available()
-        .await?
-        .into_iter()
-        .find(|a| a.name == name)
-        .map(|a| a.kind);
-    caller.need(manage(kind))?;
     let record = installer
         .install(&name, &input.permissions, &caller.actor())
         .await?;
@@ -636,7 +627,7 @@ async fn remove_mod(
     Query(query): Query<RemoveMod>,
 ) -> ApiResult<Json<Value>> {
     let installer = mod_installer(&api, &name)?;
-    caller.need(manage(Some(installed_kind(&api, &name).await?)))?;
+    installed_kind(&api, &name).await?;
     let needed_by = installer
         .remove(&name, query.purge, &caller.actor())
         .await?;
@@ -662,19 +653,12 @@ fn mod_installer<'a>(api: &'a Api, name: &str) -> ApiResult<&'a dyn sun_core::Mo
     })
 }
 
+/// 404 unless mod `name` is installed.
 async fn installed_kind(api: &Api, name: &str) -> ApiResult<ModKind> {
     let installs = api.engine.mod_installs().await?;
     match installs.into_iter().find(|m| m.name == name) {
         Some(m) => Ok(m.kind),
         None => Err(sun_core::Error::NotFound(format!("mod {name} is not installed")).into()),
-    }
-}
-
-/// Changing a mod needs manage_extensions or manage_plugins by its kind.
-fn manage(kind: Option<ModKind>) -> Permission {
-    match kind {
-        Some(ModKind::Extension) => Permission::ManageExtensions,
-        _ => Permission::ManagePlugins,
     }
 }
 
@@ -900,7 +884,7 @@ async fn decide(
         .into_iter()
         .find(|s| s.status == StepStatus::WaitingApproval)
         .ok_or_else(|| ApiError::conflict("This task is not waiting for approval."))?;
-    let by = by.principal;
+    let by = by.principal_in(api.engine.workspace_of_task(task_id).await?);
     match rejected {
         None => api.engine.decide(run.id, step.step_key, true, by).await?,
         Some(reason) if reason.is_empty() => {
@@ -1186,7 +1170,7 @@ async fn get_on_limit(State(api): State<Api>) -> ApiResult<Json<Value>> {
     Ok(Json(json!({ "on_limit": on_limit })))
 }
 
-/// `PUT /settings/on_limit` (`manage_runtimes`): the ecosystem's limit policy, used when
+/// `PUT /settings/on_limit` (deployment owner): the ecosystem's limit policy, used when
 /// neither the task nor its workflow sets one.
 async fn put_on_limit(
     State(api): State<Api>,
@@ -1209,7 +1193,7 @@ async fn get_spend_cap(State(api): State<Api>) -> ApiResult<Json<sun_engine::Spe
     Ok(Json(api.engine.spend().await?))
 }
 
-/// `PUT /settings/budget` (`manage_runtimes`): sets or clears the monthly
+/// `PUT /settings/budget` (deployment owner): sets or clears the monthly
 /// cap. Reaching it holds new agent runs in the queue and ends running agent
 /// steps `budget_exceeded`; raising it lets held runs start.
 async fn put_spend_cap(
