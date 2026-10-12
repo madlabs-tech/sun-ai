@@ -333,3 +333,53 @@ async fn roles_each_write_in_a_workspace_needs_its_role_there() {
         assert_eq!(status, want, "{role}: {value}");
     }
 }
+
+/// `who: [role:admin]` is the role in the task's workspace: an admin of
+/// Main who is a member of Ops can't approve an Ops gate; an Ops admin can.
+#[tokio::test(flavor = "multi_thread")]
+async fn roles_an_approval_role_is_the_role_in_the_tasks_workspace() {
+    let k = kernel().await;
+    let app = &k.app;
+    let ops = ok(
+        "ws",
+        call(
+            app,
+            "POST",
+            "/api/v1/workspaces",
+            Some(json!({ "name": "Ops" })),
+        )
+        .await,
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let ops_id: WorkspaceId = ops.parse().unwrap();
+    let host = format!("/api/v1/workspaces/{ops}/hosts/{}", k.host);
+    ok("host", call(app, "PUT", &host, None).await).await;
+    let flow = json!({ "source_yaml": FLOW, "workspace_id": ops });
+    let workflow = ok(
+        "wf",
+        call(app, "POST", "/api/v1/workflows", Some(flow)).await,
+    )
+    .await;
+    let task = json!({ "title": "gate", "workflow_id": workflow["id"] });
+    let task = ok("task", call(app, "POST", "/api/v1/tasks", Some(task)).await).await;
+    let key = task["key"].as_str().unwrap().to_owned();
+    crate::route_matrix::until(app, &key, "needs_you").await;
+
+    let main_admin = member_token_in(
+        &k.store,
+        "mia",
+        &[(WorkspaceId::MAIN, Role::Admin), (ops_id, Role::Member)],
+    )
+    .await;
+    let approve = format!("/api/v1/tasks/{key}/approve");
+    let (status, value) = call_as(app, &main_admin, "POST", &approve, Some(json!({}))).await;
+    assert!(!status.is_success(), "a member of Ops: {status} {value}");
+    let (_, view) = call(app, "GET", &format!("/api/v1/tasks/{key}"), None).await;
+    assert_eq!(view["status"], "needs_you", "{view}");
+    let ops_admin = member_token_in(&k.store, "oda", &[(ops_id, Role::Admin)]).await;
+    let (status, value) = call_as(app, &ops_admin, "POST", &approve, Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+}
