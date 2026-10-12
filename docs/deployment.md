@@ -21,7 +21,7 @@ Every shape runs the same `sun` binary. Only where the kernel and the hosts live
 ```
 
 - The default, and what the installer sets up. `scripts/install.sh` writes a systemd unit on Linux (`packaging/systemd/sun.service`) or a launchd agent on macOS (`packaging/launchd/dev.sun.kernel.plist`), both running `sun serve --with-host`.
-- The installer's data dir is `/var/lib/sun` on Linux and `~/Library/Application Support/sun` on macOS. The install URL and release signing key are **placeholders**; no public release exists yet, so build from source (see the README "Quick start").
+- The installer's data dir is `/var/lib/sun` on Linux and `~/Library/Application Support/sun` on macOS. No public release exists yet, so build from source (see the README "Quick start"); `get-sun.madlabs.tech` serves the installer once one does.
 - **Development:** `bash scripts/dev.sh` builds the UI and the kernel, runs `sun serve --with-host` on port 7700 with data in `.dev/sun`, plus the vite dev server on port 5173. Ctrl-C stops both.
 
 ## 2. Kernel on a server, hosts on dev machines
