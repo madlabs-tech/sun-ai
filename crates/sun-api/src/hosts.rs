@@ -26,15 +26,16 @@ use sun_core::host_protocol::{
 };
 use sun_core::model::{Runtime, RuntimeSource};
 use sun_core::{
-    BoxStream, ByoKey, Error, HostEvent, HostId, HostLink, Readiness, Result, RunId, RuntimeId,
-    SessionHandle, SessionId, SessionSpec, Steer, StepKey, StopMode, TaskId, Timestamp,
+    BoxStream, ByoKey, Error, HostEvent, HostId, HostLink, MemberId, Readiness, Result, RunId,
+    RuntimeId, SessionHandle, SessionId, SessionSpec, Steer, StepKey, StopMode, TaskId, Timestamp,
     WorkspaceId,
 };
+use sun_engine::OnWorkspace;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::entitlement::within_plan;
 use crate::error::{ApiError, ApiResult};
-use crate::workspace_access::{InWorkspace, listed_workspace, named_workspace};
+use crate::workspace_access::{InWorkspace, listed_workspace, named_workspace, visible};
 use crate::{Api, auth, wire};
 use sun_core::entitlement::Quota;
 
@@ -80,10 +81,18 @@ struct HubState {
     disk: HashMap<HostId, Vec<(TaskId, u64)>>,
     last_seen: HashMap<HostId, Timestamp>,
     subscribers: Vec<mpsc::Sender<HostEvent>>,
-    /// Unused enrolment tokens: when they expire, and the marketplace task
-    /// whose seller host they enrol.
-    tokens: HashMap<String, (Instant, Option<TaskId>)>,
+    /// Unused enrolment tokens: when they expire, and what they enrol.
+    tokens: HashMap<String, (Instant, Enrols)>,
     generation: u64,
+}
+
+/// What an enrolment token enrols.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Enrols {
+    /// A host attached to the workspace, enrolled by who minted the token.
+    Workspace(WorkspaceId, Option<MemberId>),
+    /// A leased seller host serving only this marketplace task.
+    Market(TaskId),
 }
 
 struct Conn {
@@ -101,24 +110,22 @@ impl HostHub {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// A new single-use enrolment token, valid for an hour.
-    pub fn issue_token(&self) -> Result<String> {
-        self.issue_token_for(None)
-    }
-
-    /// A token whose host serves only marketplace `task` (with `Some`).
-    pub(crate) fn issue_token_for(&self, task: Option<TaskId>) -> Result<String> {
+    /// A new single-use enrolment token for what it `enrols`, valid for an
+    /// hour.
+    pub(crate) fn issue_token(&self, enrols: Enrols) -> Result<String> {
         let token = random_hex()?;
         let mut state = self.state();
         let now = Instant::now();
         state.tokens.retain(|_, (expires, _)| *expires > now);
-        state.tokens.insert(token.clone(), (now + TOKEN_TTL, task));
+        state
+            .tokens
+            .insert(token.clone(), (now + TOKEN_TTL, enrols));
         Ok(token)
     }
 
-    /// Consumes `token`: `Some(task binding)` once, if it was issued and
-    /// has not expired.
-    fn take_token(&self, token: &str) -> Option<Option<TaskId>> {
+    /// Consumes `token`: what it enrols, once, if it was issued and has not
+    /// expired.
+    fn take_token(&self, token: &str) -> Option<Enrols> {
         let mut state = self.state();
         let found = state
             .tokens
@@ -128,7 +135,7 @@ impl HostHub {
         found
             .and_then(|t| state.tokens.remove(&t))
             .filter(|(expires, _)| *expires > Instant::now())
-            .map(|(_, task)| task)
+            .map(|(_, enrols)| enrols)
     }
 
     fn attach(&self, host: HostId, out: mpsc::UnboundedSender<KernelFrame>) -> u64 {
@@ -575,26 +582,25 @@ async fn enroll(api: &Api, token: &str, name: &str) -> Option<KernelFrame> {
     if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
         return None;
     }
-    let task = api.hosts.take_token(token)?;
+    let enrols = api.hosts.take_token(token)?;
     // A token minted before the plan filled up still can't pass it. A
     // leased seller host is paid capacity, not one of the plan's own hosts.
-    if task.is_none() {
-        let enrolled = api.engine.hosts().await.ok()?.len();
-        // ponytail: Main's plan and every host until M5 attaches hosts to workspaces.
-        within_plan(
-            api,
-            sun_core::WorkspaceId::MAIN,
-            Quota::Hosts,
-            "hosts",
-            enrolled,
-        )
-        .await
-        .ok()?;
-    }
-    let host = api.engine.add_host(name.to_string()).await.ok()?;
-    if let Some(task) = task {
-        api.engine.bind_market_host(task, host.id).await.ok()?;
-    }
+    let host = match enrols {
+        Enrols::Workspace(workspace, by) => {
+            within_hosts(api, workspace).await.ok()?;
+            let name = name.to_string();
+            api.engine.add_host(name, Some(workspace), by).await.ok()?
+        }
+        Enrols::Market(task) => {
+            let host = api
+                .engine
+                .add_host(name.to_string(), None, None)
+                .await
+                .ok()?;
+            api.engine.bind_market_host(task, host.id).await.ok()?;
+            host
+        }
+    };
     Some(KernelFrame::Enrolled {
         host_id: host.id,
         host_key: host_key_for(&api.config.host_secret, host.id),
@@ -618,19 +624,26 @@ pub(crate) fn random_hex() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// `POST /api/v1/hosts/tokens`: a single-use token for `sun host join`.
-/// Hosts count against the plan (`limits.hosts`).
-pub(crate) async fn create_token(State(api): State<Api>) -> ApiResult<(StatusCode, Json<Value>)> {
-    let enrolled = api.engine.hosts().await.map_err(ApiError::from)?.len();
-    within_plan(
-        &api,
-        sun_core::WorkspaceId::MAIN,
-        Quota::Hosts,
-        "hosts",
-        enrolled,
-    )
-    .await?;
-    let token = api.hosts.issue_token()?;
+/// 403 `plan_limit` when `workspace`'s plan has no room for another host
+/// (`limits.hosts`, counting the hosts attached to it).
+async fn within_hosts(api: &Api, workspace: WorkspaceId) -> ApiResult<()> {
+    let attached = api.engine.hosts(Some(workspace)).await?.len();
+    within_plan(api, workspace, Quota::Hosts, "hosts", attached).await
+}
+
+/// `POST /api/v1/workspaces/{id}/hosts/tokens` (`manage_runtimes` there): a
+/// single-use token for `sun host join`; the host it enrols is attached to
+/// the workspace. Hosts count against its plan (`limits.hosts`).
+pub(crate) async fn create_token(
+    State(api): State<Api>,
+    axum::Extension(caller): axum::Extension<auth::Caller>,
+    axum::extract::Path(workspace): axum::extract::Path<String>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let workspace = crate::routes::id(&workspace, "workspace")?;
+    within_hosts(&api, workspace).await?;
+    let token = api
+        .hosts
+        .issue_token(Enrols::Workspace(workspace, caller.member_id))?;
     let expires_at = chrono::Utc::now() + TOKEN_TTL;
     Ok((
         StatusCode::CREATED,
@@ -638,14 +651,100 @@ pub(crate) async fn create_token(State(api): State<Api>) -> ApiResult<(StatusCod
     ))
 }
 
-/// `GET /api/v1/hosts`.
-pub(crate) async fn list_hosts(State(api): State<Api>) -> ApiResult<Json<Vec<Value>>> {
-    let hosts = api.engine.hosts().await.map_err(ApiError::from)?;
+/// `PUT /api/v1/workspaces/{id}/hosts/{host}` (`manage_runtimes` there):
+/// attaches an enrolled host, so the workspace's runs may go to it. Only a
+/// deployment owner, or the member who enrolled the host, may (anyone else
+/// gets 404, as for a missing host). Counts against the plan; audited.
+pub(crate) async fn attach_host(
+    State(api): State<Api>,
+    axum::Extension(caller): axum::Extension<auth::Caller>,
+    axum::extract::Path((workspace, host)): axum::extract::Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let workspace = crate::routes::id(&workspace, "workspace")?;
+    let host = crate::routes::id::<HostId>(&host, "host")?;
+    let row = api.engine.host(host).await?;
+    let enrolled_it = caller.member_id.is_some() && row.enrolled_by == caller.member_id;
+    if !caller.is_owner && !enrolled_it {
+        return Err(Error::NotFound(format!("host {host}")).into());
+    }
+    let item = sun_engine::WorkspaceItem::Host(host);
+    if !api.engine.workspaces_of(item).await?.contains(&workspace) {
+        within_hosts(&api, workspace).await?;
+        api.engine
+            .import_to_workspace(workspace, item, &caller.actor())
+            .await?;
+    }
+    api.queue.wake();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/v1/workspaces/{id}/hosts/{host}` (`manage_runtimes` there):
+/// the workspace's runs no longer go to the host (the ones on it go on);
+/// 404 when it isn't attached. Audited.
+pub(crate) async fn detach_host(
+    State(api): State<Api>,
+    axum::Extension(caller): axum::Extension<auth::Caller>,
+    axum::extract::Path((workspace, host)): axum::extract::Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let workspace = crate::routes::id(&workspace, "workspace")?;
+    let host = crate::routes::id::<HostId>(&host, "host")?;
+    let item = sun_engine::WorkspaceItem::Host(host);
+    api.engine
+        .detach_from_workspace(workspace, item, &caller.actor())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /api/v1/hosts?workspace=`: the hosts attached to the workspace (any
+/// member there); a deployment owner may leave it out for every host. Each
+/// names the workspaces it is attached to (those the caller sees) and who
+/// enrolled it; sessions and disk use show only the caller's workspaces'.
+pub(crate) async fn list_hosts(
+    State(api): State<Api>,
+    axum::Extension(caller): axum::Extension<auth::Caller>,
+    axum::extract::Query(query): axum::extract::Query<InWorkspace>,
+) -> ApiResult<Json<Vec<Value>>> {
+    let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
+    let hosts = api.engine.hosts(workspace).await.map_err(ApiError::from)?;
+    let mut attached = Vec::with_capacity(hosts.len());
+    for host in &hosts {
+        let item = sun_engine::WorkspaceItem::Host(host.id);
+        let mut workspaces = api.engine.workspaces_of(item).await?;
+        workspaces.retain(|w| caller.sees(*w));
+        attached.push(workspaces);
+    }
+    // A shared host runs other workspaces' sessions too: their run and task
+    // ids are not this caller's to see.
+    let (runs, tasks): (Vec<RunId>, Vec<TaskId>) = {
+        let state = api.hosts.state();
+        (
+            state.steps.values().map(|(run, _)| *run).collect(),
+            state
+                .disk
+                .values()
+                .flatten()
+                .map(|(task, _)| *task)
+                .collect(),
+        )
+    };
+    let mut hidden_runs = std::collections::HashSet::new();
+    for run in runs {
+        if !visible(&api, &caller, OnWorkspace::Run(run)).await? {
+            hidden_runs.insert(run);
+        }
+    }
+    let mut hidden_tasks = std::collections::HashSet::new();
+    for task in tasks {
+        if !visible(&api, &caller, OnWorkspace::Task(task)).await? {
+            hidden_tasks.insert(task);
+        }
+    }
     let state = api.hosts.state();
     let now = Instant::now();
     let views = hosts
         .into_iter()
-        .map(|host| {
+        .zip(attached)
+        .map(|(host, workspace_ids)| {
             let caps = &host.capabilities;
             let mut sessions: Vec<Value> = state
                 .stats
@@ -653,6 +752,10 @@ pub(crate) async fn list_hosts(State(api): State<Api>) -> ApiResult<Json<Vec<Val
                 .filter(|(session, (_, at))| {
                     now.duration_since(*at) < STATS_FRESH
                         && state.sessions.get(session) == Some(&host.id)
+                        && state
+                            .steps
+                            .get(session)
+                            .is_none_or(|(run, _)| !hidden_runs.contains(run))
                 })
                 .map(|(session, (stats, _))| {
                     let step = state.steps.get(session);
@@ -676,10 +779,17 @@ pub(crate) async fn list_hosts(State(api): State<Api>) -> ApiResult<Json<Vec<Val
                 .filter(|tool| tool.ready)
                 .flat_map(|tool| tool.devices.clone())
                 .collect();
-            let disk = state.disk.get(&host.id).into_iter().flatten();
+            let disk = state
+                .disk
+                .get(&host.id)
+                .into_iter()
+                .flatten()
+                .filter(|(task, _)| !hidden_tasks.contains(task));
             json!({
                 "id": host.id,
                 "name": host.name,
+                "workspace_ids": workspace_ids,
+                "enrolled_by": host.enrolled_by,
                 "status": if state.conns.contains_key(&host.id) { "online" } else { "offline" },
                 "capabilities": {
                     "os": caps.get("os").cloned().unwrap_or(Value::from("")),
@@ -789,11 +899,14 @@ fn adapters(capabilities: &Value) -> Vec<(String, bool, bool)> {
         .collect()
 }
 
-/// `adapter -> (installed, installed and logged in)` on any online host.
-/// Every adapter a host reported: `(installed, logged in)` on an online host.
-pub(crate) async fn online_adapters(api: &Api) -> ApiResult<BTreeMap<String, (bool, bool)>> {
+/// `adapter -> (installed, installed and logged in)` on any online host
+/// attached to `workspace` (`None`: any host), the ones its runs may use.
+pub(crate) async fn online_adapters(
+    api: &Api,
+    workspace: Option<WorkspaceId>,
+) -> ApiResult<BTreeMap<String, (bool, bool)>> {
     let mut seen: BTreeMap<String, (bool, bool)> = BTreeMap::new();
-    for host in api.engine.hosts().await? {
+    for host in api.engine.hosts(workspace).await? {
         let online = api.hosts.is_online(host.id);
         for (adapter, installed, logged_in) in adapters(&host.capabilities) {
             let entry = seen.entry(adapter).or_default();
@@ -818,7 +931,7 @@ pub(crate) async fn list_runtimes(
     axum::extract::Query(query): axum::extract::Query<InWorkspace>,
 ) -> ApiResult<Json<Vec<Value>>> {
     let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
-    let online = online_adapters(&api).await?;
+    let online = online_adapters(&api, workspace).await?;
     let modes: BTreeMap<String, String> =
         api.engine.permission_modes().await?.into_iter().collect();
     let view = |name: &str, adapter: &str, source: &str, ready: bool, config: Option<&ByoKey>| {
@@ -993,7 +1106,7 @@ pub(crate) async fn readiness(
     axum::extract::Query(query): axum::extract::Query<InWorkspace>,
 ) -> ApiResult<Json<Readiness>> {
     let workspace = named_workspace(&caller, query.workspace.as_deref())?;
-    let online = online_adapters(&api).await?;
+    let online = online_adapters(&api, Some(workspace)).await?;
     Ok(Json(readiness_of(&api, workspace, name, &online).await?))
 }
 
@@ -1098,14 +1211,15 @@ mod tests {
     #[test]
     fn tokens_are_single_use_and_keys_depend_on_secret_and_host() {
         let hub = HostHub::default();
-        let token = hub.issue_token().unwrap();
+        let ops = Enrols::Workspace(WorkspaceId::generate(), None);
+        let token = hub.issue_token(ops).unwrap();
         assert_eq!(token.len(), 64);
         assert_eq!(hub.take_token("nope"), None);
-        assert_eq!(hub.take_token(&token), Some(None));
+        assert_eq!(hub.take_token(&token), Some(ops));
         assert_eq!(hub.take_token(&token), None);
         let task = TaskId::generate();
-        let leased = hub.issue_token_for(Some(task)).unwrap();
-        assert_eq!(hub.take_token(&leased), Some(Some(task)));
+        let leased = hub.issue_token(Enrols::Market(task)).unwrap();
+        assert_eq!(hub.take_token(&leased), Some(Enrols::Market(task)));
         let host = HostId::generate();
         assert_eq!(host_key_for("s", host), host_key_for("s", host));
         assert_ne!(host_key_for("s", host), host_key_for("t", host));

@@ -43,7 +43,8 @@ async fn until(app: &Router, task: &str, status: &str) -> Value {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("task {task} never reached {status}");
+    let (_, view) = call(app, "GET", &format!("/api/v1/tasks/{task}"), None).await;
+    panic!("task {task} never reached {status}: {view}");
 }
 
 async fn activity(app: &Router, task: &str) -> Vec<Value> {
@@ -363,6 +364,15 @@ async fn any_run_of_a_task_shows_its_steps_and_gates() {
         Some(json!({ "name": "Ops" })),
     )
     .await;
+    let host = format!(
+        "/api/v1/workspaces/{}/hosts/{}",
+        ops["id"].as_str().unwrap(),
+        k.host
+    );
+    assert_eq!(
+        call(app, "PUT", &host, None).await.0,
+        StatusCode::NO_CONTENT
+    );
     let body = json!({ "source_yaml": FLOW, "workspace_id": ops["id"] });
     let (_, on_ops) = call(app, "POST", "/api/v1/workflows", Some(body)).await;
     let hidden = create(

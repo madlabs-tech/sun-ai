@@ -6,8 +6,9 @@
 //!
 //! `GET /mcp/{server}` is the **relay** for a session's granted MCP servers,
 //! dialed by `sun mcp relay` on any host with the same token: the
-//! kernel resolves the session's grant for `server`, connects with the
-//! ecosystem secrets and serves the filtering proxy over the socket. Hosts
+//! kernel resolves the session's grant for `server` among its workspace's
+//! MCP servers, connects with that workspace's secrets and serves the
+//! filtering proxy over the socket. Hosts
 //! never see the server's secrets or the kernel's store.
 
 use std::sync::Arc;
@@ -73,16 +74,31 @@ async fn relay(
             .engine
             .session_mcp_grant(run_id, &step_key, &server)
             .await?;
-        // A registered MCP server, else an installed plugin serving
-        // `mcp_tools`: it runs in its own sandbox with its own
-        // secrets, so the kernel only relays.
-        let registered = match (catalog.mcp_server(&server), api.mods.clone()) {
-            (Err(Error::NotFound(_)), Some(mods)) => {
+        // One of the run's workspace's MCP servers (with its secrets), else
+        // an installed plugin serving `mcp_tools`: it runs in its own sandbox
+        // with its own secrets, so the kernel only relays.
+        let task = api.engine.run(run_id).await?.task_id;
+        let workspace = api.engine.workspace_of_task(task).await?;
+        let installs = api.engine.catalog_installs(workspace).await?;
+        let registered = catalog
+            .mcp_servers_in(workspace, &installs)?
+            .into_iter()
+            .find(|s| s.name == server);
+        let registered = match (registered, api.mods.clone()) {
+            (None, Some(mods)) if catalog.mcp_server(&server).is_err() => {
                 return Ok((sun_catalog::McpClient::for_mod(mods, &server), grant));
             }
-            (registered, _) => registered?,
+            (Some(registered), _) => registered,
+            (None, _) => {
+                return Err(Error::NotFound(format!(
+                    "mcp server `{server}` is not registered in this workspace"
+                )));
+            }
         };
-        let secrets = api.engine.mcp_secrets(&registered.secret_names()).await?;
+        let secrets = api
+            .engine
+            .mcp_secrets(workspace, &registered.secret_names())
+            .await?;
         let client = catalog.mcp_connect(&registered, secrets).await?;
         Ok::<_, Error>((client, grant))
     };

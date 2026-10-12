@@ -643,7 +643,13 @@ async fn host_socket_enrolment_session_sse_and_steer() {
     tokio::spawn(axum::serve(listener, app.clone()).into_future());
 
     // Enrolment: a token works once.
-    let (_, issued) = call(app, "POST", "/api/v1/hosts/tokens", None).await;
+    let (_, issued) = call(
+        app,
+        "POST",
+        "/api/v1/workspaces/00000000000000000000000001/hosts/tokens",
+        None,
+    )
+    .await;
     let token = issued["token"].as_str().unwrap();
     let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
     send(

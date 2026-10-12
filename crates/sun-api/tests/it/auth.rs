@@ -764,7 +764,14 @@ async fn auth_oidc_keeps_the_deep_link_and_plan_seats() {
     assert!(session.is_some());
 
     // One host (the test kernel's) fills `hosts: 1`: no new enrolment token.
-    let (status, _, body) = send(&k.app, "POST", "/api/v1/hosts/tokens", None, None).await;
+    let (status, _, body) = send(
+        &k.app,
+        "POST",
+        "/api/v1/workspaces/00000000000000000000000001/hosts/tokens",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["code"], "plan_limit");
     assert_eq!(
