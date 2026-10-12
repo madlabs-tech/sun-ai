@@ -5,6 +5,7 @@ mod acl;
 mod agents;
 mod api;
 mod auth;
+mod billing;
 mod common;
 mod device;
 mod entitlement;

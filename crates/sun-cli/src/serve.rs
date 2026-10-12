@@ -376,9 +376,9 @@ pub async fn start(
     if config.registry_url.is_some() {
         tracing::warn!("sun.yaml `registry_url` is ignored: plans come from Sun Cloud only");
     }
-    let api = match crate::cloud::Account::connect(|name| std::env::var(name).ok()) {
-        Some(account) => api.with_account(Arc::new(account)),
-        None => api,
+    let api = match (std::env::var(CLOUD_URL_ENV), std::env::var(CLOUD_TOKEN_ENV)) {
+        (Ok(url), Ok(token)) => api.with_cloud(sun_api::CloudBilling::new(&url, &token)?),
+        _ => api,
     };
     let entitlements = entitlements(|name| std::env::var(name).ok())?;
     let api = api

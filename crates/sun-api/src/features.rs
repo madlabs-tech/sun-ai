@@ -1,7 +1,9 @@
 //! Built-in features an operator can turn off (sun.yaml `features:`).
 //! A feature that is off answers 404 on all of its routes; `sun-cli` also
 //! skips its background workers, and the UI drops its entries
-//! (`GET /features`).
+//! (`GET /features`). `billing` also needs Sun Cloud (`SUN_CLOUD_URL` +
+//! `SUN_CLOUD_TOKEN`): `GET /features` says `false` without it, whatever
+//! `sun.yaml` says.
 
 use axum::Json;
 use axum::extract::{Request, State};
@@ -27,6 +29,8 @@ pub struct Features {
     pub market: bool,
     /// The skills and MCP catalog.
     pub catalog: bool,
+    /// Plans per workspace, through Sun Cloud.
+    pub billing: bool,
 }
 
 impl Default for Features {
@@ -37,6 +41,7 @@ impl Default for Features {
             evals: true,
             market: true,
             catalog: true,
+            billing: true,
         }
     }
 }
@@ -53,6 +58,7 @@ impl Features {
             (true, ["evals" | "eval_sets", ..]) => "evals",
             (true, ["marketplace", ..]) => "market",
             (true, ["catalog", ..]) => "catalog",
+            (true, ["subscriptions", ..]) => "billing",
             _ => return None,
         };
         let on = match owner {
@@ -60,6 +66,7 @@ impl Features {
             "canvas" => self.canvas,
             "evals" => self.evals,
             "market" => self.market,
+            "billing" => self.billing,
             _ => self.catalog,
         };
         (!on).then_some(owner)
@@ -81,7 +88,10 @@ pub(crate) async fn guard(State(api): State<Api>, request: Request, next: Next) 
 
 /// `GET /api/v1/features`: which features run, for the UI's navigation.
 pub(crate) async fn get(State(api): State<Api>) -> Json<Features> {
-    Json(api.features)
+    Json(Features {
+        billing: api.features.billing && api.cloud.is_some(),
+        ..api.features
+    })
 }
 
 #[cfg(test)]
@@ -96,6 +106,7 @@ mod tests {
             evals: false,
             market: false,
             catalog: false,
+            billing: false,
         };
         for (path, owner) in [
             ("/api/v1/knowledge/sources", Some("knowledge")),
@@ -106,6 +117,8 @@ mod tests {
             ("/api/v1/eval_sets", Some("evals")),
             ("/api/v1/marketplace/leases", Some("market")),
             ("/api/v1/catalog/x/install", Some("catalog")),
+            ("/api/v1/subscriptions/W1/summary", Some("billing")),
+            ("/api/v1/internal/workspaces/W1/seat_count", None),
             ("/api/v1/tasks/T1/context", None),
             ("/api/v1/tasks", None),
             ("/knowledge", None),

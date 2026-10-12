@@ -36,9 +36,9 @@
 //! axum::serve(listener, app).await?;
 //! ```
 
-mod account;
 mod agents;
 mod auth;
+mod billing;
 mod catalog;
 mod corrections;
 mod device;
@@ -74,6 +74,7 @@ use sun_core::{HostId, Mailer, Marketplace, ModInstaller, ModLink};
 use sun_engine::{Engine, Principal, Queue};
 
 pub use auth::PresetUrls;
+pub use billing::CloudBilling;
 pub use entitlement::CloudPolicy;
 pub use features::Features;
 pub use hosts::{HostHub, host_key_for};
@@ -130,8 +131,8 @@ pub struct Api {
     entitlements: Arc<dyn sun_core::entitlement::EntitlementProvider>,
     /// Sun Cloud's marketplace (`with_marketplace`).
     market: Option<Arc<dyn Marketplace>>,
-    /// The ecosystem's account at Sun (`with_account`).
-    account: Option<Arc<dyn sun_core::CloudAccount>>,
+    /// Sun Cloud's billing, proxied (`with_cloud`).
+    cloud: Option<Arc<billing::CloudBilling>>,
     /// This kernel's public URL, which leased seller hosts join.
     public_url: Option<String>,
     /// Built-in features that run (`with_features`); all by default.
@@ -166,7 +167,7 @@ impl Api {
             mod_installer: None,
             entitlements: Arc::new(sun_core::entitlement::Community),
             market: None,
-            account: None,
+            cloud: None,
             public_url: None,
             features: Features::default(),
             mailer: None,
@@ -230,10 +231,12 @@ impl Api {
         self
     }
 
-    /// Serves `/account/...` (plan checkout, top-ups, support) through
-    /// `account`; without it those routes answer 503.
-    pub fn with_account(mut self, account: Arc<dyn sun_core::CloudAccount>) -> Self {
-        self.account = Some(account);
+    /// Proxies `/subscriptions/...`, `/billing/...` and `/support` to Sun
+    /// Cloud through `cloud`, which also may ask `/internal/...`; turns on
+    /// the `billing` and `cloud_hosts` features. Without it those routes
+    /// answer 503 `billing_unavailable`.
+    pub fn with_cloud(mut self, cloud: billing::CloudBilling) -> Self {
+        self.cloud = Some(Arc::new(cloud));
         self
     }
 

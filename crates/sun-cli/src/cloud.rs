@@ -176,53 +176,6 @@ impl SessionKeys {
     }
 }
 
-/// The ecosystem's account at Sun (**Adapter** over Sun Cloud's `/account`
-/// API), with the kernel token under Sun Cloud.
-pub struct Account(Arc<CloudClient>);
-
-impl Account {
-    /// The account `client` authenticates.
-    pub fn new(client: CloudClient) -> Self {
-        Self(Arc::new(client))
-    }
-
-    /// Under Sun Cloud ([`CLOUD_URL_ENV`] + [`CLOUD_TOKEN_ENV`]) the kernel's
-    /// account; `None` otherwise.
-    pub fn connect(get: impl Fn(&str) -> Option<String>) -> Option<Self> {
-        CloudClient::from_env(get).map(Self::new)
-    }
-}
-
-#[async_trait]
-impl sun_core::CloudAccount for Account {
-    async fn account(&self) -> Result<Value> {
-        self.0.get("/account".into()).await
-    }
-
-    async fn subscribe(&self, request: Value) -> Result<Value> {
-        self.0
-            .post("/account/subscription".into(), Some(request))
-            .await
-    }
-
-    async fn top_up(&self, request: Value) -> Result<Value> {
-        self.0.post("/account/top-ups".into(), Some(request)).await
-    }
-
-    async fn invoices(&self) -> Result<Value> {
-        self.0.get("/account/invoices".into()).await
-    }
-
-    async fn tickets(&self) -> Result<Value> {
-        self.0.get("/account/support".into()).await
-    }
-
-    async fn open_ticket(&self, subject: &str, body: &str) -> Result<Value> {
-        let ticket = json!({ "subject": subject, "body": body });
-        self.0.post("/account/support".into(), Some(ticket)).await
-    }
-}
-
 /// **Decorator** over the engine's [`HostLink`]: sessions of a runtime whose
 /// source is `credits` start with a fresh gateway key in their env (and on
 /// the runtime's adapter); the key is revoked when the session exits or fails
