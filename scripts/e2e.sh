@@ -45,7 +45,7 @@ printf '//! E2E.\n' >"$work/seed/src/lib.rs"
 printf 'target/\nCargo.lock\n' >"$work/seed/.gitignore"
 git -C "$work/seed" init -q -b main
 git -C "$work/seed" add .
-git -C "$work/seed" -c user.name=e2e -c user.email=e2e@sun.dev commit -q -m base
+git -C "$work/seed" -c user.name=e2e -c user.email=e2e@example.com commit -q -m base
 git clone -q --bare "$work/seed" "$work/origin.git"
 origin="$work/origin.git"
 # Repos are added by URL (https, ssh or git): git on the host maps this one
@@ -54,7 +54,7 @@ origin_url="https://git.e2e.invalid/sun/e2e.git"
 cat >"$work/gitconfig" <<EOF
 [user]
   name = e2e
-  email = e2e@sun.dev
+  email = e2e@example.com
 [url "$origin"]
   insteadOf = $origin_url
 EOF

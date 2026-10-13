@@ -401,19 +401,19 @@ async fn a_pre_rename_data_dir_upgrades_through_every_migration_in_one_open() {
     );
 }
 
-/// The git_multica migration (T1 of the multica port).
-const GIT_MULTICA: i64 = 20261025090000;
+/// The git-hosting rework migration of 2026-10-11.
+const GIT_HOSTING_REWORK: i64 = 20261025090000;
 const CONNECTION: &str = "01K000000000000000000000V1";
 
-/// A data dir from just before the multica port: a repo added through a
+/// A data dir from just before the git-hosting rework: a repo added through a
 /// GitHub connection and linked to Main with a GitLab-style hook id.
-async fn seed_pre_multica(data: &Path) {
+async fn seed_pre_git_hosting_rework(data: &Path) {
     let url = format!("sqlite://{}?mode=rwc", data.join("sun.db").display());
     let mut conn = SqliteConnection::connect(&url).await.unwrap();
     conn.ensure_migrations_table().await.unwrap();
     for migration in sqlx::migrate!("./migrations")
         .iter()
-        .filter(|m| m.version < GIT_MULTICA)
+        .filter(|m| m.version < GIT_HOSTING_REWORK)
     {
         conn.apply(migration).await.unwrap();
     }
@@ -444,13 +444,13 @@ async fn seed_pre_multica(data: &Path) {
 }
 
 #[tokio::test]
-async fn the_multica_migration_drops_old_repo_rows_and_keeps_the_connections() {
+async fn the_git_hosting_rework_drops_old_repo_rows_and_keeps_the_connections() {
     use sun_core::model::VcsProvider;
     use sun_store::VcsRepo;
 
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path();
-    seed_pre_multica(data).await;
+    seed_pre_git_hosting_rework(data).await;
 
     let store = Store::open(data).await.unwrap();
     assert!(data.join("backups").exists(), "backed up before migrating");
