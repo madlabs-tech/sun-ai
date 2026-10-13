@@ -474,6 +474,13 @@ pub(crate) fn router(api: Api) -> Router {
             "/internal/workspaces/{id}/seat_count",
             get(crate::billing::seat_count),
         )
+        // Payment providers post here; the cloud verifies the signature.
+        .route(
+            "/payments/webhooks/{provider}",
+            post(crate::billing::payment_webhook).layer(axum::extract::DefaultBodyLimit::max(
+                crate::billing::MAX_WEBHOOK,
+            )),
+        )
         .route("/session", post(auth::sign_in).delete(auth::sign_out))
         .route("/session/two_step", post(auth::sign_in_two_step))
         .route("/session/two_step/email", post(auth::mail_two_step_code))

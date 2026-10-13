@@ -58,7 +58,7 @@ impl Features {
             (true, ["evals" | "eval_sets", ..]) => "evals",
             (true, ["marketplace", ..]) => "market",
             (true, ["catalog", ..]) => "catalog",
-            (true, ["subscriptions", ..]) => "billing",
+            (true, ["subscriptions", ..] | ["payments", ..]) => "billing",
             _ => return None,
         };
         let on = match owner {
@@ -118,6 +118,7 @@ mod tests {
             ("/api/v1/marketplace/leases", Some("market")),
             ("/api/v1/catalog/x/install", Some("catalog")),
             ("/api/v1/subscriptions/W1/summary", Some("billing")),
+            ("/api/v1/payments/webhooks/stripe", Some("billing")),
             ("/api/v1/internal/workspaces/W1/seat_count", None),
             ("/api/v1/tasks/T1/context", None),
             ("/api/v1/tasks", None),

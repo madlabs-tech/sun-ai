@@ -13,6 +13,9 @@
 //!   portal, seats): its owners and admins. Support: any signed-in person
 //!   (the cloud answers 403, with why, to one who pays for no plan). The
 //!   kernel token (a machine) gets 403 on all of it.
+//! - Payment webhooks ([`payment_webhook`]): providers post to
+//!   `https://<public_url>/api/v1/payments/webhooks/{stripe|xendit}`, and
+//!   the raw delivery goes on to the cloud, which verifies it.
 //! - The cloud's 404 (or any failure to answer) is `503 billing_unavailable`,
 //!   never the Free plan, except on cancel and portal, where it is `404
 //!   no_subscription`; 402, 409 and 429 pass through with their code.
@@ -21,6 +24,7 @@
 
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -43,6 +47,8 @@ const MAX_KEY: usize = 200;
 const MAX_SEATS: u32 = 10_000;
 const MAX_SUBJECT: usize = 200;
 const MAX_MESSAGE: usize = 5000;
+/// The largest payment webhook body taken (1 MiB); above it, 413.
+pub(crate) const MAX_WEBHOOK: usize = 1024 * 1024;
 
 /// The client of Sun Cloud's billing API, with this kernel's cloud token.
 /// Never logs the token.
@@ -660,6 +666,66 @@ pub(crate) async fn seat_count(
     let workspace = workspace(&api, &text).await?;
     let count = api.engine.workspace_members(workspace).await?.len();
     Ok(Json(json!({ "seat_count": count })))
+}
+
+/// `POST /payments/webhooks/{provider}` (no session; `stripe` or `xendit`):
+/// providers post to `https://<public_url>/api/v1/payments/webhooks/{provider}`.
+/// The body goes byte for byte to the cloud's `/webhooks/{provider}` with
+/// the signature header, which must be there (401) but which only the
+/// cloud verifies; the kernel never parses the body. The cloud's status
+/// and body come back as they are; a cloud that can't be reached is 502.
+// ponytail: no per-IP limit, the API has none for open routes (the sign-in
+// `Limiter` counts failures); add one if deliveries are ever abused.
+pub(crate) async fn payment_webhook(
+    State(api): State<Api>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> ApiResult<Response> {
+    let signature = match provider.as_str() {
+        "stripe" => "stripe-signature",
+        "xendit" => "x-callback-token",
+        _ => {
+            return Err(ApiError::invalid(
+                "The provider must be `stripe` or `xendit`.",
+            ));
+        }
+    };
+    let Some(signed) = headers.get(signature).filter(|v| !v.is_empty()) else {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            format!("A {provider} webhook needs its `{signature}` header."),
+        ));
+    };
+    let cloud = cloud(&api)?;
+    let mut request = cloud
+        .http
+        .post(format!("{}/webhooks/{provider}", cloud.url))
+        .bearer_auth(&cloud.token)
+        .header(signature, signed.clone())
+        .body(body);
+    if let Some(kind) = headers.get(header::CONTENT_TYPE) {
+        request = request.header(header::CONTENT_TYPE, kind.clone());
+    }
+    let unreachable = |e: reqwest::Error| {
+        tracing::warn!("Sun Cloud webhook {provider}: {}", e.without_url());
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "billing_unavailable",
+            "Sun Cloud didn't answer. The provider will retry.",
+        )
+    };
+    let answer = request.send().await.map_err(unreachable)?;
+    let status = StatusCode::from_u16(answer.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let kind = answer.headers().get(header::CONTENT_TYPE).cloned();
+    let bytes = answer.bytes().await.map_err(unreachable)?;
+    let mut response = (status, bytes).into_response();
+    match kind {
+        Some(kind) => response.headers_mut().insert(header::CONTENT_TYPE, kind),
+        None => response.headers_mut().remove(header::CONTENT_TYPE),
+    };
+    Ok(response)
 }
 
 #[cfg(test)]
