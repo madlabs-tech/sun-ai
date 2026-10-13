@@ -231,7 +231,7 @@ pub(crate) async fn repo(api: &str, token: &str, slug: &str) -> Result<RemoteRep
 }
 
 /// The GraphQL query behind [`pr_snapshot`]: mergeability and the head's
-/// check rollup, as multica's PR card reads it.
+/// check rollup, as the task page's PR row reads it.
 // ponytail: the first 100 contexts only; page `contexts` with `after:`
 // when a repo runs more checks than that.
 const SNAPSHOT_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){\

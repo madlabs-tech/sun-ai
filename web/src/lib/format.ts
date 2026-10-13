@@ -165,8 +165,8 @@ export const day = (at: string) => at.slice(0, 10);
 /** `owner/name` of a clone URL (`https://host/owner/name.git`, `git@host:owner/name.git`). */
 export const repo_name = (url: string) => url.replace(/^[a-z]+:\/\/[^/]+\/|^[^@]+@[^:]+:/, '').replace(/\.git$/, '');
 
-/** Host and path of a clone URL, so the HTTPS and SSH forms of one repository compare equal (multica's
- *  `repositoryIdentity`); null for anything that isn't a git URL (http(s), ssh, git, or `user@host:path`). */
+/** Host and path of a clone URL, so the HTTPS and SSH forms of one repository compare equal;
+ *  null for anything that isn't a git URL (http(s), ssh, git, or `user@host:path`). */
 export function repo_identity(raw: string): string | null {
   const value = raw.trim();
   let host = '';

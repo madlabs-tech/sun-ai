@@ -477,7 +477,7 @@ export interface PullRequest {
   link_source: LinkSource;
 }
 
-/** What merging the linked PRs does to this task, decided by the kernel (multica's `decidePRAutoComplete`):
+/** What merging the linked PRs does to this task, decided by the kernel:
  *  `none` (no PR), `terminal` (done or cancelled), `workspace_disabled`, `task_disabled`, `at_target`,
  *  `waiting` (some open or draft), `not_merged` (some closed without merging), `all_merged`. */
 export interface PrAutoComplete {

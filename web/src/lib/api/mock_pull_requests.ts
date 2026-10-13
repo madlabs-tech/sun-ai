@@ -1,7 +1,7 @@
 // Mirrored pull requests for the mock: Main's PRs (open with checks, draft, merged, closed, failing,
 // and one nobody linked yet), their links to tasks, and the kernel's rules: link by URL (404 for a PR
 // Sun never received), remove (remembered, so a webhook wouldn't link it again), the per-task
-// auto-complete switch, and the decision (multica's `decidePRAutoComplete`) that moves a task once every
+// auto-complete switch, and the auto-complete decision that moves a task once every
 // linked PR is merged: a workflow task to Done, an agent's to Needs you.
 import type { LinkSource, PrAutoComplete, PullRequest, TaskDetail, TaskPullRequests, TaskStatus } from './types';
 import { MockError, clone, find_task, find_workspace, log, not_found } from './mock';
@@ -125,7 +125,7 @@ function view(t: TaskDetail): TaskPullRequests {
   return clone({ pull_requests: prs, auto_complete: auto });
 }
 
-/** multica's manual link URL rule: the PR page, with any query or fragment dropped. */
+/** The manual link URL rule: the PR page, with any query or fragment dropped. */
 const normalize = (raw: string) => raw.trim().match(/^(https?:\/\/[^/?#]+\/.+?\/(?:pull|pulls|merge_requests)\/\d+)(?:[/?#].*)?$/)?.[1];
 
 /** `GET|POST /tasks/:id/pull_requests`, `DELETE …/:pr`, `PUT /tasks/:id/pr_auto_complete`. */

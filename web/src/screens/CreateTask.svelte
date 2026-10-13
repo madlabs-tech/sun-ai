@@ -1,4 +1,4 @@
-<!-- New task (multica's create dialog): title and description, then pills for Status (Backlog or Todo),
+<!-- New task (the create dialog): title and description, then pills for Status (Backlog or Todo),
      Priority, Assignee (workflows, the default first; agents with their readiness; None) and Project. The
      exec env sits under More once the assignee runs something. A line says what happens on create. "Create
      another" keeps the dialog open; ⌘↵ / Ctrl+↵ creates. From a project's page the task goes into that

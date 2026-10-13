@@ -1,4 +1,4 @@
-// Settings → <workspace> → Code against the in-memory API, multica-style: the git host rows (GitHub App
+// Settings → <workspace> → Code against the in-memory API: the git host rows (GitHub App
 // install and GitLab OAuth in a new tab, disabled with the operator copy until the apps are configured),
 // the connect landing, repositories added by URL or picked from a connection, and the PR rules.
 import { expect, test, type Page } from '@playwright/test';
