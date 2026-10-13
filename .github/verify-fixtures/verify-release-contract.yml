@@ -1,0 +1,102 @@
+# THROWAWAY — delete this file once BLO-103 is answered.
+# Proves, without ever revealing the private key, that:
+#   1. the public half of secret SUN_RELEASE_SIGNING_KEY equals SUN_RELEASE_KEY in scripts/install.sh
+#   2. sign-release.yml's `ssh-keygen -Y sign` output verifies under install.sh's exact
+#      `ssh-keygen -Y verify` invocation (same namespace, same allowed_signers construction)
+#   3. install.sh's awk parse finds every archive it expects in the real sha256.sum
+# The fixture is the byte-identical sha256.sum from run 38265664882.
+name: Verify release contract
+
+on:
+  push:
+    branches: ['agent/diablo-tech-lead/cf9c5c0d056f']
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Verify signing key and sign/verify round trip
+        env:
+          SIGNING_KEY: ${{ secrets.SUN_RELEASE_SIGNING_KEY }}
+        run: |
+          set -eu
+          # Exactly the literals scripts/install.sh uses.
+          EXPECTED="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEdlEdtxTJKj2DtLkku1zHt97rNmTD8gT9YNS83uw2Mb"
+          SIGNER=release@madlabs.tech
+          NAMESPACE=sun-release
+
+          [ -n "$SIGNING_KEY" ] || { echo "RESULT: secret SUN_RELEASE_SIGNING_KEY is empty"; exit 1; }
+
+          work=$(mktemp -d); cd "$work"
+          umask 077
+          # Same write as sign-release.yml.
+          printf '%s\n' "$SIGNING_KEY" > key
+          chmod 600 key
+
+          # ---- 1. derive the public half. stderr is quarantined, never dumped.
+          if ! ssh-keygen -y -P '' -f key > derived.pub 2> err.txt; then
+            echo "RESULT: ssh-keygen -y could not read the secret as an unencrypted private key"
+            echo "        (error text withheld; it may quote key bytes)"
+            grep -qi "passphrase\|incorrect" err.txt && echo "        hint: the key appears to be passphrase-protected"
+            grep -qi "invalid format" err.txt && echo "        hint: invalid format - check for lost newlines or a missing trailing newline"
+            rm -f key; exit 1
+          fi
+
+          # Compare type+base64 only; a trailing comment field is cosmetic.
+          d_type=$(awk '{print $1}' derived.pub); d_b64=$(awk '{print $2}' derived.pub)
+          e_type=$(printf '%s' "$EXPECTED" | awk '{print $1}')
+          e_b64=$(printf '%s' "$EXPECTED" | awk '{print $2}')
+          echo "derived public key fingerprint: $(ssh-keygen -lf derived.pub | awk '{print $2, $4}')"
+          if [ "$d_type" = "$e_type" ] && [ "$d_b64" = "$e_b64" ]; then
+            echo "RESULT key-match: MATCH - secret's public half == SUN_RELEASE_KEY in install.sh"
+          else
+            echo "RESULT key-match: MISMATCH"
+            echo "  install.sh expects: $e_type $e_b64"
+            echo "  secret derives to : $d_type $d_b64"
+            echo "  (both halves are public key material - safe to copy into install.sh)"
+          fi
+
+          # ---- 2. round trip: sign like sign-release.yml, verify like install.sh.
+          cp "$GITHUB_WORKSPACE/.github/verify-fixtures/sha256.sum" sha256.sum
+          ssh-keygen -Y sign -f key -n "$NAMESPACE" sha256.sum
+          rm -f key
+          [ -f sha256.sum.sig ] || { echo "RESULT round-trip: FAIL - no sha256.sum.sig produced"; exit 1; }
+
+          # install.sh lines 117-119, verbatim behaviour.
+          printf '%s %s\n' "$SIGNER" "$EXPECTED" > allowed_signers
+          if ssh-keygen -Y verify -f allowed_signers -I "$SIGNER" -n "$NAMESPACE" \
+               -s sha256.sum.sig < sha256.sum > /dev/null 2>&1; then
+            echo "RESULT round-trip: PASS - install.sh's verify accepts sign-release.yml's signature"
+          else
+            echo "RESULT round-trip: FAIL - install.sh's verify REJECTS sign-release.yml's signature"
+            ssh-keygen -Y verify -f allowed_signers -I "$SIGNER" -n "$NAMESPACE" \
+              -s sha256.sum.sig < sha256.sum || true
+          fi
+
+          # Negative control: wrong namespace must be rejected, or the check is vacuous.
+          if ssh-keygen -Y verify -f allowed_signers -I "$SIGNER" -n wrong-namespace \
+               -s sha256.sum.sig < sha256.sum > /dev/null 2>&1; then
+            echo "RESULT negative-control: FAIL - verify accepted a wrong namespace (check is vacuous)"
+          else
+            echo "RESULT negative-control: PASS - wrong namespace rejected"
+          fi
+
+          # ---- 3. install.sh's awk parse over the real sha256.sum.
+          ok=1
+          for target in aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            for p in sun-cli sun-mod; do
+              f="$p-$target.tar.xz"
+              want=$(awk -v f="$f" '{ n = $2; sub(/^\*/, "", n) } n == f { print $1 }' sha256.sum)
+              if [ -n "$want" ]; then echo "  awk ok   $f -> $(printf %s "$want" | cut -c1-12)..."
+              else echo "  awk MISS $f"; ok=0; fi
+            done
+          done
+          [ "$ok" = 1 ] && echo "RESULT awk-parse: PASS - all 6 archives resolve" \
+                        || echo "RESULT awk-parse: FAIL - install.sh cannot find an archive it downloads"
