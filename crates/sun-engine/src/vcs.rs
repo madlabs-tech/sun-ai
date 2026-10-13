@@ -1138,7 +1138,7 @@ impl Engine {
 
 /// `InvalidInput` unless `url` is a clone URL git can take safely: an
 /// `http`, `https`, `ssh` or `git` URL with a host, or the scp-like
-/// `[user@]host:path` (as multica's `isValidGitRepoURL`); never an option
+/// `[user@]host:path`; never an option
 /// (`-…`), a remote helper (`::`) or `https://user:token@host/…` (the token
 /// would land in the row, the audit log and every context pack).
 fn check_repo_url(url: &str) -> Result<()> {
@@ -1599,7 +1599,7 @@ mod tests {
             assert_eq!(host_of(url).as_deref(), Some(host), "{url}");
         }
         assert_eq!(encode("a/b c"), "a%2Fb%20c");
-        // Repo URLs, like multica's `isValidGitRepoURL`, plus git safety.
+        // Repo URLs git accepts, plus git safety.
         for ok in [
             "https://github.com/acme/web.git",
             "http://git.local/repo",

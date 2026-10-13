@@ -1,4 +1,4 @@
-//! Git connections and a workspace's repositories (like multica's Code tab).
+//! Git connections and a workspace's repositories (the Code settings tab).
 //!
 //! - `GET /workspaces/{id}/vcs`: `{connections, apps, can_manage}`, the
 //!   workspace's connections (never a token or secret), which ecosystem git
@@ -195,7 +195,7 @@ fn warn_failed(provider: &str, error: &Error) {
 }
 
 /// Why a GitHub connect failed, for the UI (never the provider's own
-/// words): multica's reasons.
+/// words): one fixed reason code per failure.
 fn reason(error: &Error) -> &'static str {
     match error {
         Error::NotFound(_) => "bad_workspace",
@@ -309,7 +309,7 @@ pub(crate) struct Setup {
 /// sends the browser back after an install (or a repo selection change).
 ///
 /// The `installation_id` is trusted as GitHub sent it (no OAuth during
-/// install, like multica): a deliberate user decision (2026-10-10). Someone
+/// install): a deliberate user decision (2026-10-10). Someone
 /// who knows another installation's id could connect it, but only a member
 /// with `edit_workspace` + `manage_secrets` can start a connect at all.
 pub(crate) async fn github_setup(

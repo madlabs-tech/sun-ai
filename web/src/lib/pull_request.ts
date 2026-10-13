@@ -1,5 +1,4 @@
-// What the task page says about one pull request, ported from multica's
-// `core/github/pull-request-status.ts`. A PR's health is two independent facts from the host's
+// What the task page says about one pull request. A PR's health is two independent facts from the host's
 // snapshot, checks and mergeability; the row folds them into one verdict that still carries a
 // conflict beside failing checks. Every snapshot field defaults defensively, so an absent one never
 // fabricates a positive verdict.

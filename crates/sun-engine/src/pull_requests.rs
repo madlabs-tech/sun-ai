@@ -1,6 +1,6 @@
 //! Pull requests mirrored from the git hosts, part of the **Facade** for the
-//! API (ported from multica's `handler/github.go`, `pr_auto_complete.go` and
-//! `vcs_webhook.go`).
+//! API: webhook intake, the PR auto-link rule and the PR auto-complete
+//! decision.
 //!
 //! A `pull_request` delivery (GitHub) or Merge Request Hook (GitLab) becomes
 //! a [`PrEvent`], and [`mirror`] applies it in one transaction: upsert the
@@ -373,8 +373,8 @@ pub struct AutoComplete {
     pub target_status: Option<TaskStatus>,
 }
 
-/// The decision for `task` with its linked `prs`, in the order multica's
-/// `decidePRAutoComplete` guards: none → terminal → workspace_disabled →
+/// The decision for `task` with its linked `prs`, guards checked in this
+/// order: none → terminal → workspace_disabled →
 /// task_disabled → at_target → waiting → not_merged → all_merged. `target`
 /// is where a merge would move it ([`target_of`]).
 pub(crate) fn decide(
@@ -1154,7 +1154,7 @@ mod tests {
             (d.state, d.task_disabled, d.workspace_enabled),
             (TaskDisabled, true, true)
         );
-        // Workspace off wins over task off, as in multica.
+        // Workspace off wins over task off.
         assert_eq!(decision(&disabled, &merged, off, done).0, WorkspaceDisabled);
         let needs_you = Task {
             status: TaskStatus::NeedsYou,

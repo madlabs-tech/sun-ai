@@ -61,7 +61,7 @@ const REPLAY_WINDOW: chrono::Duration = chrono::Duration::days(7);
 const MAX_DELIVERY_ID: usize = 128;
 /// Where a delivery names its id.
 const DELIVERY_HEADERS: &[&str] = &["x-github-delivery", "x-gitlab-event-uuid"];
-/// The largest delivery body taken (10 MiB, like multica).
+/// The largest delivery body taken (10 MiB).
 pub(crate) const MAX_BODY: usize = 10 * 1024 * 1024;
 
 /// A git host delivery the kernel mirrors (PRs, checks, installations)

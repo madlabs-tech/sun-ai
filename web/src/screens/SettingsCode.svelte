@@ -1,4 +1,4 @@
-<!-- Settings → <workspace> → Code (`edit_workspace`), multica's Code tab: how the workspace reaches its
+<!-- Settings → <workspace> → Code (`edit_workspace`), the Code tab: how the workspace reaches its
      git hosts, the repositories its agents work in, and the pull request rules.
      - Code hosting: GitHub (the App's install page) and GitLab (OAuth) connect in a new tab, one click
        each. The kernel says whether the operator configured each app (`sun secret set`); until then the

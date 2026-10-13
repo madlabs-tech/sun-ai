@@ -1,4 +1,4 @@
-<!-- The task page's Pull requests section (multica's pull-requests-section + pull-request-list): the
+<!-- The task page's Pull requests section: the
      linked PRs, what merging them does to the task, and the two exceptions a person can make: link a PR
      by hand (the + dialog), or keep this one task’s status when its PRs merge (the actions menu). Each row is
      a link to the PR: state icon, title with the task's key stripped, `#number` (`repo#number` when the
