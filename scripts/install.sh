@@ -25,7 +25,7 @@ set -eu
 #   /                          this script
 #   /releases/<version>/<file> <version> = latest or a bare semver (tag v<semver>)
 SUN_INSTALL_URL=${SUN_INSTALL_URL:-https://get-sun.madlabs.tech}
-SUN_RELEASE_KEY=${SUN_RELEASE_KEY:-"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEdlEdtxTJKj2DtLkku1zHt97rNmTD8gT9YNS83uw2Mb"}
+SUN_RELEASE_KEY=${SUN_RELEASE_KEY:-"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMr0ABEbdb2B1mfv0IjPSXOzWb9odC2Mw7JzKji2W6QH"}
 SIGNER=release@madlabs.tech
 NAMESPACE=sun-release
 
