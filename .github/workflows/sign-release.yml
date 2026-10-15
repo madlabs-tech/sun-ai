@@ -1,8 +1,14 @@
 # Signs the release's sha256.sum with the Sun release key (`ssh-keygen -Y`,
-# namespace `sun-release`) and uploads sha256.sum.sig, which
-# scripts/install.sh and `sun upgrade` verify. Called by release.yml
-# (cargo-dist `publish-jobs`). Secret SUN_RELEASE_SIGNING_KEY: the private
-# ed25519 key whose public half is SUN_RELEASE_KEY in scripts/install.sh.
+# namespace `sun-release`) and emits sha256.sum.sig, which scripts/install.sh
+# and `sun upgrade` verify. Called by release.yml (cargo-dist `publish-jobs`),
+# before the GitHub Release exists: sha256.sum comes from the
+# `artifacts-build-global` workflow artifact, and the signature goes back out
+# as an `artifacts-*` artifact, which `announce` uploads to the release
+# together with everything else (dist-workspace.toml `github-release`).
+# So nothing is published without its signature, and a signing failure
+# skips `announce` instead of leaving an unsigned release live.
+# Secret SUN_RELEASE_SIGNING_KEY: the private ed25519 key whose public half
+# is SUN_RELEASE_KEY in scripts/install.sh.
 name: Sign release
 
 on:
@@ -16,19 +22,26 @@ jobs:
   sign:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      contents: read
     steps:
+      - name: Download sha256.sum
+        uses: actions/download-artifact@v8
+        with:
+          name: artifacts-build-global
+          path: global
       - name: Sign sha256.sum
         env:
           SIGNING_KEY: ${{ secrets.SUN_RELEASE_SIGNING_KEY }}
         run: |
           [ -n "$SIGNING_KEY" ] || { echo "SUN_RELEASE_SIGNING_KEY is not set" >&2; exit 1; }
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern sha256.sum
+          [ -f global/sha256.sum ] || { echo "artifacts-build-global has no sha256.sum" >&2; ls -la global >&2; exit 1; }
           umask 077
           printf '%s\n' "$SIGNING_KEY" > key
-          ssh-keygen -Y sign -f key -n sun-release sha256.sum
+          ssh-keygen -Y sign -f key -n sun-release global/sha256.sum
           rm -f key
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" sha256.sum.sig
+      - name: Upload sha256.sum.sig
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-sign-release
+          path: global/sha256.sum.sig
+          if-no-files-found: error
