@@ -18,6 +18,9 @@
 #   --no-service         install the binaries only; don't write or start a service
 #   --download-only DIR  download + verify into DIR, nothing else (`sun upgrade`)
 #   --from DIR           take the release files from DIR instead of downloading
+#   --uninstall          stop the service and remove it and the binaries; keeps
+#                        the data dir (host/host.json, task history)
+#   --purge              with --uninstall: delete the data dir too
 # Env: SUN_INSTALL_URL (download base), SUN_RELEASE_KEY (trusted signer).
 set -eu
 
@@ -35,6 +38,8 @@ data_dir=""
 service=1
 download_only=""
 from=""
+uninstall=0
+purge=0
 
 say() { printf 'sun-install: %s\n' "$*"; }
 # fail <cause> <fix>
@@ -52,9 +57,12 @@ while [ $# -gt 0 ]; do
     --no-service) service=0; shift ;;
     --download-only) download_only=${2:?--download-only needs a dir}; shift 2 ;;
     --from) from=${2:?--from needs a dir}; shift 2 ;;
+    --uninstall) uninstall=1; shift ;;
+    --purge) purge=1; shift ;;
     *) fail "unknown option $1" "see the options at the top of this script" ;;
   esac
 done
+[ "$purge" = 0 ] || [ "$uninstall" = 1 ] || fail "--purge only applies with --uninstall" "run: sh -s -- --uninstall --purge"
 [ -n "$version" ] || version=latest
 version=${version#v} # tags are v1.2.3; the URL takes 1.2.3
 
@@ -95,6 +103,53 @@ case "$os" in
     target=aarch64-apple-darwin ;;
   *) fail "unsupported OS $os" "Sun runs on Linux and macOS" ;;
 esac
+
+if [ "$os" = Linux ]; then
+  [ -n "$prefix" ] || prefix=/usr/local/bin
+  [ -n "$data_dir" ] || data_dir=/var/lib/sun
+  unit=/etc/systemd/system/sun.service
+else
+  [ -n "$prefix" ] || prefix="$HOME/.local/bin"
+  [ -n "$data_dir" ] || data_dir="$HOME/Library/Application Support/sun"
+  plist="$HOME/Library/LaunchAgents/dev.sun.kernel.plist"
+fi
+
+# ------------------------------------------------------------ uninstall
+# The same steps the undo trap runs after a failed install, on request.
+if [ "$uninstall" = 1 ]; then
+  removed=0
+  gone() { removed=1; say "removed $1"; }
+  if [ "$os" = Linux ]; then
+    if [ -e "$unit" ]; then
+      [ "$(id -u)" = 0 ] || fail "removing the systemd service needs root" "run: curl -fsSL $SUN_INSTALL_URL | sudo sh -s -- --uninstall"
+      systemctl disable --now sun >/dev/null 2>&1 || true
+      rm -f "$unit" || fail "cannot remove $unit" "remove it by hand, then: systemctl daemon-reload"
+      systemctl daemon-reload
+      gone "the sun service ($unit)"
+    fi
+  elif [ -e "$plist" ]; then
+    launchctl bootout "gui/$(id -u)/dev.sun.kernel" >/dev/null 2>&1 || true
+    rm -f "$plist" || fail "cannot remove $plist" "remove it by hand"
+    gone "the launchd agent ($plist)"
+  fi
+  for b in sun sun-mod-sandbox; do
+    [ -e "$prefix/$b" ] || continue
+    rm -f "$prefix/$b" || fail "cannot remove $prefix/$b" "run with sudo, or pass the --prefix you installed with"
+    gone "$prefix/$b"
+  done
+  if [ -d "$data_dir" ]; then
+    if [ "$purge" = 1 ]; then
+      rm -rf "$data_dir" || fail "cannot remove $data_dir" "run with sudo, or pass the --data-dir you installed with"
+      gone "$data_dir"
+    else
+      say "kept $data_dir (host/host.json, task history). Delete it: rerun with --uninstall --purge, or rm -rf $(quote "$data_dir")"
+    fi
+  fi
+  [ "$os" != Linux ] || ! id sun >/dev/null 2>&1 || say "kept the sun user. Remove it: userdel sun"
+  done_ok=1
+  [ "$removed" = 1 ] || say "nothing to remove"
+  exit 0
+fi
 
 # ------------------------------------------------------------ download
 archives="sun-cli-$target.tar.xz sun-mod-$target.tar.xz"
@@ -158,15 +213,8 @@ offers() {
 }
 
 # ------------------------------------------------------------ install
-if [ "$os" = Linux ]; then
-  [ -n "$prefix" ] || prefix=/usr/local/bin
-  [ -n "$data_dir" ] || data_dir=/var/lib/sun
-  if [ "$service" = 1 ] && [ "$(id -u)" != 0 ]; then
-    fail "installing the systemd service needs root" "run: curl -fsSL $SUN_INSTALL_URL | sudo sh"
-  fi
-else
-  [ -n "$prefix" ] || prefix="$HOME/.local/bin"
-  [ -n "$data_dir" ] || data_dir="$HOME/Library/Application Support/sun"
+if [ "$os" = Linux ] && [ "$service" = 1 ] && [ "$(id -u)" != 0 ]; then
+  fail "installing the systemd service needs root" "run: curl -fsSL $SUN_INSTALL_URL | sudo sh"
 fi
 
 if [ ! -d "$prefix" ]; then
@@ -211,7 +259,6 @@ if [ "$os" = Linux ]; then
   fi
   chown sun:sun "$data_dir"
   chmod 0750 "$data_dir"
-  unit=/etc/systemd/system/sun.service
   [ ! -e "$unit" ] || fail "$unit already exists" "upgrade with \`sun upgrade\`, or remove the old unit first"
   sed -e "s|/usr/local/bin/sun|$prefix/sun|g" -e "s|/var/lib/sun|$data_dir|g" \
     "$(find_one sun.service)" >"$unit"
@@ -220,8 +267,8 @@ if [ "$os" = Linux ]; then
   systemctl enable --now sun >/dev/null 2>&1 || fail "systemd could not start sun" "see: journalctl -u sun -n 50"
   later "systemctl disable --now sun"
   logs="journalctl -u sun -n 50"
+  persists="Sun starts at boot. Stop: systemctl disable --now sun · Uninstall: curl -fsSL $SUN_INSTALL_URL | sudo sh -s -- --uninstall"
 else
-  plist="$HOME/Library/LaunchAgents/dev.sun.kernel.plist"
   [ ! -e "$plist" ] || fail "$plist already exists" "upgrade with \`sun upgrade\`, or remove the old agent first"
   mkdir -p "$HOME/Library/LaunchAgents"
   # Agents need the CLIs the user has (claude, codex, git) on PATH.
@@ -232,6 +279,7 @@ else
   launchctl bootstrap "gui/$(id -u)" "$plist" || fail "launchd could not start sun" "see: $data_dir/sun.log"
   later "launchctl bootout gui/$(id -u)/dev.sun.kernel"
   logs="tail -n 50 \"$data_dir/sun.log\""
+  persists="Sun starts at login. Stop: launchctl bootout gui/$(id -u)/dev.sun.kernel · Uninstall: curl -fsSL $SUN_INSTALL_URL | sh -s -- --uninstall"
 fi
 
 # ------------------------------------------------------------ first sign-in
@@ -249,5 +297,6 @@ say "  UI:      http://$listen"
 say "  Sign in: admin@sun.local, password $token (first run: you then choose a password, which retires this token, and set your email)"
 say "  Locked out? \`sun user set-password <email>\`."
 say "  Check the box with \`sun doctor\`."
+say "  $persists"
 offers
 [ "$os" != Linux ] || say "  On a remote box: ssh -L 7700:$listen <host>, then open the link locally."
