@@ -19,17 +19,17 @@ async function new_workspace_hosts(page: Page, name: string) {
 test('hosts: kernel use, RSS per session, missing device tools and disk', async ({ page }) => {
   await page.goto('/?mock=1#/hosts');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Hosts');
-  await expect(page.getByRole('article', { name: 'Kernel' })).toContainText('46.0 MB RAM · 0.6% CPU · up 1d 2h');
+  await expect(page.getByRole('article', { name: 'Kernel' })).toContainText('46.0 MB RAM · 0.6% avg CPU · up 1d 2h');
 
   const mbp = page.getByRole('article', { name: 'hery-mbp' });
   const sessions = mbp.getByRole('list', { name: 'Live sessions on hery-mbp' }).getByRole('listitem');
   await expect(sessions).toHaveCount(2);
-  await expect(sessions.first()).toContainText('612 MB RAM · 38.5% CPU · up 24m');
-  await expect(sessions.nth(1)).toContainText('248 MB RAM · 4.2% CPU · up 5m');
+  await expect(sessions.first()).toContainText('612 MB RAM · 38.5% avg CPU · up 24m');
+  await expect(sessions.nth(1)).toContainText('248 MB RAM · 4.2% avg CPU · up 5m');
   await expect(mbp).toContainText('1.4 GB in 2 task folders');
   await expect(mbp).toContainText('iPhone 16 (iOS 18.2)');
   await expect(mbp).toContainText('Android emulator: No Android system image: run `sdkmanager');
-  await expect(page.getByRole('article', { name: 'build-box-01' })).toContainText('410 MB RAM · 0.4% CPU · up 2h 3m');
+  await expect(page.getByRole('article', { name: 'build-box-01' })).toContainText('410 MB RAM · 0.4% avg CPU · up 2h 3m');
 });
 
 test('hosts: kill a session with a reason', async ({ page }) => {

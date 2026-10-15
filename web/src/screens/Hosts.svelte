@@ -107,7 +107,7 @@
   const missing = (h: Host) =>
     Object.entries(h.capabilities.device_tools ?? {}).filter((e): e is [string, DeviceTool & { detail: string }] => !e[1].ready && !!e[1].detail);
   const usage = (rss: number | null, cpu: number | null) =>
-    `${rss === null ? '?' : bytes(rss)} RAM · ${cpu === null ? '?' : cpu.toFixed(1)}% CPU`;
+    `${rss === null ? '?' : bytes(rss)} RAM · ${cpu === null ? '?' : cpu.toFixed(1)}% avg CPU`;
   const disk_total = (h: Host) => (h.disk ?? []).reduce((sum, d) => sum + d.bytes, 0);
 
   // Kill a session: a reason is required; the run records it.

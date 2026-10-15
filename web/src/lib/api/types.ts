@@ -610,7 +610,10 @@ export interface DeviceTool {
   detail: string | null;
 }
 
-/** A live agent session's resources. `run_id`/`step_key` are null after a kernel restart. */
+/**
+ * A live agent session's resources. `run_id`/`step_key` are null after a kernel restart.
+ * `cpu_percent` is the lifetime average (CPU seconds over seconds alive), as `ps %cpu`.
+ */
 export interface SessionStats {
   session_id: Ulid;
   run_id: Ulid | null;
@@ -620,7 +623,7 @@ export interface SessionStats {
   uptime_s: number;
 }
 
-/** GET /api/v1/kernel: the kernel process alone */
+/** GET /api/v1/kernel: the kernel process alone; `cpu_percent` is its lifetime average. */
 export interface KernelUse {
   pid: number;
   rss_bytes: number | null;
