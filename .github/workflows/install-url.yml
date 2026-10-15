@@ -1,44 +1,32 @@
-# Daily liveness check of the documented install URL: the installer at
-# get-sun.madlabs.tech and every file scripts/install.sh downloads, for
-# every target, under /releases/latest/. Fails when any is not 200, which
-# is the 404 a user would hit. A failed run emails the last committer of
-# this file (GitHub's default for scheduled workflows); no chat alerting
-# is wired up for this repo yet.
-# By hand: `gh workflow run install-url.yml -f version=0.1.0`.
+# DEBUG BRANCH (BLO-112): dump full response headers and body for the 403
+# that get-sun.madlabs.tech returns to GitHub-hosted runners. Not for merge.
 name: Install URL
 
 on:
-  schedule:
-    - cron: '41 6 * * *' # daily 06:41 UTC
   workflow_dispatch:
-    inputs:
-      version:
-        description: Release to check (latest or 1.2.3)
-        default: latest
-        type: string
 
 permissions:
   contents: read
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     env:
       BASE: https://get-sun.madlabs.tech
-      VERSION: ${{ inputs.version || 'latest' }}
     steps:
       - run: |
-          bad=0
-          check() {
-            code=$(curl -sSLI -o /dev/null -w '%{http_code}' "$1") || code=000
-            echo "$code $1"
-            [ "$code" = 200 ] || bad=1
+          echo "== runner egress IP"; curl -sS https://api.ipify.org; echo
+          probe() {
+            echo "===== $1 ($2)"
+            curl -sSD - -o body.txt --max-time 30 "${@:3}" "$1" || echo "curl exit $?"
+            echo "--- body (first 40 lines)"; head -40 body.txt; echo
           }
-          check "$BASE"
-          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
-            check "$BASE/releases/$VERSION/sun-cli-$t.tar.xz"
-            check "$BASE/releases/$VERSION/sun-mod-$t.tar.xz"
-          done
-          check "$BASE/releases/$VERSION/sha256.sum"
-          check "$BASE/releases/$VERSION/sha256.sum.sig"
-          [ "$bad" = 0 ] || { echo "::error::install URL is broken for release $VERSION"; exit 1; }
+          probe "$BASE/" "default curl UA"
+          probe "$BASE/" "browser UA" -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
+          probe "$BASE/releases/latest/sha256.sum" "default curl UA"
+          echo "===== control: raw.githubusercontent.com (not Cloudflare)"
+          curl -sSI --max-time 30 https://raw.githubusercontent.com/madlabs-tech/sun-ai/main/scripts/install.sh | head -3
