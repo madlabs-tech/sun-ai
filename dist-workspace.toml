@@ -15,10 +15,15 @@ installers = []
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
 # Build web/dist before cargo, in every build job.
 github-build-setup = "../build-setup.yml"
-github-custom-job-permissions = { "footprint" = { contents = "read" }, "sign-release" = { contents = "write" } }
+github-custom-job-permissions = { "footprint" = { contents = "read" }, "sign-release" = { contents = "read" } }
 # Gate: fail the release when the binary or idle RSS breaks the footprint budget (40 MB binary, 40 MB idle RSS).
 global-artifacts-jobs = ["./footprint"]
-# Sign sha256.sum after the release exists (install.sh verifies it).
+# Sign sha256.sum (install.sh verifies it) before anything is published:
+# sign-release takes sha256.sum from the workflow artifacts and emits
+# sha256.sum.sig as one, and `announce` creates the GitHub Release after it.
 publish-jobs = ["./sign-release"]
+# Create the GitHub Release in `announce` (after publish-jobs), not in `host`,
+# so a release is never live without its signature.
+github-release = "announce"
 # Prereleases get signed too.
 publish-prereleases = true
