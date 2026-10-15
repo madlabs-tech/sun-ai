@@ -81,6 +81,7 @@ mod id;
 mod link;
 mod mcp_grant;
 pub mod model;
+pub mod procfs;
 pub mod redact;
 mod runtime;
 pub mod sso;
