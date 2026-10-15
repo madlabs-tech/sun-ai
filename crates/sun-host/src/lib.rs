@@ -30,7 +30,7 @@ mod preview;
 mod process;
 mod worktree;
 
-pub use connection::{Credentials, enroll};
+pub use connection::{Credentials, HostStatus, enroll, leave, status};
 pub use device::DeviceConfig;
 pub use exec_env::ModEnvs;
 pub use host::{Host, HostConfig};

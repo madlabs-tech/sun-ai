@@ -634,6 +634,77 @@ fn hello(host: HostId, key: &str) -> Value {
     })
 }
 
+/// One `status`/`leave` connection: the kernel's answer, or `None` when it
+/// closed without one.
+async fn ask(url: &str, frame: Value) -> Option<Value> {
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    send(&mut socket, frame).await;
+    let answer = recv(&mut socket).await;
+    if answer.is_some() {
+        assert_eq!(recv(&mut socket).await, None, "one answer, then close");
+    }
+    answer
+}
+
+#[tokio::test]
+async fn host_socket_status_and_leave_need_the_host_key() {
+    let k = kernel().await;
+    let app = &k.app;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/host", listener.local_addr().unwrap());
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let main = "/api/v1/workspaces/00000000000000000000000001/hosts/tokens";
+    let (_, issued) = call(app, "POST", main, None).await;
+    let enroll = json!({ "type": "enroll", "token": issued["token"], "name": "laptop" });
+    let enrolled = ask(&url, enroll).await.unwrap();
+    let host: HostId = serde_json::from_value(enrolled["host_id"].clone()).unwrap();
+    let key = enrolled["host_key"].as_str().unwrap();
+    let as_host = |kind: &str, key: &str| json!({ "type": kind, "host_id": host, "host_key": key });
+
+    // A wrong key, or a host this kernel never enrolled, gets no answer.
+    assert_eq!(ask(&url, as_host("status", "wrong")).await, None);
+    assert_eq!(ask(&url, as_host("leave", "wrong")).await, None);
+    let stranger = json!({ "type": "status", "host_id": HostId::generate(), "host_key": key });
+    assert_eq!(ask(&url, stranger).await, None);
+
+    let status = ask(&url, as_host("status", key)).await.unwrap();
+    assert_eq!(
+        status,
+        json!({ "type": "status", "connected": false, "workspaces": ["Main"] })
+    );
+    let (mut session, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    send(&mut session, hello(host, key)).await;
+    until_online(app, host).await;
+    let status = ask(&url, as_host("status", key)).await.unwrap();
+    assert_eq!(status["connected"], true);
+
+    // Leaving takes it out of every workspace's list, audited as the host.
+    let listed = |hosts: &Value| {
+        hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|h| h["id"] == json!(host))
+    };
+    let in_main = "/api/v1/hosts?workspace=00000000000000000000000001";
+    assert!(listed(&call(app, "GET", in_main, None).await.1));
+    let left = ask(&url, as_host("leave", key)).await.unwrap();
+    assert_eq!(left, json!({ "type": "left" }));
+    assert!(!listed(&call(app, "GET", in_main, None).await.1));
+    let status = ask(&url, as_host("status", key)).await.unwrap();
+    assert_eq!(status["workspaces"], json!([]));
+    let (_, audit) = call(app, "GET", "/api/v1/audit", None).await;
+    assert!(
+        audit.to_string().contains(&format!("host:{host}")),
+        "{audit}"
+    );
+    // Leaving twice is fine.
+    assert_eq!(
+        ask(&url, as_host("leave", key)).await,
+        Some(json!({ "type": "left" }))
+    );
+}
+
 #[tokio::test]
 async fn host_socket_enrolment_session_sse_and_steer() {
     let k = kernel().await;

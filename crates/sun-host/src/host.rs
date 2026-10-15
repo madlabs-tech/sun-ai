@@ -156,7 +156,8 @@ impl Host {
                 }
                 return;
             }
-            KernelFrame::Enrolled { .. } => return, // only valid on an enrolment connection
+            // Only valid as the answer on a one-shot connection.
+            KernelFrame::Enrolled { .. } | KernelFrame::Status { .. } | KernelFrame::Left => return,
             KernelFrame::WorktreePrepare { id, .. }
             | KernelFrame::WorktreeRemove { id, .. }
             | KernelFrame::SessionStart { id, .. }
@@ -294,7 +295,10 @@ impl Host {
                     result: self.devices.flow(&scratch, &request).await?,
                 }
             }
-            KernelFrame::Ack { .. } | KernelFrame::Enrolled { .. } => {
+            KernelFrame::Ack { .. }
+            | KernelFrame::Enrolled { .. }
+            | KernelFrame::Status { .. }
+            | KernelFrame::Left => {
                 return Err(Error::Protocol("not a request".into()));
             }
         })

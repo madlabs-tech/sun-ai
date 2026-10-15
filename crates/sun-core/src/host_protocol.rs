@@ -39,6 +39,23 @@ pub enum HostFrame {
         /// Display name for the host (defaults to the machine's hostname).
         name: String,
     },
+    /// First frame of a status connection (`sun host join` waiting for its
+    /// service): the kernel answers [`KernelFrame::Status`] and closes.
+    Status {
+        /// The host's id from enrolment.
+        host_id: HostId,
+        /// The host's secret key from enrolment.
+        host_key: String,
+    },
+    /// First frame of a leave connection (`sun host leave`): detach this host
+    /// from every workspace. The kernel answers [`KernelFrame::Left`] and
+    /// closes.
+    Leave {
+        /// The host's id from enrolment.
+        host_id: HostId,
+        /// The host's secret key from enrolment.
+        host_key: String,
+    },
     /// First frame of every session connection. Authenticates the host and
     /// tells the kernel which session events the host still holds.
     Hello {
@@ -83,6 +100,17 @@ pub enum KernelFrame {
         /// The host's secret key; sent in every later `hello`.
         host_key: String,
     },
+    /// Answer to [`HostFrame::Status`].
+    #[serde(rename = "status")]
+    Status {
+        /// The kernel holds a session connection of this host.
+        connected: bool,
+        /// The names of the workspaces whose runs may go to it.
+        workspaces: Vec<String>,
+    },
+    /// Answer to [`HostFrame::Leave`]: the host is in no workspace any more.
+    #[serde(rename = "left")]
+    Left,
     /// Every event of `session_id` up to and including `seq` is stored.
     #[serde(rename = "ack")]
     Ack {

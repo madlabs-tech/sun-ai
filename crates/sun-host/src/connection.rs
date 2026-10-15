@@ -19,7 +19,8 @@ const DISK_EVERY: Duration = Duration::from_secs(60);
 use crate::buffer::io;
 use crate::host::Host;
 
-/// How long enrolment waits for the kernel's answer.
+/// How long a one-shot connection (enrolment, status, leave) waits for the
+/// kernel's answer.
 const ENROLL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What a host keeps from enrolment, in `<data_dir>/host.json` (mode 0600).
@@ -67,6 +68,15 @@ impl Credentials {
             .and_then(|mut f| f.write_all(&json))
             .map_err(io(&path))
     }
+
+    /// Deletes the saved credentials (`sun host leave`); gone already is fine.
+    pub fn remove(data_dir: &Path) -> Result<()> {
+        let path = Self::path(data_dir);
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(&path)(e)),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// `sun host join <token>`: trades the single-use enrolment `token` for a
@@ -77,30 +87,16 @@ pub async fn enroll(
     name: &str,
     data_dir: &Path,
 ) -> Result<Credentials> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(kernel_url)
-        .await
-        .map_err(unavailable)?;
     let enroll = HostFrame::Enroll {
         token: token.into(),
         name: name.into(),
     };
-    ws.send(text(&enroll)?).await.map_err(unavailable)?;
-    let answer = tokio::time::timeout(ENROLL_TIMEOUT, async {
-        while let Some(msg) = ws.next().await {
-            if let Message::Text(t) = msg.map_err(unavailable)? {
-                return parse(&t);
-            }
-        }
-        Err(Error::Unavailable("kernel closed the enrolment".into()))
-    })
-    .await
-    .map_err(|_| Error::Unavailable("kernel did not answer the enrolment".into()))??;
+    let answer = ask(kernel_url, &enroll, "the enrolment").await?;
     let KernelFrame::Enrolled { host_id, host_key } = answer else {
         return Err(Error::Protocol(format!(
             "expected `enrolled`, got {answer:?}"
         )));
     };
-    let _ = ws.close(None).await;
     let credentials = Credentials {
         kernel_url: kernel_url.into(),
         host_id,
@@ -108,6 +104,67 @@ pub async fn enroll(
     };
     credentials.save(data_dir)?;
     Ok(credentials)
+}
+
+/// What the kernel says about an enrolled host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostStatus {
+    /// The kernel holds a session connection of this host.
+    pub connected: bool,
+    /// The workspaces whose runs may go to it, by name.
+    pub workspaces: Vec<String>,
+}
+
+/// Asks the kernel whether it sees this host connected.
+pub async fn status(credentials: &Credentials) -> Result<HostStatus> {
+    let frame = HostFrame::Status {
+        host_id: credentials.host_id,
+        host_key: credentials.host_key.clone(),
+    };
+    match ask(&credentials.kernel_url, &frame, "the status check").await? {
+        KernelFrame::Status {
+            connected,
+            workspaces,
+        } => Ok(HostStatus {
+            connected,
+            workspaces,
+        }),
+        other => Err(Error::Protocol(format!("expected `status`, got {other:?}"))),
+    }
+}
+
+/// Detaches this host from every workspace (`sun host leave`); the kernel
+/// keeps its record, so past runs still name it.
+pub async fn leave(credentials: &Credentials) -> Result<()> {
+    let frame = HostFrame::Leave {
+        host_id: credentials.host_id,
+        host_key: credentials.host_key.clone(),
+    };
+    match ask(&credentials.kernel_url, &frame, "the leave").await? {
+        KernelFrame::Left => Ok(()),
+        other => Err(Error::Protocol(format!("expected `left`, got {other:?}"))),
+    }
+}
+
+/// One-shot connection: sends `frame`, returns the kernel's one answer. A
+/// kernel that refuses (bad key, unknown frame) closes without a word.
+async fn ask(kernel_url: &str, frame: &HostFrame, what: &str) -> Result<KernelFrame> {
+    let (mut ws, _) = tokio_tungstenite::connect_async(kernel_url)
+        .await
+        .map_err(unavailable)?;
+    ws.send(text(frame)?).await.map_err(unavailable)?;
+    let answer = tokio::time::timeout(ENROLL_TIMEOUT, async {
+        while let Some(msg) = ws.next().await {
+            if let Message::Text(t) = msg.map_err(unavailable)? {
+                return parse(&t);
+            }
+        }
+        Err(Error::Unavailable(format!("kernel closed {what}")))
+    })
+    .await
+    .map_err(|_| Error::Unavailable(format!("kernel did not answer {what}")))??;
+    let _ = ws.close(None).await;
+    Ok(answer)
 }
 
 impl Host {

@@ -498,6 +498,26 @@ async fn connection(api: Api, socket: WebSocket) {
             }
             let _ = sink.close().await;
         }
+        Ok(Some(HostFrame::Status { host_id, host_key })) => {
+            if authentic(&api, host_id, &host_key).await {
+                let connected = api.hosts.online().contains(&host_id);
+                let workspaces = workspace_names(&api, host_id).await;
+                if let Ok(workspaces) = workspaces {
+                    let status = KernelFrame::Status {
+                        connected,
+                        workspaces,
+                    };
+                    let _ = sink.send(text(&status)).await;
+                }
+            }
+            let _ = sink.close().await;
+        }
+        Ok(Some(HostFrame::Leave { host_id, host_key })) => {
+            if authentic(&api, host_id, &host_key).await && leave(&api, host_id).await.is_ok() {
+                let _ = sink.send(text(&KernelFrame::Left)).await;
+            }
+            let _ = sink.close().await;
+        }
         Ok(Some(HostFrame::Hello {
             host_id,
             host_key,
@@ -506,11 +526,8 @@ async fn connection(api: Api, socket: WebSocket) {
             last_ack,
         })) => {
             let major = protocol.split('.').next();
-            let known = api.engine.host(host_id).await.is_ok();
-            let key = host_key_for(&api.config.host_secret, host_id);
             if major != HOST_PROTOCOL_VERSION.split('.').next()
-                || !known
-                || !auth::same(host_key.as_bytes(), key.as_bytes())
+                || !authentic(&api, host_id, &host_key).await
             {
                 let _ = sink.close().await;
                 return;
@@ -562,8 +579,11 @@ async fn connection(api: Api, socket: WebSocket) {
                             let _ = reply.send(body);
                         }
                     }
-                    // A second enroll/hello is a protocol violation.
-                    HostFrame::Enroll { .. } | HostFrame::Hello { .. } => break,
+                    // A second first frame is a protocol violation.
+                    HostFrame::Enroll { .. }
+                    | HostFrame::Hello { .. }
+                    | HostFrame::Status { .. }
+                    | HostFrame::Leave { .. } => break,
                 }
             }
             hub.detach(host_id, generation);
@@ -574,6 +594,34 @@ async fn connection(api: Api, socket: WebSocket) {
             let _ = sink.close().await;
         }
     }
+}
+
+/// `host_id` is enrolled here and `host_key` is its key.
+async fn authentic(api: &Api, host_id: HostId, host_key: &str) -> bool {
+    let key = host_key_for(&api.config.host_secret, host_id);
+    api.engine.host(host_id).await.is_ok() && auth::same(host_key.as_bytes(), key.as_bytes())
+}
+
+/// The names of the workspaces `host` is attached to.
+async fn workspace_names(api: &Api, host: HostId) -> Result<Vec<String>> {
+    let item = sun_engine::WorkspaceItem::Host(host);
+    let mut names = Vec::new();
+    for workspace in api.engine.workspaces_of(item).await? {
+        names.push(api.engine.workspace(workspace).await?.name);
+    }
+    Ok(names)
+}
+
+/// `sun host leave`: detaches `host` from every workspace (audited as the
+/// host). Its row stays, so past runs still name it.
+async fn leave(api: &Api, host: HostId) -> Result<()> {
+    let item = sun_engine::WorkspaceItem::Host(host);
+    for workspace in api.engine.workspaces_of(item).await? {
+        api.engine
+            .detach_from_workspace(workspace, item, &format!("host:{host}"))
+            .await?;
+    }
+    Ok(())
 }
 
 /// Trades a valid token for a new host and its key; `None` closes silently.
