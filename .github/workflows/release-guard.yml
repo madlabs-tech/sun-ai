@@ -1,0 +1,37 @@
+# Guard: a pushed release tag must end in a published GitHub Release.
+# Runs after every Release workflow run. When that run came from a tag
+# push and no release exists for the tag (a gate job failed, so `host`
+# and `announce` were skipped, which looks the same as "nothing to do"),
+# this fails, so the tag is red somewhere instead of silently unreleased.
+# By hand: `gh workflow run release-guard.yml -f tag=v0.1.0`.
+name: Release guard
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag that must have a release (v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  published:
+    # The Release workflow also runs on pull requests; only tag pushes publish.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.event.workflow_run.head_branch }}
+      RELEASE_RUN: ${{ github.event.workflow_run.html_url }} (${{ github.event.workflow_run.conclusion }})
+    steps:
+      - run: |
+          draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null) &&
+            [ "$draft" = false ] ||
+            { echo "::error::tag $TAG has no published GitHub Release. Release run: $RELEASE_RUN"; exit 1; }
+          echo "release $TAG is published"
