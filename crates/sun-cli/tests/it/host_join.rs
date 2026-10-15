@@ -39,7 +39,8 @@ fn host_join_with_a_workspace_token_attaches_the_host_there() {
     let host_data = dir.path().join("host");
     let out = Command::new(env!("CARGO_BIN_EXE_sun"))
         .args(["host", "join", issued["token"].as_str().unwrap()])
-        .args(["--kernel", &base, "--name", "ops-box"])
+        // Enrol only: a test never installs a real launchd/systemd service.
+        .args(["--kernel", &base, "--name", "ops-box", "--no-service"])
         .env("SUN_DATA_DIR", &host_data)
         .output()
         .unwrap();

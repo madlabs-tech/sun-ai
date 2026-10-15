@@ -8,6 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{Value, json};
 use sun_cli::client::Client;
 use sun_cli::config::{Config, KernelSecrets};
+use sun_cli::host_service::HostService;
 use sun_cli::mods;
 use sun_cli::ops;
 use sun_cli::serve::{self, ExecEnvTools, ServeOptions};
@@ -222,7 +223,9 @@ enum PluginCommand {
 #[derive(Subcommand)]
 enum HostCommand {
     /// Enrol this machine with a kernel, using a token from the UI's
-    /// "Add host" (single use).
+    /// "Add host" (single use), then install and start the host service
+    /// (launchd agent `dev.sun.host` / systemd unit `sun-host`) and wait for
+    /// the kernel to see it connected.
     Join {
         /// The enrolment token.
         #[arg(required_unless_present = "marketplace")]
@@ -246,8 +249,18 @@ enum HostCommand {
         /// Lima CLI for the task VMs (with `--marketplace`).
         #[arg(long, default_value = "limactl")]
         vm_cli: PathBuf,
+        /// Enrol only: run `sun host run` under your own supervisor.
+        #[arg(long, conflicts_with = "marketplace")]
+        no_service: bool,
     },
-    /// Run the enrolled host (reconnects on its own).
+    /// (Re)write and start the host service, and wait until it is connected.
+    Start,
+    /// Stop the host service until the next login/boot.
+    Stop,
+    /// Stop and remove the host service, take this host out of the kernel's
+    /// workspaces and delete its credentials (the `sun` binary stays).
+    Leave,
+    /// Run the enrolled host in the foreground (reconnects on its own).
     Run {
         /// Container/VM tools.
         #[command(flatten)]
@@ -1003,18 +1016,59 @@ async fn host(data_dir: &Path, command: HostCommand) -> Result<()> {
             token: Some(token),
             kernel: Some(kernel),
             name,
+            no_service,
             ..
         } => {
             let url = host_url(&kernel)?;
             let name = name.unwrap_or_else(hostname);
             let credentials = sun_host::enroll(&url, &token, &name, &dir).await?;
-            println!(
-                "sun: enrolled as {name} ({}); start it with `sun host run`",
-                credentials.host_id
-            );
+            println!("sun: enrolled as {name} ({})", credentials.host_id);
+            if no_service {
+                println!("sun: start it with `sun host run`");
+                return Ok(());
+            }
+            start_host_service(data_dir, &credentials)
+                .await
+                .context("enrolled, but the host service did not come up; fix that and run `sun host start`, or run `sun host run` yourself")?;
+            println!("sun: stop: sun host stop · remove: sun host leave");
             Ok(())
         }
         HostCommand::Join { .. } => bail!("pass a token and --kernel, or --marketplace"),
+        HostCommand::Start => {
+            let credentials = sun_host::Credentials::load(&dir)?;
+            start_host_service(data_dir, &credentials).await
+        }
+        HostCommand::Stop => {
+            let service = HostService::here()?;
+            if !service.installed() {
+                bail!("no host service here; `sun host join` installs one");
+            }
+            service.stop();
+            println!(
+                "sun: host stopped until the next login/boot (`sun host start` starts it, `sun host leave` removes it)"
+            );
+            Ok(())
+        }
+        HostCommand::Leave => {
+            HostService::here()?.remove()?;
+            if let Ok(credentials) = sun_host::Credentials::load(&dir) {
+                sun_host::leave(&credentials).await.with_context(|| {
+                    format!(
+                        "host service removed, but {} did not confirm the leave; retry `sun host leave`, or remove the host in the UI and delete {}",
+                        credentials.kernel_url,
+                        dir.join("host.json").display()
+                    )
+                })?;
+                sun_host::Credentials::remove(&dir)?;
+                println!(
+                    "sun: host {} left {}; service and credentials removed (the sun binary stays)",
+                    credentials.host_id, credentials.kernel_url
+                );
+            } else {
+                println!("sun: host service removed; this machine was not enrolled");
+            }
+            Ok(())
+        }
         HostCommand::Run { exec_env_tools } => {
             let config = Config::load(data_dir)?;
             let credentials = sun_host::Credentials::load(&dir)?;
@@ -1030,6 +1084,42 @@ async fn host(data_dir: &Path, command: HostCommand) -> Result<()> {
             }
         }
     }
+}
+
+/// How long `sun host join`/`start` waits for the kernel to see the host.
+const HOST_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Installs and (re)starts the host service, then asks the kernel until it
+/// sees the host connected; an error after [`HOST_CONNECT_WAIT`] says why
+/// and where the logs are.
+async fn start_host_service(data_dir: &Path, credentials: &sun_host::Credentials) -> Result<()> {
+    let service = HostService::here()?;
+    let sun_bin = std::env::current_exe().context("locating the sun binary")?;
+    service.install(&sun_bin, data_dir)?;
+    let deadline = tokio::time::Instant::now() + HOST_CONNECT_WAIT;
+    let mut last = String::from("not connected yet");
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, sun_host::status(credentials)).await {
+            Ok(Ok(status)) if status.connected => {
+                let serving = match status.workspaces.as_slice() {
+                    [] => "in no workspace yet; attach it in the UI".to_owned(),
+                    names => format!("serving {}", names.join(", ")),
+                };
+                println!("sun: host service installed and started ({service}) — {serving}");
+                return Ok(());
+            }
+            Ok(Ok(_)) => last = "not connected yet".into(),
+            Ok(Err(e)) => last = e.to_string(),
+            Err(_) => break,
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    bail!(
+        "host service installed ({service}) but {} does not see it connected after {} s ({last}); it keeps retrying. Logs: {}",
+        credentials.kernel_url,
+        HOST_CONNECT_WAIT.as_secs(),
+        service.logs(data_dir)
+    )
 }
 
 /// `sun host join --marketplace`: every 30 s, joins the buyer kernels of new
