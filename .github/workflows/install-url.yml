@@ -1,5 +1,5 @@
-# DEBUG BRANCH (BLO-112): dump full response headers and body for the 403
-# that get-sun.madlabs.tech returns to GitHub-hosted runners. Not for merge.
+# DEBUG BRANCH (BLO-112): is the Cloudflare managed challenge zone-wide?
+# Probe every proxied madlabs.tech host from a hosted runner. Not for merge.
 name: Install URL
 
 on:
@@ -10,23 +10,13 @@ permissions:
 
 jobs:
   check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    env:
-      BASE: https://get-sun.madlabs.tech
+    runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "== runner egress IP"; curl -sS https://api.ipify.org; echo
-          probe() {
-            echo "===== $1 ($2)"
-            curl -sSD - -o body.txt --max-time 30 "${@:3}" "$1" || echo "curl exit $?"
-            echo "--- body (first 40 lines)"; head -40 body.txt; echo
-          }
-          probe "$BASE/" "default curl UA"
-          probe "$BASE/" "browser UA" -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
-          probe "$BASE/releases/latest/sha256.sum" "default curl UA"
-          echo "===== control: raw.githubusercontent.com (not Cloudflare)"
-          curl -sSI --max-time 30 https://raw.githubusercontent.com/madlabs-tech/sun-ai/main/scripts/install.sh | head -3
+          echo "runner egress IP: $(curl -sS https://api.ipify.org)"
+          for u in https://get-sun.madlabs.tech/ https://sun.madlabs.tech/ https://madlabs.tech/ https://www.madlabs.tech/ https://medika.madlabs.tech/health https://jobs.madlabs.tech/; do
+            out=$(curl -sS -o /dev/null -D - --max-time 30 "$u" 2>&1)
+            code=$(printf '%s' "$out" | head -1 | tr -d '\r')
+            mit=$(printf '%s' "$out" | grep -i '^cf-mitigated:' | tr -d '\r')
+            printf '%-40s %s %s\n' "$u" "$code" "${mit:-cf-mitigated: (none)}"
+          done
