@@ -15,7 +15,7 @@ installers = []
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
 # Build web/dist before cargo, in every build job.
 github-build-setup = "../build-setup.yml"
-github-custom-job-permissions = { "footprint" = { contents = "read" }, "sign-release" = { contents = "read" } }
+github-custom-job-permissions = { "footprint" = { contents = "read" }, "sign-release" = { contents = "read" }, "install-smoke" = { contents = "read" } }
 # Gate: fail the release when the binary or idle RSS breaks the footprint budget (40 MB binary, 40 MB idle RSS).
 global-artifacts-jobs = ["./footprint"]
 # Sign sha256.sum (install.sh verifies it) before anything is published:
@@ -27,3 +27,7 @@ publish-jobs = ["./sign-release"]
 github-release = "announce"
 # Prereleases get signed too.
 publish-prereleases = true
+# After the release is announced, install it the way a user does
+# (curl get-sun.madlabs.tech | sh) on Linux and macOS; a release its own
+# installer cannot install fails the Release run.
+post-announce-jobs = ["./install-smoke"]

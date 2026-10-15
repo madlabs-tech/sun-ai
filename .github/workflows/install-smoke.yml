@@ -1,0 +1,65 @@
+# Post-release smoke test: install the release the way a user does
+# (`curl -fsSL https://get-sun.madlabs.tech | sh`) on Linux x86_64 and
+# macOS arm64, then check that the signature verified and `sun --version`
+# is the tag just published. Called by release.yml (cargo-dist
+# `post-announce-jobs`) after `announce`, so a failure fails the Release
+# run. The release object already exists by then and stays published: a
+# human decides whether to delete it, this job only makes it loud.
+# By hand: `gh workflow run install-smoke.yml -f tag=v0.1.0`.
+name: Install smoke
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to install (v1.2.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PLAN: ${{ inputs.plan }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Install as a user would
+        run: |
+          if [ -n "$TAG" ]; then
+            version_flag="--version $TAG"
+          else
+            TAG=$(jq -r .announcement_tag <<<"$PLAN")
+            # The documented command installs "latest"; a prerelease is never latest.
+            version_flag=""
+            [ "$(jq -r .announcement_is_prerelease <<<"$PLAN")" = false ] || version_flag="--version $TAG"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          sudo=""
+          [ "$RUNNER_OS" != Linux ] || sudo=sudo
+          # The assets can lag a few seconds behind `gh release create`.
+          for attempt in 1 2 3; do
+            curl -fsSL https://get-sun.madlabs.tech | $sudo sh -s -- --no-service $version_flag 2>&1 | tee install.log && break
+            [ "$attempt" -lt 3 ] || exit 1
+            echo "attempt $attempt failed; retrying in 30 s"
+            sleep 30
+          done
+      - name: Signature verified, version is the tag
+        run: |
+          grep -q 'signature and checksums ok' install.log
+          sun=/usr/local/bin/sun
+          [ "$RUNNER_OS" = Linux ] || sun="$HOME/.local/bin/sun"
+          got=$("$sun" --version)
+          echo "$got"
+          [ "$got" = "sun ${TAG#v}" ] || { echo "::error::installed '$got', expected 'sun ${TAG#v}'"; exit 1; }
