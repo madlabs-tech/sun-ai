@@ -1,0 +1,44 @@
+# Daily liveness check of the documented install URL: the installer at
+# get-sun.madlabs.tech and every file scripts/install.sh downloads, for
+# every target, under /releases/latest/. Fails when any is not 200, which
+# is the 404 a user would hit. A failed run emails the last committer of
+# this file (GitHub's default for scheduled workflows); no chat alerting
+# is wired up for this repo yet.
+# By hand: `gh workflow run install-url.yml -f version=0.1.0`.
+name: Install URL
+
+on:
+  schedule:
+    - cron: '41 6 * * *' # daily 06:41 UTC
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to check (latest or 1.2.3)
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      BASE: https://get-sun.madlabs.tech
+      VERSION: ${{ inputs.version || 'latest' }}
+    steps:
+      - run: |
+          bad=0
+          check() {
+            code=$(curl -sSLI -o /dev/null -w '%{http_code}' "$1") || code=000
+            echo "$code $1"
+            [ "$code" = 200 ] || bad=1
+          }
+          check "$BASE"
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
+            check "$BASE/releases/$VERSION/sun-cli-$t.tar.xz"
+            check "$BASE/releases/$VERSION/sun-mod-$t.tar.xz"
+          done
+          check "$BASE/releases/$VERSION/sha256.sum"
+          check "$BASE/releases/$VERSION/sha256.sum.sig"
+          [ "$bad" = 0 ] || { echo "::error::install URL is broken for release $VERSION"; exit 1; }
