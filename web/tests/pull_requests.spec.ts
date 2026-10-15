@@ -22,6 +22,8 @@ async function link(page: Page, url: string) {
 test.use({ viewport: { width: 1280, height: 860 } });
 
 test('rows: state, the title without the key, repo#number across repos, diff or age, and one verdict', async ({ page }) => {
+  // The mock's PRs are dated 2026-10-07 (its "today"), so the merged row's age needs the same day.
+  await page.clock.setFixedTime('2026-10-07T12:00:00Z');
   await open(page, 'SUN-142');
   await expect(section(page).getByRole('heading', { level: 2 })).toHaveText(/Pull requests\s*2/);
   await expect(rows(page)).toHaveCount(2);
@@ -51,7 +53,7 @@ test('rows: state, the title without the key, repo#number across repos, diff or 
   const merged = row(page, 477);
   await expect(merged.getByRole('link')).toHaveAttribute('href', 'https://github.com/madlabs/mobile/pull/477');
   await expect(merged).toContainText('Merged');
-  await expect(merged).toContainText('ago');
+  await expect(merged).toContainText('4 hours ago');
   // Done: a merge has nothing left to do, so the footer says nothing.
   await expect(section(page).locator('.prs__foot')).toHaveCount(0);
 });
