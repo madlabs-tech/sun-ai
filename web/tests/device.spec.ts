@@ -42,7 +42,9 @@ test('a running verify step streams its device and takes taps, keys and text', a
   // A tap in the middle of the picture lands in the middle of the device.
   const box = (await screen.boundingBox())!;
   await screen.click({ position: { x: box.width / 2, y: box.height / 2 } });
-  await expect.poll(() => inputs.at(-1)).toEqual({ kind: 'tap', x: expect.closeTo(540, -0.5), y: expect.closeTo(1170, -1) }); // ± 5 device px, about 1.5 CSS px (sub-pixel layout)
+  // ± 2 CSS px in y (10 device px here): clientY is whole CSS px, and each reload of the task above
+  // re-anchors the screen's scroll by up to half a pixel.
+  await expect.poll(() => inputs.at(-1)).toEqual({ kind: 'tap', x: expect.closeTo(540, -0.5), y: expect.closeTo(1170, -1.3) });
 
   await section.getByRole('button', { name: 'Back' }).click();
   await expect.poll(() => inputs.at(-1)).toEqual({ kind: 'key', key: 'back' });
@@ -140,7 +142,7 @@ test('the device streams as H.264 video, decoded in the browser within a frame b
   // Taps land in video pixels.
   const box = (await screen.boundingBox())!;
   await screen.click({ position: { x: box.width / 2, y: box.height / 2 } });
-  await expect.poll(() => inputs.at(-1)).toEqual({ kind: 'tap', x: expect.closeTo(270, -0.5), y: expect.closeTo(585, -0.5) });
+  await expect.poll(() => inputs.at(-1)).toEqual({ kind: 'tap', x: expect.closeTo(270, -0.5), y: expect.closeTo(585, -1) }); // ± 2 CSS px (5 video px), as above
   expect(await overflow(page)).toBeLessThanOrEqual(0);
 });
 
