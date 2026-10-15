@@ -230,7 +230,6 @@ jobs:
     secrets: inherit
     permissions:
       "contents": "read"
-      "packages": "read"
   # Determines if we should publish/announce
   host:
     needs:

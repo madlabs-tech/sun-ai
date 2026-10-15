@@ -15,8 +15,7 @@ installers = []
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
 # Build web/dist before cargo, in every build job.
 github-build-setup = "../build-setup.yml"
-# `npm ci` in the footprint job reads @hryer/madlabs-design-system from GitHub Packages.
-github-custom-job-permissions = { "footprint" = { packages = "read", contents = "read" }, "sign-release" = { contents = "write" } }
+github-custom-job-permissions = { "footprint" = { contents = "read" }, "sign-release" = { contents = "write" } }
 # Gate: fail the release when the binary or idle RSS breaks the footprint budget (40 MB binary, 40 MB idle RSS).
 global-artifacts-jobs = ["./footprint"]
 # Sign sha256.sum after the release exists (install.sh verifies it).
