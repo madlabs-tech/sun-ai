@@ -8,7 +8,9 @@
 # Local build: put Linux musl `sun` and `sun-mod-sandbox` in dist/, then
 # `docker build -f Dockerfile -t sun-kernel dist`
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates \
+# procps-ng: the kernel reads its own RSS/CPU with `ps -o rss=,%cpu= -p`, which
+# BusyBox's ps lacks (the Hosts page then shows `? RAM · ?% CPU`).
+RUN apk add --no-cache ca-certificates procps-ng \
 	&& adduser -D -u 1000 -h /var/lib/sun sun
 # The kernel looks for the mod sandbox launcher next to its own executable.
 COPY sun sun-mod-sandbox /usr/local/bin/
