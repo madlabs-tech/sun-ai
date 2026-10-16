@@ -1163,7 +1163,7 @@ pub struct Session {
     pub pid: Option<u32>,
     /// Resident memory in bytes.
     pub rss_bytes: Option<u64>,
-    /// CPU use in percent of one core.
+    /// Lifetime-average CPU use in percent of one core.
     pub cpu_percent: Option<f32>,
 }
 

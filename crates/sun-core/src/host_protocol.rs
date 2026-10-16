@@ -733,7 +733,8 @@ pub struct SessionStats {
     pub session_id: SessionId,
     /// Resident memory of the whole process tree, in bytes.
     pub rss_bytes: u64,
-    /// CPU use of the whole tree, in percent of one core.
+    /// CPU use of the whole tree, in percent of one core: each process's
+    /// lifetime average (CPU seconds over seconds alive), summed.
     pub cpu_percent: f32,
     /// Seconds since the session started.
     pub uptime_s: u64,

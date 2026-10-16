@@ -1,6 +1,7 @@
 //! OS process helpers: the `exec` op and process-tree resource sampling.
-//! Uses the `ps` binary (Linux and macOS) because the workspace forbids
-//! `unsafe` and so direct syscalls.
+//! On Linux the sampler reads `/proc` ([`sun_core::procfs`]); elsewhere it
+//! uses the `ps` binary, since the workspace forbids `unsafe` and so direct
+//! syscalls. Both report the lifetime-average CPU (`ps %cpu`).
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -70,16 +71,49 @@ pub async fn run(mut cmd: Command, request: &ExecRequest) -> Result<ExecOutput> 
     }
 }
 
-/// One row of `ps`.
+/// One process: id, parent, resident bytes and lifetime-average CPU percent.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Proc {
     pid: u32,
     ppid: u32,
-    rss_kb: u64,
+    rss_bytes: u64,
     cpu: f32,
 }
 
-/// A snapshot of every process on the machine.
+/// A snapshot of every process on the machine (empty when unreadable).
+#[cfg(target_os = "linux")]
+pub async fn snapshot() -> Vec<Proc> {
+    tokio::task::spawn_blocking(snapshot_proc)
+        .await
+        .unwrap_or_default()
+}
+
+/// Reads `/proc/<pid>/{stat,status}` for every numeric entry of `/proc`.
+/// Kernel threads and zombies (no `VmRSS`) are skipped.
+#[cfg(target_os = "linux")]
+fn snapshot_proc() -> Vec<Proc> {
+    use sun_core::procfs;
+    let read = |path: &str| std::fs::read_to_string(path).ok();
+    let Some(uptime_s) = read("/proc/uptime").and_then(|text| procfs::parse_uptime(&text)) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(|pid| procfs::usage(pid, uptime_s, read))
+        .map(|u| Proc {
+            pid: u.pid,
+            ppid: u.ppid,
+            rss_bytes: u.rss_bytes,
+            cpu: u.cpu_percent,
+        })
+        .collect()
+}
+
+/// A snapshot of every process on the machine (empty when `ps` fails).
+#[cfg(not(target_os = "linux"))]
 pub async fn snapshot() -> Vec<Proc> {
     let Ok(output) = Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,rss=,%cpu="])
@@ -92,6 +126,8 @@ pub async fn snapshot() -> Vec<Proc> {
     parse_ps(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Parses `ps -A -o pid=,ppid=,rss=,%cpu=` (rss in KiB).
+#[cfg(any(not(target_os = "linux"), test))]
 fn parse_ps(text: &str) -> Vec<Proc> {
     text.lines()
         .filter_map(|line| {
@@ -99,7 +135,7 @@ fn parse_ps(text: &str) -> Vec<Proc> {
             Some(Proc {
                 pid: cols.next()?.parse().ok()?,
                 ppid: cols.next()?.parse().ok()?,
-                rss_kb: cols.next()?.parse().ok()?,
+                rss_bytes: cols.next()?.parse::<u64>().ok()? * 1024,
                 cpu: cols.next()?.parse().ok()?,
             })
         })
@@ -124,9 +160,8 @@ pub fn tree(procs: &[Proc], root: u32) -> Vec<Proc> {
 
 /// RSS in bytes and CPU percent summed over a process tree.
 pub fn usage(tree: &[Proc]) -> (u64, f32) {
-    tree.iter().fold((0, 0.0), |(rss, cpu), p| {
-        (rss + p.rss_kb * 1024, cpu + p.cpu)
-    })
+    tree.iter()
+        .fold((0, 0.0), |(rss, cpu), p| (rss + p.rss_bytes, cpu + p.cpu))
 }
 
 #[cfg(test)]
@@ -146,5 +181,19 @@ mod tests {
         );
         assert_eq!(usage(&tree), (600 * 1024, 15.5));
         assert!(super::tree(&procs, 999).is_empty());
+    }
+
+    /// The `/proc` sampler sees this very process, with memory, under its parent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_snapshot_includes_this_process() {
+        let procs = snapshot_proc();
+        let me = std::process::id();
+        let own = procs.iter().find(|p| p.pid == me).copied();
+        assert!(
+            own.is_some_and(|p| p.rss_bytes > 0 && p.ppid != 0),
+            "{own:?}"
+        );
+        assert_eq!(tree(&procs, me)[0].pid, me);
     }
 }

@@ -825,8 +825,10 @@ pub(crate) fn mark_started() {
 }
 
 /// `GET /api/v1/kernel`: the kernel process's own resources, apart from any
-/// agent session: `{pid, rss_bytes, cpu_percent, uptime_s}`.
-/// `rss_bytes`/`cpu_percent` are `null` where `ps` can't be read.
+/// agent session: `{pid, rss_bytes, cpu_percent, uptime_s}`. `cpu_percent`
+/// is the lifetime average (CPU seconds over seconds alive, as `ps %cpu`).
+/// `rss_bytes`/`cpu_percent` are `null` where neither `/proc` (Linux) nor
+/// `ps` (elsewhere) can be read.
 pub(crate) async fn kernel() -> Json<Value> {
     let pid = std::process::id();
     let usage = tokio::task::spawn_blocking(move || own_usage(pid))
@@ -842,7 +844,20 @@ pub(crate) async fn kernel() -> Json<Value> {
 }
 
 /// `(rss bytes, cpu %)` of process `pid` alone (not its children: with
-/// `--with-host` the sessions are children and count on the host).
+/// `--with-host` the sessions are children and count on the host), from
+/// `/proc`, so the Alpine image needs no procps `ps`.
+#[cfg(target_os = "linux")]
+fn own_usage(pid: u32) -> Option<(u64, f32)> {
+    use sun_core::procfs;
+    let read = |path: &str| std::fs::read_to_string(path).ok();
+    let uptime_s = procfs::parse_uptime(&read("/proc/uptime")?)?;
+    let usage = procfs::usage(pid, uptime_s, read)?;
+    Some((usage.rss_bytes, usage.cpu_percent))
+}
+
+/// `(rss bytes, cpu %)` of process `pid` alone (see the Linux version), via
+/// `ps`, which on macOS is the only `unsafe`-free way to read it.
+#[cfg(not(target_os = "linux"))]
 fn own_usage(pid: u32) -> Option<(u64, f32)> {
     let output = std::process::Command::new("ps")
         .args(["-o", "rss=,%cpu=", "-p", &pid.to_string()])
