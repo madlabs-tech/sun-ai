@@ -48,6 +48,15 @@ struct HoldHost {
     refuse_resume: AtomicBool,
     /// Each started session's `(resume, native id)`.
     natives: Mutex<Vec<(Option<String>, Option<String>)>>,
+    /// The done claims a finishing session sends, in order (default: one
+    /// `done`).
+    claims: Mutex<Vec<String>>,
+    /// Each host event is delivered twice (a host redelivering unacked).
+    redeliver: AtomicBool,
+    /// Hosts that are not connected now.
+    offline: Mutex<HashSet<HostId>>,
+    /// The host each session started on.
+    started_on: Mutex<Vec<HostId>>,
     alive: Arc<Mutex<HashSet<SessionId>>>,
     sink: Arc<Mutex<Option<mpsc::UnboundedSender<HostEvent>>>>,
 }
@@ -70,7 +79,7 @@ impl HostLink for HoldHost {
 
     async fn start_session(
         &self,
-        _: HostId,
+        host: HostId,
         adapter: &str,
         spec: SessionSpec,
     ) -> Result<SessionHandle> {
@@ -84,19 +93,31 @@ impl HostLink for HoldHost {
         };
         let started = (spec.resume.clone(), native_id.clone());
         self.natives.lock().unwrap().push(started);
+        self.started_on.lock().unwrap().push(host);
         self.adapters.lock().unwrap().push(adapter.to_owned());
         self.skills.lock().unwrap().push(spec.skills.clone());
         self.envelopes.lock().unwrap().push(spec.envelope);
         self.alive.lock().unwrap().insert(id);
         let (finish, alive, sink) = (self.finish.clone(), self.alive.clone(), self.sink.clone());
+        let mut claims = self.claims.lock().unwrap().clone();
+        if claims.is_empty() {
+            claims.push("done".into());
+        }
+        let copies = if self.redeliver.load(Ordering::SeqCst) {
+            2
+        } else {
+            1
+        };
         tokio::spawn(async move {
-            let send = |seq, event| {
+            let send = |seq, event: SunEvent| {
                 if let Some(sink) = sink.lock().unwrap().as_ref() {
-                    let _ = sink.send(HostEvent {
-                        session_id: id,
-                        seq,
-                        event,
-                    });
+                    for _ in 0..copies {
+                        let _ = sink.send(HostEvent {
+                            session_id: id,
+                            seq,
+                            event: event.clone(),
+                        });
+                    }
                 }
             };
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -114,11 +135,12 @@ impl HostLink for HoldHost {
             if !alive.lock().unwrap().remove(&id) {
                 return;
             }
-            let done = SunEvent::DoneClaimed {
-                summary: "done".into(),
-            };
-            send(2, done);
-            send(3, SunEvent::Exited { code: Some(0) });
+            let mut seq = 1;
+            for summary in claims {
+                seq += 1;
+                send(seq, SunEvent::DoneClaimed { summary });
+            }
+            send(seq + 1, SunEvent::Exited { code: Some(0) });
         });
         Ok(SessionHandle {
             session_id: id,
@@ -150,6 +172,10 @@ impl HostLink for HoldHost {
     async fn ack(&self, _: SessionId, _: u64) -> Result<()> {
         Ok(())
     }
+
+    fn is_online(&self, host: HostId) -> bool {
+        !self.offline.lock().unwrap().contains(&host)
+    }
 }
 
 struct Receiver<T>(mpsc::UnboundedReceiver<T>);
@@ -176,27 +202,51 @@ struct Kernel {
     queue: Queue,
     store: Store,
     host: Arc<HoldHost>,
-    /// The one enrolled host, attached to Main.
+    /// The first enrolled host, attached to Main.
     host_id: HostId,
+    /// Every enrolled host, in [`kernel_on`]'s order.
+    hosts: Vec<HostId>,
     _dir: tempfile::TempDir,
 }
 
+/// One host that reports no capabilities (so it takes anything).
 async fn kernel() -> Kernel {
+    kernel_on(&[("box", None)], sun_engine::Caps::default()).await
+}
+
+/// A kernel over `hosts` (name, and the capabilities it reports: `fake`
+/// ready with these exec env kinds, or none), each attached to Main.
+async fn kernel_on(hosts: &[(&str, Option<&[&str]>)], caps: sun_engine::Caps) -> Kernel {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
-    let host_id = HostId::generate();
+    let mut ids = Vec::new();
     let mut tx = store.begin().await.unwrap();
-    let row = Host {
-        id: host_id,
-        name: "box".into(),
-        capabilities: json!({}),
-        enrolled_by: None,
-    };
-    tx.insert_host(&row).await.unwrap();
-    tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(host_id))
-        .await
-        .unwrap();
+    for (name, envs) in hosts {
+        let capabilities = match envs {
+            None => json!({}),
+            Some(envs) => json!({
+                "os": "linux", "arch": "x86_64", "cpus": 4,
+                "runtimes": [{"adapter": "fake", "readiness":
+                    {"installed": true, "version": "1", "logged_in": true, "detail": null}}],
+                "exec_envs": envs.iter().map(|kind| json!(
+                    {"kind": kind, "ready": true, "version": "1", "detail": null}
+                )).collect::<Vec<_>>(),
+            }),
+        };
+        let row = Host {
+            id: HostId::generate(),
+            name: (*name).into(),
+            capabilities,
+            enrolled_by: None,
+        };
+        tx.insert_host(&row).await.unwrap();
+        tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(row.id))
+            .await
+            .unwrap();
+        ids.push(row.id);
+    }
     tx.commit().await.unwrap();
+    let host_id = ids[0];
     let host = Arc::new(HoldHost::default());
     let config = EngineConfig {
         host: host_id,
@@ -211,7 +261,6 @@ async fn kernel() -> Kernel {
         runtime: "fake".into(),
         host: host_id,
     };
-    let caps = Default::default();
     let (queue, _) = Queue::start(store.clone(), engine.clone(), QueueConfig { slot, caps });
     Kernel {
         engine,
@@ -219,6 +268,7 @@ async fn kernel() -> Kernel {
         store,
         host,
         host_id,
+        hosts: ids,
         _dir: dir,
     }
 }
@@ -1054,4 +1104,772 @@ async fn a_run_gets_only_its_workspaces_memory() {
     assert!(in_main.contains("Main rule"), "{in_main}");
     assert!(!in_main.contains("Ops rule"), "{in_main}");
     k.host.finish.store(true, Ordering::SeqCst);
+}
+
+// BLO-128 part 1 test pass: reply-as-comment once, wake-nobody, resume
+// gate, fresh-fallback thread bounds, preferred host, queued author.
+
+/// Long enough for anything the engine would do with an event already
+/// sent to have happened: for "and nothing else happens" checks only.
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+fn actor(name: &str) -> Option<Actor> {
+    Some(Actor {
+        member_id: None,
+        name: name.into(),
+    })
+}
+
+/// The `- who: text` lines of the thread block in a session's prompt.
+fn thread_lines(envelope: &str) -> Vec<String> {
+    const HEAD: &str = "The conversation on this task so far, oldest first:\n";
+    let Some(at) = envelope.find(HEAD) else {
+        return Vec::new();
+    };
+    let block = &envelope[at + HEAD.len()..];
+    let block = block.split("\n\n").next().unwrap_or_default();
+    block.lines().map(str::to_owned).collect()
+}
+
+impl Kernel {
+    /// The texts of the task's comments, oldest first.
+    async fn texts(&self, task: TaskId) -> Vec<String> {
+        let comments = self.comments(task).await;
+        comments
+            .iter()
+            .map(|c| c["text"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Writes a comment row straight to the task's log (no wake).
+    async fn seed(&self, task: TaskId, body: Value) {
+        use sun_core::model::ActivityKind;
+        let mut tx = self.store.begin().await.unwrap();
+        tx.append_activity(task, ActivityKind::Comment, None, body)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    /// Waits until `run`'s session has said something (its `text` event is
+    /// stored): a done claim before any output is the watchdog's to fail.
+    async fn spoke(&self, run: sun_core::RunId) {
+        use sun_store::EventLog;
+        eventually("the session's first output", || async {
+            let mut tx = self.store.read().await.unwrap();
+            let events = tx.events_after(Some(run), 0, 1000).await.unwrap();
+            events.iter().any(|e| e.kind == "text")
+        })
+        .await;
+    }
+
+    async fn say(&self, task: TaskId, who: &str, text: &str) {
+        self.engine.comment(task, text, actor(who)).await.unwrap();
+    }
+
+    /// The `n`th session's `(resumed native id, host)`.
+    fn session(&self, n: usize) -> (Option<String>, HostId) {
+        let resume = self.host.natives.lock().unwrap()[n].0.clone();
+        (resume, self.host.started_on.lock().unwrap()[n])
+    }
+
+    async fn sessions(&self, n: usize) {
+        eventually(&format!("{n} sessions"), || async {
+            self.host.envelopes().len() == n
+        })
+        .await;
+    }
+
+    fn set_online(&self, host: HostId, online: bool) {
+        let mut offline = self.host.offline.lock().unwrap();
+        if online {
+            offline.remove(&host);
+        } else {
+            offline.insert(host);
+        }
+        drop(offline);
+        self.queue.wake();
+    }
+}
+
+/// 1. A done claim is one comment however often it arrives: the host
+/// redelivers each event, the CLI claims twice, and `sun.done` races the
+/// host's own claim either way round.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_done_claim_is_one_comment_however_often_it_arrives() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    k.host.redeliver.store(true, Ordering::SeqCst);
+    *k.host.claims.lock().unwrap() = vec!["done".into(), "done, again".into()];
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    settle().await;
+    assert_eq!(k.texts(task).await, ["done"]);
+
+    // `sun.done` first, then the session's own claims (twice each).
+    k.host.finish.store(false, Ordering::SeqCst);
+    k.say(task, "user:ana", "Also fix signup").await;
+    k.until(task, TaskStatus::InProgress).await;
+    k.working(task).await;
+    let run = k.runs(task).await[1].id;
+    k.spoke(run).await;
+    let step = sun_core::StepKey::new(sun_engine::AGENT_STEP).unwrap();
+    k.engine
+        .done(run, step.clone(), "Fixed signup too.".into())
+        .await
+        .unwrap();
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    settle().await;
+    assert_eq!(
+        k.texts(task).await,
+        ["done", "Also fix signup", "Fixed signup too."]
+    );
+
+    // The session's claim first, then a late `sun.done`: refused, no comment.
+    k.say(task, "user:ana", "And the logout").await;
+    eventually("the third reply", || async {
+        k.texts(task).await.len() == 5
+    })
+    .await;
+    let run = k.runs(task).await[2].id;
+    k.spoke(run).await;
+    let late = k.engine.done(run, step, "late".into()).await;
+    assert!(late.is_err(), "{late:?}");
+    settle().await;
+    assert_eq!(
+        k.texts(task).await,
+        [
+            "done",
+            "Also fix signup",
+            "Fixed signup too.",
+            "And the logout",
+            "done"
+        ]
+    );
+    assert_eq!(k.runs(task).await.len(), 3);
+}
+
+/// 1. Empty or whitespace-only claims post nothing, on both claim paths.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_empty_or_blank_done_claim_posts_no_comment() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    *k.host.claims.lock().unwrap() = vec![" \n\t ".into()];
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    *k.host.claims.lock().unwrap() = vec![String::new()];
+    let other = k.task(ada, TaskStatus::Todo).await;
+    k.until(other, TaskStatus::NeedsYou).await;
+    settle().await;
+    assert!(k.comments(task).await.is_empty());
+    assert!(k.comments(other).await.is_empty());
+
+    // `sun.done` with a blank summary.
+    k.host.finish.store(false, Ordering::SeqCst);
+    k.say(task, "user:ana", "Go on").await;
+    k.until(task, TaskStatus::InProgress).await;
+    k.working(task).await;
+    let run = k.runs(task).await[1].id;
+    k.spoke(run).await;
+    let step = sun_core::StepKey::new(sun_engine::AGENT_STEP).unwrap();
+    k.engine.done(run, step, "   ".into()).await.unwrap();
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    settle().await;
+    assert_eq!(k.texts(task).await, ["Go on"]);
+}
+
+/// 1. A run of a workflow that is no agent's posts no comment, though its
+/// agent step claims done like any other.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_agent_workflows_done_claim_posts_no_comment() {
+    use sun_core::StateMachine;
+    let k = kernel().await;
+    let (workflow, _) = k
+        .engine
+        .save_workflow(
+            None,
+            "name: build\nsteps:\n  - id: build\n    type: agent\n    prompt: build it\n",
+        )
+        .await
+        .unwrap();
+    k.host.finish.store(true, Ordering::SeqCst);
+    let new = NewTask {
+        workspace_id: Some(WorkspaceId::MAIN),
+        title: "Build".into(),
+        body: String::new(),
+        workflow: WorkflowPick::Id(workflow.id),
+        exec_env: None,
+        priority: Priority::None,
+        status: TaskStatus::Todo,
+        project_id: None,
+        actor: None,
+    };
+    let task = k.engine.create_task(new).await.unwrap().id;
+    eventually("the run ends", || async {
+        k.runs(task)
+            .await
+            .first()
+            .is_some_and(|r| r.status.is_terminal())
+    })
+    .await;
+    assert_eq!(k.host.envelopes().len(), 1, "its agent step ran");
+    settle().await;
+    assert!(k.comments(task).await.is_empty());
+}
+
+/// 1. A claim longer than a comment may be is cut at `MAX_COMMENT` chars
+/// (not bytes) after trimming, never refused; the claim stays whole in
+/// the run's log.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_done_claim_longer_than_a_comment_is_truncated_not_rejected() {
+    use sun_core::model::TaskActivity;
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    let long = format!("\n  {}", "é".repeat(TaskActivity::MAX_COMMENT + 50));
+    *k.host.claims.lock().unwrap() = vec![long];
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    let texts = k.texts(task).await;
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].chars().count(), TaskActivity::MAX_COMMENT);
+    assert!(texts[0].chars().all(|c| c == 'é'));
+
+    // Exactly at the limit: kept whole.
+    *k.host.claims.lock().unwrap() = vec!["a".repeat(TaskActivity::MAX_COMMENT)];
+    let exact = k.task(ada, TaskStatus::Todo).await;
+    k.until(exact, TaskStatus::NeedsYou).await;
+    assert_eq!(
+        k.texts(exact).await,
+        ["a".repeat(TaskActivity::MAX_COMMENT)]
+    );
+}
+
+/// 1. Secrets in the claim are redacted in the comment like in every other
+/// activity write.
+#[tokio::test(flavor = "multi_thread")]
+async fn secrets_in_a_done_claim_are_redacted_in_its_comment() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    let token = "ghp_0123456789abcdefghijKLMNOP";
+    let claim =
+        format!("Pushed with {token}; set API_KEY=hunter2hunter2 and Bearer abcdefghijklmnopqrstu");
+    *k.host.claims.lock().unwrap() = vec![claim];
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    let text = k.texts(task).await.pop().unwrap();
+    for secret in [token, "hunter2hunter2", "abcdefghijklmnopqrstu"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+    assert!(text.starts_with("Pushed with ghp_[REDACTED]"), "{text}");
+
+    // `sun.done`'s summary goes through the same filter.
+    k.host.finish.store(false, Ordering::SeqCst);
+    k.say(task, "user:ana", "Again").await;
+    k.until(task, TaskStatus::InProgress).await;
+    k.working(task).await;
+    let run = k.runs(task).await[1].id;
+    k.spoke(run).await;
+    let step = sun_core::StepKey::new(sun_engine::AGENT_STEP).unwrap();
+    k.engine
+        .done(run, step, format!("token {token}"))
+        .await
+        .unwrap();
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    let text = k.texts(task).await.pop().unwrap();
+    assert_eq!(text, "token ghp_[REDACTED]");
+}
+
+/// 2. An agent's reply queues no run on its task and wakes no other agent,
+/// even when it names one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_reply_wakes_no_agent_anywhere() {
+    use sun_core::StateMachine;
+    let k = kernel().await;
+    let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+    k.host.finish.store(true, Ordering::SeqCst);
+    let bobs = k.task(bob, TaskStatus::Todo).await;
+    k.until(bobs, TaskStatus::NeedsYou).await;
+    *k.host.claims.lock().unwrap() = vec!["@Bob please review MAIN-1".into()];
+    let adas = k.task(ada, TaskStatus::Todo).await;
+    k.until(adas, TaskStatus::NeedsYou).await;
+    k.say(adas, "user:ana", "Thanks").await;
+    eventually("Ada's second reply", || async {
+        k.texts(adas).await.len() == 3
+    })
+    .await;
+    settle().await;
+    assert_eq!(k.runs(bobs).await.len(), 1, "Bob is not woken");
+    assert_eq!(k.runs(adas).await.len(), 2, "one run per human comment");
+    for task in [adas, bobs] {
+        assert!(k.runs(task).await.iter().all(|r| r.status.is_terminal()));
+    }
+    assert_eq!(k.host.envelopes().len(), 3);
+    let activity = k.engine.activity(adas, 0).await.unwrap();
+    assert!(activity.iter().all(|a| a.actor_member_id.is_none()));
+}
+
+/// 2. Human, agent, human, agent: one run per human comment and never two
+/// runs of the task live at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_back_and_forth_never_fans_out_to_more_than_one_run() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    // Watch the task's live runs for the whole exchange.
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let (store, peak, stop) = (k.store.clone(), peak.clone(), stop.clone());
+        tokio::spawn(async move {
+            use sun_core::StateMachine;
+            while !stop.load(Ordering::SeqCst) {
+                let runs = store
+                    .read()
+                    .await
+                    .unwrap()
+                    .runs_of_task(task)
+                    .await
+                    .unwrap();
+                let live = runs.iter().filter(|r| !r.status.is_terminal()).count();
+                peak.fetch_max(live, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+            }
+        })
+    };
+    for (i, text) in ["First question", "Second question"].iter().enumerate() {
+        k.say(task, "user:ana", text).await;
+        let want = 3 + 2 * i;
+        eventually("the reply", || async { k.texts(task).await.len() == want }).await;
+    }
+    settle().await;
+    stop.store(true, Ordering::SeqCst);
+    watcher.await.unwrap();
+    assert_eq!(
+        k.texts(task).await,
+        ["done", "First question", "done", "Second question", "done"]
+    );
+    assert_eq!(k.runs(task).await.len(), 3);
+    assert_eq!(peak.load(Ordering::SeqCst), 1);
+}
+
+/// 3. A comment-woken run whose previous run was another workflow (the task
+/// was reassigned) starts fresh, and reads the other agent's reply under
+/// its name, not "(you)". Its own next comment then resumes it (control).
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_is_refused_when_the_previous_run_was_another_workflow() {
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    // Parked, then handed to Bob: no run until someone comments.
+    k.engine
+        .move_task_manually(task, TaskStatus::Blocked, None)
+        .await
+        .unwrap();
+    let to_bob = Some(Assignee::Agent { id: bob });
+    k.engine.assign_task(task, to_bob, None).await.unwrap();
+    assert_eq!(k.runs(task).await.len(), 1);
+    k.say(task, "user:ana", "Bob, take over").await;
+    k.sessions(2).await;
+    assert_eq!(k.session(1).0, None, "Bob's session is fresh");
+    let fresh = k.host.envelopes()[1].clone();
+    assert!(fresh.contains("You are Bob."), "{fresh}");
+    assert_eq!(
+        thread_lines(&fresh),
+        ["- Ada: done", "- ana: Bob, take over"]
+    );
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.say(task, "user:ana", "Thanks Bob").await;
+    k.sessions(3).await;
+    let bobs_first = k.host.natives.lock().unwrap()[1].1.clone();
+    assert_eq!(k.session(2).0, bobs_first, "Bob's own session resumes");
+}
+
+/// 3. A comment-woken run on another runtime than the previous run's starts
+/// fresh; the next one, on the same runtime, resumes (control).
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_is_refused_when_the_previous_run_was_another_runtime() {
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    let ada = k.agent("Ada").await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    let chain = AgentFields {
+        runtime_chain: Some(vec!["fake2".into()]),
+        ..AgentFields::default()
+    };
+    k.engine.update_agent(ada, chain, "user:me").await.unwrap();
+    k.say(task, "user:ana", "On the other CLI").await;
+    k.sessions(2).await;
+    assert_eq!(*k.host.adapters.lock().unwrap(), ["fake", "fake2"]);
+    assert_eq!(k.session(1).0, None, "another runtime: fresh");
+    let fresh = k.host.envelopes()[1].clone();
+    assert!(fresh.contains("Your task: MAIN-1"), "{fresh}");
+    assert_eq!(
+        thread_lines(&fresh),
+        ["- Ada (you): done", "- ana: On the other CLI"]
+    );
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.say(task, "user:ana", "Same CLI now").await;
+    k.sessions(3).await;
+    let second = k.host.natives.lock().unwrap()[1].1.clone();
+    assert_eq!(k.session(2).0, second);
+}
+
+/// 3 and 5. Two hosts: a comment-woken run goes to the previous run's host
+/// while it has room, even when that one is busier, and resumes there;
+/// when that host is full it runs elsewhere, fresh; when it is offline,
+/// the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comment_run_prefers_its_last_host_and_resumes_only_there() {
+    let caps = sun_engine::Caps {
+        per_host: std::collections::BTreeMap::from([(
+            "*".to_owned(),
+            sun_engine::HostCap {
+                runs: Some(2),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+    let k = kernel_on(&[("a", Some(&[])), ("b", Some(&[]))], caps).await;
+    let (a, b) = (k.hosts[0], k.hosts[1]);
+    k.host.native.store(true, Ordering::SeqCst);
+    let ada = k.agent("Ada").await;
+    let (gate, _) = k
+        .engine
+        .save_workflow(
+            None,
+            "name: gate\nsteps:\n  - id: approve\n    type: approval\n    who: [role:admin]\n",
+        )
+        .await
+        .unwrap();
+    // A run that holds a slot until cancelled, on `on`.
+    let hold = |on: HostId| {
+        let k = &k;
+        async move {
+            let other = if on == a { b } else { a };
+            k.set_online(other, false);
+            let new = NewTask {
+                workspace_id: Some(WorkspaceId::MAIN),
+                title: "Hold".into(),
+                body: String::new(),
+                workflow: WorkflowPick::Id(gate.id),
+                exec_env: None,
+                priority: Priority::None,
+                status: TaskStatus::Todo,
+                project_id: None,
+                actor: None,
+            };
+            let task = k.engine.create_task(new).await.unwrap().id;
+            eventually("the hold running", || async {
+                k.runs(task)
+                    .await
+                    .first()
+                    .is_some_and(|r| r.status == RunStatus::Running)
+            })
+            .await;
+            k.set_online(other, true);
+            task
+        }
+    };
+
+    // Ada's first run lands on a.
+    k.set_online(b, false);
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.set_online(b, true);
+    assert_eq!(k.session(0), (None, a));
+
+    // a is full: the comment's run goes to b, fresh (another host).
+    let holds = [hold(a).await, hold(a).await];
+    k.say(task, "user:ana", "One").await;
+    k.sessions(2).await;
+    assert_eq!(k.session(1), (None, b));
+    let fresh = k.host.envelopes()[1].clone();
+    assert_eq!(thread_lines(&fresh), ["- Ada (you): done", "- ana: One"]);
+    k.until(task, TaskStatus::NeedsYou).await;
+
+    // a is empty, b is busier: the next comment still goes to b and resumes.
+    for held in holds {
+        k.engine
+            .move_task_manually(held, TaskStatus::Cancelled, None)
+            .await
+            .unwrap();
+    }
+    let busy_b = hold(b).await;
+    k.say(task, "user:ana", "Two").await;
+    k.sessions(3).await;
+    let on_b = k.host.natives.lock().unwrap()[1].1.clone();
+    assert!(on_b.is_some());
+    assert_eq!(k.session(2), (on_b, b), "prefers b and resumes there");
+    k.until(task, TaskStatus::NeedsYou).await;
+
+    // b is offline now: a, fresh.
+    k.engine
+        .move_task_manually(busy_b, TaskStatus::Cancelled, None)
+        .await
+        .unwrap();
+    k.set_online(b, false);
+    k.say(task, "user:ana", "Three").await;
+    k.sessions(4).await;
+    assert_eq!(k.session(3), (None, a));
+    let fresh = k.host.envelopes()[3].clone();
+    assert!(fresh.contains("Your task: MAIN-1"), "{fresh}");
+}
+
+/// 5. A container run that a comment woke goes only to a host with
+/// containers ready: not its previous run's host once that one stops
+/// reporting them, and not a bare-only host, both with room.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comment_run_needing_a_container_skips_a_preferred_host_without_one() {
+    let k = kernel_on(
+        &[
+            ("plain", Some(&[])),
+            ("docker", Some(&["container"])),
+            ("docker2", Some(&["container"])),
+        ],
+        sun_engine::Caps::default(),
+    )
+    .await;
+    let (plain, docker, docker2) = (k.hosts[0], k.hosts[1], k.hosts[2]);
+    k.host.native.store(true, Ordering::SeqCst);
+    let ada = k.agent("Ada").await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    let container: sun_core::ExecEnvSpec =
+        serde_json::from_value(json!({"kind": "container", "image": "node:22"})).unwrap();
+    k.set_online(docker2, false);
+    let new = NewTask {
+        workspace_id: Some(WorkspaceId::MAIN),
+        title: "Fix the login".into(),
+        body: String::new(),
+        workflow: WorkflowPick::Agent(ada),
+        exec_env: Some(container),
+        priority: Priority::None,
+        status: TaskStatus::Todo,
+        project_id: None,
+        actor: None,
+    };
+    let task = k.engine.create_task(new).await.unwrap().id;
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.set_online(docker2, true);
+    assert_eq!(k.session(0).1, docker, "the only host with containers");
+    // docker's container engine went away; it is online with free slots.
+    let bare_only = json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4,
+        "runtimes": [{"adapter": "fake", "readiness":
+            {"installed": true, "version": "1", "logged_in": true, "detail": null}}],
+    });
+    k.engine
+        .set_host_capabilities(docker, &bare_only)
+        .await
+        .unwrap();
+    k.say(task, "user:ana", "Again").await;
+    k.sessions(2).await;
+    let (resume, on) = k.session(1);
+    assert_ne!(on, plain, "a bare-only host never takes a container run");
+    assert_eq!((resume, on), (None, docker2));
+}
+
+/// 3. The previous run never got a session (cancelled before dispatch):
+/// the comment-woken run starts fresh with the task and the thread.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_is_refused_when_the_previous_run_had_no_session() {
+    let k = kernel_on(&[("a", Some(&[]))], sun_engine::Caps::default()).await;
+    k.host.native.store(true, Ordering::SeqCst);
+    let ada = k.agent("Ada").await;
+    k.set_online(k.host_id, false);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    eventually("a queued run", || async { k.runs(task).await.len() == 1 }).await;
+    k.engine
+        .move_task_manually(task, TaskStatus::Blocked, None)
+        .await
+        .unwrap();
+    k.until(task, TaskStatus::Blocked).await;
+    assert_eq!(k.runs(task).await[0].status, RunStatus::Cancelled);
+    k.set_online(k.host_id, true);
+    k.say(task, "user:ana", "Now please").await;
+    k.sessions(1).await;
+    assert_eq!(k.session(0).0, None);
+    let fresh = k.host.envelopes()[0].clone();
+    assert!(fresh.contains("Your task: MAIN-1"), "{fresh}");
+    assert_eq!(thread_lines(&fresh), ["- ana: Now please"]);
+    k.host.finish.store(true, Ordering::SeqCst);
+}
+
+/// 4. The fresh fallback's thread: the last 20 comments; then trimmed from
+/// the oldest end to 16k; the agent's own marked "(you)"; any `by` shape
+/// still names someone.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fresh_fallback_thread_is_bounded_and_names_everyone() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    k.host.finish.store(true, Ordering::SeqCst);
+
+    // 25 comments (+ Ada's reply + the waking one): the last 20 only.
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    for i in 1..=25 {
+        let text = format!("c{i:02}");
+        k.seed(task, json!({ "text": text, "by": "user:ana" }))
+            .await;
+    }
+    k.say(task, "user:ana", "wake").await;
+    k.sessions(2).await;
+    let lines = thread_lines(&k.host.envelopes()[1]);
+    let mut want: Vec<String> = (7..=25).map(|i| format!("- ana: c{i:02}")).collect();
+    want.push("- ana: wake".into());
+    assert_eq!(lines, want);
+    k.until(task, TaskStatus::NeedsYou).await;
+
+    // 20 comments of 1000 chars: trimmed from the oldest end to 16k.
+    let long = k.task(ada, TaskStatus::Todo).await;
+    k.until(long, TaskStatus::NeedsYou).await;
+    for i in 1..=20 {
+        let text = format!("{i:02}{}", "x".repeat(998));
+        k.seed(long, json!({ "text": text, "by": "user:ana" }))
+            .await;
+    }
+    k.say(long, "user:ana", "wake").await;
+    k.sessions(4).await;
+    let lines = thread_lines(&k.host.envelopes()[3]);
+    let size: usize = lines.iter().map(String::len).sum();
+    assert!(size <= 16_000, "{size}");
+    assert_eq!(lines.len(), 16, "15 long ones and the waking one");
+    assert!(lines[0].starts_with("- ana: 06x"), "{}", &lines[0][..12]);
+    assert_eq!(lines[15], "- ana: wake");
+    k.until(long, TaskStatus::NeedsYou).await;
+
+    // Names: the agent's own, a bare `by`, a mod actor, and no `by` at all.
+    let names = k.task(ada, TaskStatus::Todo).await;
+    k.until(names, TaskStatus::NeedsYou).await;
+    k.seed(names, json!({ "text": "plain", "by": "ana" })).await;
+    k.seed(names, json!({ "text": "beep", "by": "mod:github" }))
+        .await;
+    k.seed(names, json!({ "text": "who?" })).await;
+    k.say(names, "user:ana", "wake").await;
+    k.sessions(6).await;
+    assert_eq!(
+        thread_lines(&k.host.envelopes()[5]),
+        [
+            "- Ada (you): done",
+            "- ana: plain",
+            "- github: beep",
+            "- someone: who?",
+            "- ana: wake"
+        ]
+    );
+}
+
+/// 6. A message left for a later session says who wrote it (`- ana: text`);
+/// one without an actor has no prefix; a steer into a live session never
+/// gets one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_message_names_its_author_and_a_steer_does_not() {
+    let k = kernel_on(&[("a", Some(&[]))], sun_engine::Caps::default()).await;
+    let ada = k.agent("Ada").await;
+    k.set_online(k.host_id, false);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    eventually("a queued run", || async { k.runs(task).await.len() == 1 }).await;
+    k.say(task, "user:ana", "Use the v2 API").await;
+    k.comment(task, "From nobody").await;
+    k.say(task, "bob", "Bare name").await;
+    k.set_online(k.host_id, true);
+    k.sessions(1).await;
+    let first = k.host.envelopes()[0].clone();
+    assert!(
+        first.contains(
+            "Messages left for this step:\n- ana: Use the v2 API\n- From nobody\n- bob: Bare name"
+        ),
+        "{first}"
+    );
+    k.working(task).await;
+    k.say(task, "user:ana", "Steer me").await;
+    assert_eq!(*k.host.steers.lock().unwrap(), ["Steer me"]);
+    k.host.finish.store(true, Ordering::SeqCst);
+}
+
+/// 1. Defect probe: the claim is cut to `MAX_COMMENT` chars before the
+/// secret filter runs, so a secret straddling the cut is no longer whole
+/// (or no longer long enough) and its head is posted in clear.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "BLO-146 defect: conversation::reply truncates before redaction; a secret cut at MAX_COMMENT leaks its prefix"]
+async fn a_secret_cut_by_the_comment_limit_is_still_redacted() {
+    use sun_core::model::{SecretScope, TaskActivity};
+    let k = kernel().await;
+    let scope = SecretScope::Ecosystem(sun_core::EcosystemId::generate());
+    let secret = "S3cret-Value-0042XYZ";
+    k.engine
+        .set_secret(&scope, "deploy", secret, "user:me")
+        .await
+        .unwrap();
+    let ada = k.agent("Ada").await;
+    // The cut falls on the secret's last char, then on a token's tail.
+    let pad = "a".repeat(TaskActivity::MAX_COMMENT - secret.len() + 1);
+    let token = "ghp_0123456789abcdefghijKLMNOP";
+    // 19 of the token's chars fit: `ghp_` and a 15-char tail, too short to
+    // read as a token.
+    let pad2 = format!("{} ", "a".repeat(TaskActivity::MAX_COMMENT - 20));
+    *k.host.claims.lock().unwrap() = vec![format!("{pad}{secret}")];
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    *k.host.claims.lock().unwrap() = vec![format!("{pad2}{token}")];
+    let other = k.task(ada, TaskStatus::Todo).await;
+    k.until(other, TaskStatus::NeedsYou).await;
+    let cut_secret = k.texts(task).await.pop().unwrap();
+    let cut_token = k.texts(other).await.pop().unwrap();
+    assert!(
+        !cut_secret.contains(&secret[..secret.len() - 1]),
+        "secret head posted: …{}",
+        &cut_secret[cut_secret.len() - 24..]
+    );
+    assert!(
+        !cut_token.contains(&token[..19]),
+        "token head posted: …{}",
+        &cut_token[cut_token.len() - 24..]
+    );
+}
+
+/// 4. Defect probe: the thread's 16k budget counts bytes, not chars, so a
+/// non-ASCII thread well under 16k chars is trimmed anyway.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "BLO-146 defect: conversation::thread sums String::len (bytes) against THREAD_CHARS; non-ASCII threads are cut at ~half the stated 16k chars"]
+async fn the_thread_budget_counts_chars_not_bytes() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    // 10 comments of 1000 'é': 10k chars (20k bytes), under 16k chars.
+    for i in 0..10 {
+        let text = format!("{i}{}", "é".repeat(999));
+        k.seed(task, json!({ "text": text, "by": "user:ana" }))
+            .await;
+    }
+    k.say(task, "user:ana", "wake").await;
+    k.sessions(2).await;
+    let lines = thread_lines(&k.host.envelopes()[1]);
+    let chars: usize = lines.iter().map(|l| l.chars().count()).sum();
+    assert!(chars < 16_000, "{chars}");
+    assert_eq!(
+        lines.len(),
+        12,
+        "Ada's reply, the 10 comments, the waking one"
+    );
 }
