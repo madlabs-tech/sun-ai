@@ -12,12 +12,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, HostEvent, HostId, Readiness, SessionHandle, SessionId, SessionSpec, StopMode, TaskId,
+    EffortCatalog, Error, HostEvent, HostId, Readiness, SessionHandle, SessionId, SessionSpec,
+    StopMode, TaskId,
 };
 
 /// Protocol version sent in [`HostFrame::Hello`]. The kernel rejects a major it
 /// does not speak.
-pub const HOST_PROTOCOL_VERSION: &str = "2.0";
+pub const HOST_PROTOCOL_VERSION: &str = "2.1";
 
 /// File in the repo root that declares the design-canvas preview: the
 /// first line is the dev server command (run by the host), each later line a
@@ -79,6 +80,14 @@ pub enum HostFrame {
     /// Disk use of every task folder on the host, sent every minute.
     /// Not buffered.
     Disk(DiskUse),
+    /// A re-probe found the host's capabilities changed since its last
+    /// report (protocol 2.1). Sent only on change: every 5 min, on
+    /// [`KernelFrame::Reprobe`] and after a session ends on an auth error.
+    /// Not buffered: the next `hello` re-probes anyway.
+    Capabilities {
+        /// Everything the host can run now; replaces the `hello` report.
+        capabilities: Capabilities,
+    },
     /// The answer to one kernel request.
     Reply {
         /// The request's `id`.
@@ -294,6 +303,14 @@ pub enum KernelFrame {
         /// The task.
         task_id: TaskId,
     },
+    /// Probe every runtime again now ("Check again"; protocol 2.1). The host
+    /// sends [`HostFrame::Capabilities`] first when anything changed, then
+    /// [`ReplyBody::Done`].
+    #[serde(rename = "reprobe")]
+    Reprobe {
+        /// Request id.
+        id: u64,
+    },
 }
 
 string_enum! {
@@ -463,7 +480,8 @@ pub struct ExecOutput {
     pub timed_out: bool,
 }
 
-/// What a host can run, sent in [`HostFrame::Hello`].
+/// What a host can run, sent in [`HostFrame::Hello`] and
+/// [`HostFrame::Capabilities`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     /// `std::env::consts::OS`, e.g. `macos`, `linux`.
@@ -752,6 +770,10 @@ pub struct RuntimeCapability {
     pub adapter: String,
     /// Its readiness check.
     pub readiness: Readiness,
+    /// The effort levels the CLI offers, tool-wide and per model
+    /// (`effort_options`, `models`). Absent from older hosts (= none).
+    #[serde(flatten)]
+    pub effort: EffortCatalog,
 }
 
 /// Resource use of a session's process tree.
@@ -876,7 +898,71 @@ impl ReplyBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SunEvent;
+    use crate::{EffortLevel, ModelEffort, SunEvent};
+
+    #[test]
+    fn reprobe_and_capabilities_frames_carry_the_effort_catalog() {
+        let reprobe = KernelFrame::Reprobe { id: 3 };
+        let json = serde_json::to_value(&reprobe).unwrap();
+        assert_eq!(json, serde_json::json!({"type": "reprobe", "id": 3}));
+        assert_eq!(
+            serde_json::from_value::<KernelFrame>(json).unwrap(),
+            reprobe
+        );
+
+        let high = EffortLevel {
+            value: "high".into(),
+            label: "High".into(),
+            description: None,
+        };
+        let runtime = RuntimeCapability {
+            adapter: "codex".into(),
+            readiness: Readiness {
+                installed: true,
+                version: Some("0.160.0".into()),
+                logged_in: true,
+                detail: None,
+            },
+            effort: EffortCatalog {
+                effort_options: vec![high.clone()],
+                models: vec![ModelEffort {
+                    id: "gpt-5-codex".into(),
+                    label: "GPT-5 Codex".into(),
+                    effort_options: vec![high],
+                    default_effort: Some("high".into()),
+                }],
+            },
+        };
+        let frame = HostFrame::Capabilities {
+            capabilities: Capabilities {
+                os: "linux".into(),
+                arch: "x86_64".into(),
+                cpus: 2,
+                runtimes: vec![runtime],
+                devices: DeviceCapabilities::default(),
+                exec_envs: Vec::new(),
+            },
+        };
+        let json = serde_json::to_value(&frame).unwrap();
+        assert_eq!(json["type"], "capabilities");
+        // Flat on the runtime, next to `readiness`.
+        let runtime = &json["capabilities"]["runtimes"][0];
+        assert_eq!(
+            runtime["effort_options"][0],
+            serde_json::json!({"value": "high", "label": "High"})
+        );
+        assert_eq!(runtime["models"][0]["id"], "gpt-5-codex");
+        assert_eq!(runtime["models"][0]["default_effort"], "high");
+        assert_eq!(serde_json::from_value::<HostFrame>(json).unwrap(), frame);
+
+        // A 2.0 host reports no effort: it still parses, with none.
+        let old: RuntimeCapability = serde_json::from_value(serde_json::json!({
+            "adapter": "claude-code",
+            "readiness": {"installed": true, "version": "2.1.291", "logged_in": false, "detail": null}
+        }))
+        .unwrap();
+        assert_eq!(old.effort, EffortCatalog::default());
+    }
 
     #[test]
     fn frames_are_tagged_snake_case_and_round_trip() {

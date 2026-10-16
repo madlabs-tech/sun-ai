@@ -98,7 +98,11 @@ async fn device_view_relays_screens_and_input_through_the_host() {
     let (video_stops, video_stopped) = tokio::sync::watch::channel(false);
     let mut streams = std::collections::HashSet::new();
     tokio::spawn(async move {
-        while let Some(Ok(Message::Text(text))) = host.next().await {
+        while let Some(Ok(message)) = host.next().await {
+            // The kernel's liveness pings are answered by tungstenite.
+            let Message::Text(text) = message else {
+                continue;
+            };
             let frame: Value = serde_json::from_str(&text).unwrap();
             let body = match frame["type"].as_str().unwrap() {
                 "device.video" if *video_stopped.borrow() => {

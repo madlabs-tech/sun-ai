@@ -220,6 +220,17 @@ const FAKE_CLAUDE: &str = r#"#!/bin/sh
 case "$1" in
   --version) echo "2.1.291 (Claude Code)"; exit 0 ;;
   auth) echo '{"loggedIn": true, "authMethod": "claude.ai"}'; exit 0 ;;
+  --help) cat <<'HELP'
+  --disallowedTools, --disallowed-tools <tools...>
+      Comma or space-separated list of tool names to deny (e.g. "Bash(git *)
+      Edit")
+  --effort <level>                      Effort level for the current session
+                                        (low, medium, high, xhigh, max)
+  --environment <environment_id>        Create a new cloud session that runs on
+                                        the given self-hosted environment
+                                        (ccpool_...).
+HELP
+  exit 0 ;;
 esac
 echo "$@" > "$SUN_OUT.args"
 read -r first
@@ -497,6 +508,40 @@ async fn readiness_reports_version_and_login() {
             .unwrap()
             .contains("npm install -g @anthropic-ai/claude-code")
     );
+}
+
+/// The effort probe reads `claude --help` (the excerpt in [`FAKE_CLAUDE`] is
+/// Claude Code 2.1.300's): one tool-wide list, no per-model scoping.
+#[tokio::test]
+async fn effort_comes_from_the_help_of_the_installed_cli() {
+    let dir = sandbox("effort");
+    let host = HostCtx {
+        host_id: HostId::generate(),
+    };
+    let catalog = ClaudeCode::new(dir.join("claude")).effort(&host).await;
+    let levels: Vec<(&str, &str)> = catalog
+        .effort_options
+        .iter()
+        .map(|l| (l.value.as_str(), l.label.as_str()))
+        .collect();
+    assert_eq!(
+        levels,
+        [
+            ("low", "Low"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("xhigh", "Extra high"),
+            ("max", "Max")
+        ]
+    );
+    assert!(catalog.models.is_empty());
+
+    // Older CLI without the flag, a mention elsewhere, no CLI at all: none.
+    let parse = sun_runtime::claude::parse_effort_help;
+    assert!(parse("  --model <model>  Model for the session (sonnet, opus)\n").is_empty());
+    assert!(parse("  --fast  Faster; same as --effort low (deprecated)\n").is_empty());
+    let missing = ClaudeCode::new(dir.join("not-there")).effort(&host).await;
+    assert_eq!(missing, sun_core::EffortCatalog::default());
 }
 
 #[test]

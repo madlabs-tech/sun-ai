@@ -51,6 +51,11 @@ const TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
 const MAX_FRAME: usize = 16 * 1024 * 1024;
 /// Buffered host events per `events()` subscriber before the reader waits.
 const EVENT_BUFFER: usize = 1024;
+/// How often the kernel pings each host connection.
+pub(crate) const PING_EVERY: Duration = Duration::from_secs(10);
+/// A host connection silent this long (no frame, no pong) is dropped and
+/// the host shows offline.
+pub(crate) const LIVENESS: Duration = Duration::from_secs(30);
 
 /// Live connections of every host (**Adapter** for `HostLink`). Cheap to
 /// clone; create it before the engine and give the same hub to both the
@@ -98,6 +103,8 @@ pub(crate) enum Enrols {
 struct Conn {
     generation: u64,
     out: mpsc::UnboundedSender<KernelFrame>,
+    /// The host speaks protocol 2.1+ (`reprobe`, `capabilities`).
+    reprobes: bool,
 }
 
 impl HostHub {
@@ -138,12 +145,24 @@ impl HostHub {
             .map(|(_, enrols)| enrols)
     }
 
-    fn attach(&self, host: HostId, out: mpsc::UnboundedSender<KernelFrame>) -> u64 {
+    fn attach(&self, host: HostId, out: mpsc::UnboundedSender<KernelFrame>, protocol: &str) -> u64 {
         let mut state = self.state();
         state.generation += 1;
         let generation = state.generation;
+        let minor = protocol
+            .split('.')
+            .nth(1)
+            .and_then(|m| m.parse::<u32>().ok());
+        let reprobes = minor.is_some_and(|m| m >= 1);
         // The newest connection wins; dropping the old sender ends its writer.
-        state.conns.insert(host, Conn { generation, out });
+        state.conns.insert(
+            host,
+            Conn {
+                generation,
+                out,
+                reprobes,
+            },
+        );
         state.last_seen.insert(host, chrono::Utc::now());
         generation
     }
@@ -217,6 +236,26 @@ impl HostHub {
                 self.state().pending.remove(&id);
                 Err(Error::Unavailable(format!("host {host} did not answer")))
             }
+        }
+    }
+
+    /// Has `host` probe its runtimes again now and waits until it did; a
+    /// change arrives (and is stored) before the reply.
+    pub(crate) async fn reprobe(&self, host: HostId) -> Result<()> {
+        let reprobes = self.state().conns.get(&host).map(|c| c.reprobes);
+        match reprobes {
+            None => Err(Error::Unavailable(format!("host {host} is offline"))),
+            Some(false) => Err(Error::Unavailable(
+                "this host's sun is too old to check again; update it, or restart it to re-probe"
+                    .into(),
+            )),
+            Some(true) => match self
+                .request(host, REPLY, |id| KernelFrame::Reprobe { id })
+                .await?
+            {
+                ReplyBody::Done => Ok(()),
+                other => Err(unexpected(other)),
+            },
         }
     }
 
@@ -473,24 +512,29 @@ async fn upgrade(State(api): State<Api>, ws: WebSocketUpgrade) -> Response {
         .on_upgrade(move |socket| connection(api, socket))
 }
 
-/// The next host frame; `None` on close, error or a frame that does not parse.
+/// The next host frame; `None` on close, error, a frame that does not
+/// parse, or `idle` without any message (a pong counts: the host is there).
 async fn next_frame(
     socket: &mut futures_util::stream::SplitStream<WebSocket>,
+    idle: Duration,
 ) -> Option<HostFrame> {
-    while let Some(message) = socket.next().await {
-        match message.ok()? {
+    loop {
+        match tokio::time::timeout(idle, socket.next())
+            .await
+            .ok()??
+            .ok()?
+        {
             Message::Text(text) => return serde_json::from_str(text.as_str()).ok(),
             Message::Close(_) => return None,
-            // Binary is ignored (protocol); ping/pong are answered by axum.
+            // Binary is ignored (protocol); pings are answered by axum.
             _ => {}
         }
     }
-    None
 }
 
 async fn connection(api: Api, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
-    let first = tokio::time::timeout(FIRST_FRAME, next_frame(&mut stream)).await;
+    let first = tokio::time::timeout(FIRST_FRAME, next_frame(&mut stream, FIRST_FRAME)).await;
     match first {
         Ok(Some(HostFrame::Enroll { token, name })) => {
             if let Some(frame) = enroll(&api, &token, &name).await {
@@ -546,19 +590,30 @@ async fn connection(api: Api, socket: WebSocket) {
                     state.sessions.insert(*session, host_id);
                 }
             }
-            let generation = hub.attach(host_id, out);
+            let generation = hub.attach(host_id, out, &protocol);
             // A host that joins (or comes back) may take queued work.
             api.queue.wake();
+            let (ping_every, liveness) = api.host_liveness;
             let writer = tokio::spawn(async move {
-                while let Some(frame) = outgoing.recv().await {
-                    if sink.send(text(&frame)).await.is_err() {
+                let first = tokio::time::Instant::now() + ping_every;
+                let mut ping = tokio::time::interval_at(first, ping_every);
+                loop {
+                    let message = tokio::select! {
+                        frame = outgoing.recv() => match frame {
+                            Some(frame) => text(&frame),
+                            // Replaced by a newer connection of the same host.
+                            None => break,
+                        },
+                        _ = ping.tick() => Message::Ping(Default::default()),
+                    };
+                    if sink.send(message).await.is_err() {
                         return;
                     }
                 }
-                // Replaced by a newer connection of the same host.
                 let _ = sink.close().await;
             });
-            while let Some(frame) = next_frame(&mut stream).await {
+            // A host that stops answering pings is dropped: offline.
+            while let Some(frame) = next_frame(&mut stream, liveness).await {
                 hub.state().last_seen.insert(host_id, chrono::Utc::now());
                 match frame {
                     HostFrame::Event(event) => {
@@ -572,6 +627,18 @@ async fn connection(api: Api, socket: WebSocket) {
                     }
                     HostFrame::Disk(disk) => {
                         hub.state().disk.insert(host_id, disk.tasks);
+                    }
+                    // A re-probe saw a change: a login, a logout, a new CLI.
+                    // Stored as `hello`'s are; effort tokens are the host's
+                    // report, checked again where an agent picks one.
+                    HostFrame::Capabilities { capabilities } => {
+                        if let Ok(capabilities) = serde_json::to_value(&capabilities) {
+                            let _ = api
+                                .engine
+                                .set_host_capabilities(host_id, &capabilities)
+                                .await;
+                        }
+                        api.queue.wake();
                     }
                     HostFrame::Reply { id, body } => {
                         let waiting = hub.state().pending.remove(&id);
@@ -741,6 +808,25 @@ pub(crate) async fn detach_host(
     api.engine
         .detach_from_workspace(workspace, item, &caller.actor())
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/v1/workspaces/{id}/hosts/{host}/reprobe` (`manage_runtimes`
+/// there): "Check again". The host re-probes its runtimes now; 204 once it
+/// did, with any change already stored, so the next `GET /hosts` or
+/// `GET /runtimes` shows it. 404 when the host isn't attached there, 503 when
+/// it is offline or its sun predates re-probing.
+pub(crate) async fn reprobe_host(
+    State(api): State<Api>,
+    axum::extract::Path((workspace, host)): axum::extract::Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let workspace = crate::routes::id(&workspace, "workspace")?;
+    let host = crate::routes::id::<HostId>(&host, "host")?;
+    let item = sun_engine::WorkspaceItem::Host(host);
+    if !api.engine.workspaces_of(item).await?.contains(&workspace) {
+        return Err(Error::NotFound(format!("host {host}")).into());
+    }
+    api.hosts.reprobe(host).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

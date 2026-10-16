@@ -2345,21 +2345,170 @@ async fn device_screenshots_are_served_only_for_their_run() {
 /// Serves `k`, connects a scripted host (`hello`, with `capabilities`
 /// fields merged in) and waits until it is online.
 async fn scripted_host(k: &common::Kernel, capabilities: Value) -> Socket {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}/host", listener.local_addr().unwrap());
-    tokio::spawn(axum::serve(listener, k.app.clone()).into_future());
+    let mut hello = kernel_host_hello(k);
+    for (field, value) in capabilities.as_object().unwrap() {
+        hello["capabilities"][field] = value.clone();
+    }
+    connect_host(&k.app, k.host, hello).await
+}
+
+/// A protocol 2.0 `hello` of `k`'s own host, with its real key.
+fn kernel_host_hello(k: &common::Kernel) -> Value {
     let key: String = Sha256::digest(format!("{SECRET}:{}", k.host).as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    let mut hello = hello(k.host, &key);
-    for (field, value) in capabilities.as_object().unwrap() {
-        hello["capabilities"][field] = value.clone();
+    hello(k.host, &key)
+}
+
+/// Serves `app`, connects as `host` with `hello` and waits until it is online.
+async fn connect_host(app: &Router, host: HostId, hello: Value) -> Socket {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/host", listener.local_addr().unwrap());
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    send(&mut socket, hello).await;
+    until_online(app, host).await;
+    socket
+}
+
+/// The `fake` runtime's status in `GET /runtimes`.
+async fn fake_runtime_status(app: &Router) -> Value {
+    let (_, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
+    let fake = runtimes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["adapter"] == "fake");
+    fake.unwrap()["status"].clone()
+}
+
+/// The `fake` runtime of a `hello`/`capabilities` report.
+fn fake_runtime(logged_in: bool) -> Value {
+    json!([{ "adapter": "fake", "effort_options": [], "models": [],
+        "readiness": { "installed": true, "version": "1", "logged_in": logged_in,
+            "detail": if logged_in { Value::Null } else { json!("Fake is not logged in. Run: fake login") } } }])
+}
+
+#[tokio::test]
+async fn a_login_after_hello_shows_after_one_reprobe() {
+    let k = kernel().await;
+    let app = &k.app;
+    let mut hello = kernel_host_hello(&k);
+    hello["protocol"] = json!("2.1");
+    hello["capabilities"]["runtimes"] = fake_runtime(false);
+    let mut host = connect_host(app, k.host, hello.clone()).await;
+    assert_eq!(fake_runtime_status(app).await, "offline", "needs login");
+
+    // `fake login` on the machine; "Check again" asks the host to re-probe.
+    let main = "00000000000000000000000001";
+    let path = format!("/api/v1/workspaces/{main}/hosts/{}/reprobe", k.host);
+    let check = tokio::spawn({
+        let app = app.clone();
+        async move { call(&app, "POST", &path, None).await }
+    });
+    let frame = recv(&mut host).await.unwrap();
+    assert_eq!(frame["type"], "reprobe");
+    let mut capabilities = hello["capabilities"].clone();
+    capabilities["runtimes"] = fake_runtime(true);
+    send(
+        &mut host,
+        json!({ "type": "capabilities", "capabilities": capabilities }),
+    )
+    .await;
+    send(
+        &mut host,
+        json!({ "type": "reply", "id": frame["id"], "body": { "kind": "done" } }),
+    )
+    .await;
+    let (status, _) = check.await.unwrap();
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    // Stored before the 204: no polling needed.
+    assert_eq!(fake_runtime_status(app).await, "ready");
+
+    // A logout seen by the 5-min re-probe arrives unasked.
+    capabilities["runtimes"] = fake_runtime(false);
+    send(
+        &mut host,
+        json!({ "type": "capabilities", "capabilities": capabilities }),
+    )
+    .await;
+    let mut status = Value::Null;
+    for _ in 0..200 {
+        status = fake_runtime_status(app).await;
+        if status == "offline" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let (mut host, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
-    send(&mut host, hello).await;
-    until_online(&k.app, k.host).await;
-    host
+    assert_eq!(status, "offline");
+
+    // Not attached to that workspace (or no such host): 404, nothing sent.
+    let elsewhere = format!(
+        "/api/v1/workspaces/{main}/hosts/{}/reprobe",
+        HostId::generate()
+    );
+    assert_eq!(
+        call(app, "POST", &elsewhere, None).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_2_0_host_without_effort_or_reprobe_still_connects() {
+    let k = kernel().await;
+    let app = &k.app;
+    // `hello` as 2.0 hosts send it: no `effort_options` or `models`.
+    let _host = scripted_host(&k, json!({})).await;
+    assert_eq!(fake_runtime_status(app).await, "ready");
+    let main = "00000000000000000000000001";
+    let path = format!("/api/v1/workspaces/{main}/hosts/{}/reprobe", k.host);
+    // It wouldn't understand `reprobe`: refused at once, not a 30 s wait.
+    let (status, body) = call(app, "POST", &path, None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert!(body.to_string().contains("too old"), "{body}");
+}
+
+#[tokio::test]
+async fn a_host_that_stops_answering_pings_goes_offline() {
+    let k = kernel().await;
+    let app = sun_api::router(
+        k.api
+            .clone()
+            .with_host_liveness(Duration::from_millis(50), Duration::from_millis(300)),
+    );
+    let mut host = connect_host(&app, k.host, kernel_host_hello(&k)).await;
+    let status = |app: Router, host: HostId| async move {
+        let (_, hosts) = call(&app, "GET", "/api/v1/hosts", None).await;
+        let row = hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == json!(host))
+            .cloned();
+        row.unwrap()["status"].clone()
+    };
+
+    // Polled, the socket answers pings: online well past the 300 ms limit.
+    let drained = tokio::time::timeout(Duration::from_millis(900), async {
+        while let Some(Ok(_)) = host.next().await {}
+    })
+    .await;
+    assert!(drained.is_err(), "the kernel kept the connection");
+    assert_eq!(status(app.clone(), k.host).await, "online");
+
+    // Then a half-open socket: still connected, never read, no pongs.
+    let started = std::time::Instant::now();
+    let mut presence = Value::Null;
+    while started.elapsed() < Duration::from_secs(60) {
+        presence = status(app.clone(), k.host).await;
+        if presence == "offline" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(presence, "offline", "after {:?}", started.elapsed());
+    drop(host);
 }
 
 /// Plays the host's side of starting an agent session in `path`; the

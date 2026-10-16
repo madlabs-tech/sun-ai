@@ -328,6 +328,18 @@ async fn readiness_needs_no_login() {
     );
 }
 
+/// OpenCode's effort is a per-provider `--variant` that Sun doesn't pass
+/// yet: the probe offers none, so the picker greys out.
+#[tokio::test]
+async fn effort_offers_none() {
+    let dir = sandbox("opencode", FAKE_OPENCODE, "effort");
+    let host = HostCtx {
+        host_id: HostId::generate(),
+    };
+    let catalog = OpenCode::new(dir.join("opencode")).effort(&host).await;
+    assert_eq!(catalog, sun_core::EffortCatalog::default());
+}
+
 /// Loads an old session: replays its history, then answers the load.
 const FAKE_OPENCODE_LOAD: &str = r#"#!/bin/sh
 [ "$1" = --version ] && exit 0
