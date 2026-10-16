@@ -82,6 +82,8 @@ struct HubState {
     stats: HashMap<SessionId, (SessionStats, Instant)>,
     /// The run step each session started here works for (`session.start`).
     steps: HashMap<SessionId, (RunId, StepKey)>,
+    /// The adapter each session started here runs (`session.start`).
+    adapters: HashMap<SessionId, String>,
     /// Bytes per task folder, from each host's latest `disk` frame.
     disk: HashMap<HostId, Vec<(TaskId, u64)>>,
     last_seen: HashMap<HostId, Timestamp>,
@@ -208,6 +210,32 @@ impl HostHub {
         self.state().conns.keys().copied().collect()
     }
 
+    /// When `host` was last heard from (`None`: not since the kernel started).
+    pub(crate) fn last_seen(&self, host: HostId) -> Option<Timestamp> {
+        self.state().last_seen.get(&host).copied()
+    }
+
+    /// Live sessions per `(host, adapter)`: those started here whose stats
+    /// are fresh, as `GET /hosts` counts them. A session the kernel learned
+    /// only from a `hello` (after a restart) has no known adapter and is
+    /// not counted.
+    pub(crate) fn active_sessions(&self) -> HashMap<(HostId, String), u32> {
+        let state = self.state();
+        let now = Instant::now();
+        let mut active = HashMap::new();
+        for (session, (_, at)) in &state.stats {
+            if now.duration_since(*at) >= STATS_FRESH {
+                continue;
+            }
+            if let (Some(host), Some(adapter)) =
+                (state.sessions.get(session), state.adapters.get(session))
+            {
+                *active.entry((*host, adapter.clone())).or_default() += 1;
+            }
+        }
+        active
+    }
+
     /// Sends one request to `host` and waits up to `wait` for its reply.
     pub(crate) async fn request(
         &self,
@@ -287,6 +315,7 @@ impl HostLink for HostHub {
             state.sessions.insert(spec.session_id, host);
             let step = (spec.run_id, spec.step_key.clone());
             state.steps.insert(spec.session_id, step);
+            state.adapters.insert(spec.session_id, adapter.to_string());
         }
         let adapter = adapter.to_string();
         match self
@@ -1105,21 +1134,38 @@ pub(crate) async fn online_adapters(
     Ok(seen)
 }
 
-/// `GET /api/v1/runtimes?workspace=`: one entry per adapter any host
-/// reported (`ready` when an online host has it installed and logged in,
-/// `workspace_id` null: every workspace's chains may name it), then the
-/// workspace's stored `byo_key` runtimes with their `config` and `credits`
-/// runtimes with their `model` (`ready` per [`readiness`]). Only a
-/// deployment owner may leave out `?workspace=` (every workspace's rows).
-// ponytail: byo_runtime entries are derived from host capabilities, not rows;
-// cooldowns and session counts come with the runtime repo.
+/// Query of `GET /runtimes`: `?workspace=` and `?model=v1|v2` (default v2).
+#[derive(serde::Deserialize)]
+pub(crate) struct RuntimesQuery {
+    workspace: Option<String>,
+    model: Option<String>,
+}
+
+/// `GET /api/v1/runtimes?workspace=[&model=v1]`: one entry per `(host,
+/// tool)` with an honest `state` ([`crate::runtime_list`]). `model=v1` is
+/// the old per-adapter list, unchanged, for one release. Only a deployment
+/// owner may leave out `?workspace=` (every workspace's rows).
 pub(crate) async fn list_runtimes(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,
-    axum::extract::Query(query): axum::extract::Query<InWorkspace>,
+    axum::extract::Query(query): axum::extract::Query<RuntimesQuery>,
 ) -> ApiResult<Json<Vec<Value>>> {
     let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
-    let online = online_adapters(&api, workspace).await?;
+    match query.model.as_deref() {
+        None | Some("v2") => Ok(Json(crate::runtime_list::list(&api, workspace).await?)),
+        Some("v1") => legacy_runtimes(&api, workspace).await.map(Json),
+        Some(_) => Err(ApiError::invalid("model: v1 or v2.")),
+    }
+}
+
+/// The `v1` list: one entry per adapter any host reported (`ready` when an
+/// online host has it installed and logged in, `workspace_id` null: every
+/// workspace's chains may name it), then the workspace's stored `byo_key`
+/// runtimes with their `config` and `credits` runtimes with their `model`
+/// (`ready` per [`readiness`]).
+// ponytail: deprecated with `?model=v1`; delete one release after v2.
+async fn legacy_runtimes(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult<Vec<Value>> {
+    let online = online_adapters(api, workspace).await?;
     let modes: BTreeMap<String, String> =
         api.engine.permission_modes().await?.into_iter().collect();
     let view = |name: &str, adapter: &str, source: &str, ready: bool, config: Option<&ByoKey>| {
@@ -1141,7 +1187,7 @@ pub(crate) async fn list_runtimes(
         if runtime.source == RuntimeSource::ByoRuntime {
             continue;
         }
-        let ready = runtime_readiness(&api, &runtime, &online).await?;
+        let ready = runtime_readiness(api, &runtime, &online).await?;
         let ok = ready.installed && ready.logged_in;
         let source = runtime.source.as_str();
         let config = runtime.byo_key.as_ref();
@@ -1152,7 +1198,7 @@ pub(crate) async fn list_runtimes(
         }
         views.push(entry);
     }
-    Ok(Json(views))
+    Ok(views)
 }
 
 /// Body of `POST /runtimes` and `PUT /runtimes/{id}`. `config` is
@@ -1334,7 +1380,7 @@ pub(crate) async fn readiness_of(
 /// is logged in (byo_runtime), or the config is valid and its key secret is
 /// stored (byo_key; the endpoint itself is not called). `detail` says what
 /// to fix.
-async fn runtime_readiness(
+pub(crate) async fn runtime_readiness(
     api: &Api,
     runtime: &Runtime,
     online: &BTreeMap<String, (bool, bool)>,

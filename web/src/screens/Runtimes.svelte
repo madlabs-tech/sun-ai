@@ -1,5 +1,6 @@
-<!-- Runtimes: the open workspace's, with readiness per agent CLI and, for deployment owners, the permission mode
-     every new session of a host's CLI gets (PUT /runtimes/{id}/policy, audited). Bypass needs a second click.
+<!-- Runtimes: one row per (host, CLI) with an honest state (TRD §6 copy: badge, one line, one action; "Check again"
+     asks that host to re-probe), and, for deployment owners, the permission mode every new session of a CLI gets
+     on every host (PUT /runtimes/{tool}/policy, audited). Bypass needs a second click.
      With manage_runtimes, "Add runtime" stores a BYO key runtime: a provider key (OpenAI-compatible, Anthropic
      or Google) run through OpenCode, Claude Code or Codex; its key is a secret of the workspace picked by name
      (POST /runtimes), and "Check" shows its readiness. With Sun Cloud connected it can also add a runtime paid
@@ -19,18 +20,29 @@
     type Readiness,
     type Runtime,
     type RuntimeSource,
-    type RuntimeStatus,
+    type RuntimeState,
     type RuntimeUsage,
   } from '../lib/api/types';
   import { can, current_workspace, error_text, is_owner, toast } from '../lib/app_state.svelte';
-  import { SOURCE_LABEL, clock, money, tokens } from '../lib/format';
+  import { SOURCE_LABEL, clock, money, tokens, tool_label } from '../lib/format';
 
-  const STATUS: Record<RuntimeStatus, ['success' | 'info' | 'warning' | 'neutral', string]> = {
-    ready: ['success', 'Ready'],
+  type Tone = 'success' | 'info' | 'warning' | 'neutral';
+  /** The badge per state (TRD §6). Busy also shows its load. */
+  const STATE: Record<RuntimeState, [Tone, string]> = {
+    offline: ['neutral', 'Host offline'],
+    needs_login: ['warning', 'Needs login'],
+    limited: ['warning', 'Limit reached'],
+    unsupported: ['neutral', 'Not supported yet'],
     busy: ['info', 'Busy'],
-    cooling_down: ['warning', 'Cooling down'],
-    offline: ['neutral', 'Offline'],
+    idle: ['success', 'Ready'],
   };
+  const badge = (r: Runtime): [Tone, string] =>
+    r.state === 'busy' && r.load ? ['info', `Busy ${r.load.active}${r.load.max === null ? '' : '/' + r.load.max}`] : STATE[r.state];
+  /** The command in the API's "Run `<command>` on <host>". */
+  const login_command = (r: Runtime) => /`([^`]+)`/.exec(r.detail ?? '')?.[1] ?? null;
+  const SUPPORT_URL = 'https://github.com/madlabs-tech/sun-ai/issues/new';
+  const support_url = (r: Runtime) =>
+    `${SUPPORT_URL}?title=${encodeURIComponent(`Support ${r.tool} ${r.version ?? ''}`.trim())}`;
   const MODE: Record<PermissionMode, [string, string]> = {
     default: ['Ask first', 'Asks before edits and commands; unattended sessions get no answer.'],
     accept_edits: ['Edit files', 'Edits files freely; runs only the allowed commands.'],
@@ -64,8 +76,8 @@
   async function save(r: Runtime, mode: PermissionMode) {
     saving = true;
     try {
-      await api.set_runtime_policy(r.id, mode);
-      toast('success', `${r.name}: ${MODE[mode][0].toLowerCase()}`, 'New sessions get it; running ones keep theirs.');
+      await api.set_runtime_policy(r.tool, mode);
+      toast('success', `${tool_label(r.tool)}: ${MODE[mode][0].toLowerCase()}`, 'New sessions get it on every host; running ones keep theirs.');
     } catch (e) {
       toast('danger', 'Permission mode not changed', error_text(e));
     }
@@ -161,6 +173,32 @@
     creating = false;
   }
 
+  // Check again: the host re-probes its CLIs; the kernel answers once any change is stored. A host that
+  // takes longer than 10 s counts as "No change" (its report still lands on the next refresh).
+  const CHECK_WAIT_MS = 10_000;
+  let rechecking = $state<Record<string, boolean>>({});
+  const seen = (r: Runtime | undefined) => (r ? `${r.state}|${r.availability}|${r.detail}` : '');
+
+  async function check_again(r: Runtime) {
+    if (!r.host) return;
+    rechecking[r.id] = true;
+    const waited = new Promise<'waited'>((done) => setTimeout(() => done('waited'), CHECK_WAIT_MS));
+    try {
+      await Promise.race([api.reprobe_host(workspace, r.host.id), waited]);
+      const rows = await list();
+      load = Promise.resolve(rows);
+      const now = rows.find((x) => x.id === r.id);
+      if (seen(now) === seen(r)) toast('info', 'No change', `${tool_label(r.tool)} on ${r.host.name} reports the same as before.`);
+      else toast('success', `${tool_label(r.tool)} on ${r.host.name}: ${now ? STATE[now.state][1].toLowerCase() : 'gone'}`);
+    } catch (err) {
+      toast('danger', `${r.host.name} not checked`, error_text(err));
+    }
+    rechecking[r.id] = false;
+  }
+
+  /** "How to restart the host": the host whose steps are open. */
+  let restarting = $state<Runtime | null>(null);
+
   // Check: what the kernel can verify without starting a session.
   let checks = $state<Record<string, Readiness | null>>({});
 
@@ -189,34 +227,54 @@
 <div class="sun-page">
   <Loaded {load} empty="No runtimes yet. Install Claude Code, Codex or OpenCode on a host.">
     {#snippet row(r: Runtime)}
-      {@const [tone, label] = STATUS[r.status]}
+      {@const [tone, label] = badge(r)}
       {@const ready = checks[r.id]}
-      <article class="sun-row runtime" aria-label={r.name}>
+      {@const u = usage[r.name]}
+      <article class="sun-row runtime" aria-label={r.host ? `${tool_label(r.tool)} on ${r.host.name}` : r.name}>
         <span class="sun-tile"><Icon name={r.config ? 'key-round' : r.source === 'credits' ? 'coins' : 'cpu'} size={18} /></span>
         <div class="sun-row__body">
           <div class="sun-row__title">
-            {r.name}<span class="ml-mono" style="font-size:11px;color:var(--fg-3)">{r.adapter}</span>
-            <Badge {tone} dot live={r.status === 'busy'}>{label}</Badge>
-          </div>
-          <div class="sun-row__meta runtime__meta">
-            {SOURCE_LABEL[r.source]} ·
-            {#if r.config}
-              <span class="ml-mono">{r.config.model}</span> at
-              <span class="ml-mono">{r.config.endpoint || (r.config.kind === 'google' ? 'Google' : 'Anthropic')}</span> ·
-              {r.config.key_secret ? 'key ' : 'no key'}{#if r.config.key_secret}<span class="ml-mono">{r.config.key_secret}</span>{/if}
-            {:else if r.source === 'credits'}
-              {#if r.model}<span class="ml-mono">{r.model}</span>{:else}the CLI’s own model{/if} through the Sun gateway
-            {:else}
-              <span class="ml-mono">{r.sessions}/{r.max_sessions}</span> sessions
-              {#if r.cooldown_until} · resets <span class="ml-mono">{clock(r.cooldown_until)}</span>{/if}
+            {r.host ? tool_label(r.tool) : r.name}
+            <span class="ml-mono" style="font-size:11px;color:var(--fg-3)">{r.host ? r.host.name : r.adapter}</span>
+            <Badge {tone} dot live={r.state === 'busy'}>{label}</Badge>
+            {#if r.state === 'idle' || r.state === 'busy'}
+              {#if r.availability === 'outdated'}<Badge tone="warning" title={r.detail ?? undefined}>Untested version {r.version ?? ''}</Badge>{/if}
+              {#if r.availability === 'auth_unknown'}<Badge tone="neutral">Login not checked</Badge>{/if}
             {/if}
           </div>
-          {#if usage[r.id]}
-            {@const u = usage[r.id]}
+          {#if r.host}
+            {@const host = r.host.name}
+            {#if r.state === 'offline'}
+              <p class="sun-row__meta runtime__meta">{host} hasn’t been seen since {r.last_seen_at ? clock(r.last_seen_at) : 'it joined'}.</p>
+            {:else if r.state === 'needs_login'}
+              {@const command = login_command(r)}
+              <p class="sun-row__meta runtime__meta">
+                {tool_label(r.tool)} is installed but not signed in on {host}.
+                {#if command}Run <code class="ml-mono">{command}</code> there.{:else}{r.detail}{/if}
+              </p>
+            {:else if r.state === 'limited'}
+              <p class="sun-row__meta runtime__meta">This account hit its usage limit.{#if r.cooldown_until}{' '}Back at {clock(r.cooldown_until)}.{/if}</p>
+            {:else if r.state === 'unsupported'}
+              <p class="sun-row__meta runtime__meta">Sun found <code class="ml-mono">{r.tool}</code>{r.version ? ` ${r.version}` : ''} but can’t run it yet.</p>
+            {/if}
+          {:else}
+            <div class="sun-row__meta runtime__meta">
+              {SOURCE_LABEL[r.source]} ·
+              {#if r.config}
+                <span class="ml-mono">{r.config.model}</span> at
+                <span class="ml-mono">{r.config.endpoint || (r.config.kind === 'google' ? 'Google' : 'Anthropic')}</span> ·
+                {r.config.key_secret ? 'key ' : 'no key'}{#if r.config.key_secret}<span class="ml-mono">{r.config.key_secret}</span>{/if}
+              {:else if r.source === 'credits'}
+                {#if r.model}<span class="ml-mono">{r.model}</span>{:else}the CLI’s own model{/if} through the Sun gateway
+              {/if}
+              {#if r.state !== 'idle' && r.detail} · {r.detail}{/if}
+            </div>
+          {/if}
+          {#if u}
             <p class="runtime__usage">
               <Icon name="gauge" size={14} />
               <span>
-                {used(u.usage)}{u.usage.cost_usd ? ` · ${money(u.usage.cost_usd)}` : ''}
+                {r.host ? 'All hosts: ' : ''}{used(u.usage)}{u.usage.cost_usd ? ` · ${money(u.usage.cost_usd)}` : ''}
                 {#if u.quota_window}<br />Quota window, last {u.quota_window.hours} h: {used(u.quota_window.usage)}{/if}
               </span>
             </p>
@@ -227,6 +285,19 @@
               <span>{check_text(r, ready)}</span>
             </p>
           {/if}
+          {#if r.host && r.state === 'needs_login' && can('manage_runtimes')}
+            <div class="runtime__action">
+              <Button size="sm" variant="secondary" iconLeft="refresh-cw" loading={rechecking[r.id]} onclick={() => check_again(r)}>Check again</Button>
+            </div>
+          {:else if r.host && r.state === 'offline'}
+            <div class="runtime__action">
+              <Button size="sm" variant="ghost" iconLeft="circle-help" onclick={() => (restarting = r)}>How to restart the host</Button>
+            </div>
+          {:else if r.host && r.state === 'unsupported'}
+            <div class="runtime__action">
+              <Button size="sm" variant="ghost" iconLeft="external-link" href={support_url(r)} target="_blank" rel="noopener noreferrer">Request support</Button>
+            </div>
+          {/if}
         </div>
         {#if stored(r)}
           <Button class="runtime__mode" size="sm" variant="secondary" iconLeft="activity" loading={ready === null} onclick={() => check(r)}>
@@ -236,11 +307,11 @@
           <Select
             class="runtime__mode"
             size="sm"
-            aria-label="Permissions for {r.name}"
+            aria-label={r.host ? `Permissions for ${tool_label(r.tool)} on ${r.host.name}` : `Permissions for ${r.name}`}
             value={r.permission_mode ?? ''}
             placeholder="Host default"
             options={options(r)}
-            hint={r.permission_mode ? MODE[r.permission_mode][1] : 'From each host’s sun.yaml.'}
+            hint={r.permission_mode ? `${MODE[r.permission_mode][1]} On every host.` : 'From each host’s sun.yaml.'}
             disabled={saving}
             onchange={(e: Event) => pick(r, (e.currentTarget as HTMLSelectElement).value as PermissionMode)}
           />
@@ -318,9 +389,25 @@
   {/snippet}
 </Dialog>
 
+{#if restarting?.host}
+  {@const host = restarting.host.name}
+  <Dialog open onclose={() => (restarting = null)} title="Restart {host}">
+    <div class="restart">
+      <p>On {host}, start the host service again:</p>
+      <pre class="ml-mono">sun host start</pre>
+      <p>Joined with <code class="ml-mono">--no-service</code>? Run it under your own supervisor:</p>
+      <pre class="ml-mono">sun host run</pre>
+      <p>It reconnects on its own and shows online here within a few seconds.</p>
+    </div>
+    {#snippet footer()}
+      <Button variant="secondary" onclick={() => (restarting = null)}>Done</Button>
+    {/snippet}
+  </Dialog>
+{/if}
+
 {#if bypass}
   {@const r = bypass}
-  <Dialog open onclose={cancel_bypass} title="Let {r.name} run anything?">
+  <Dialog open onclose={cancel_bypass} title="Let {tool_label(r.tool)} run anything?">
     <p class="runtime__warn">
       <Icon name="triangle-alert" size={16} />
       <span>Its sessions will run any command on the host without asking, on every host. Use it only when sessions run in a container or VM.</span>
@@ -379,6 +466,26 @@
   }
   .runtime__check--ok :global(.ml-icon) {
     color: var(--success-fg);
+  }
+  .runtime__action {
+    margin-top: var(--space-2);
+  }
+  .restart {
+    display: grid;
+    gap: var(--space-2);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--fg-1);
+  }
+  .restart p {
+    margin: 0;
+  }
+  .restart pre {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+    background: var(--bg-subtle);
+    overflow-x: auto;
   }
   .runtime__warn {
     display: flex;

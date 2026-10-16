@@ -125,8 +125,19 @@ export const SOURCE_LABEL: Record<RuntimeSource, string> = {
   credits: 'Sun credits',
 };
 
-export const runtime_name = (runtimes: Runtime[], id: string | null) =>
-  runtimes.find((r) => r.id === id)?.name ?? id ?? '—';
+/** Product names of the built-in CLIs; any other tool shows its id. */
+const TOOL_LABEL: Record<string, string> = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
+export const tool_label = (tool: string) => TOOL_LABEL[tool] ?? tool;
+
+/** What a chain entry (`claude-code`, `ollama-qwen`) is called: a host CLI by its product name, a key-backed runtime by its own. */
+export const runtime_name = (runtimes: Runtime[], name: string | null) => {
+  if (name === null) return '—';
+  const r = runtimes.find((x) => x.name === name);
+  return r?.host ? tool_label(r.tool) : (r?.name ?? tool_label(name));
+};
+
+/** The distinct chain names of a runtime list (one per tool, however many hosts have it). */
+export const chain_names = (runtimes: Runtime[]) => [...new Set(runtimes.map((r) => r.name))];
 
 export const money = (usd: number) => `$${usd.toFixed(2)}`;
 

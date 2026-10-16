@@ -48,10 +48,10 @@ test('with knowledge off, the sidebar and settings drop it', async ({ page }) =>
 test('runtimes show usage, and a subscription its quota window', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await open(page, 'runtimes');
-  const claude = page.getByRole('article', { name: 'Claude Code' });
-  await expect(claude).toContainText('1.2M in · 115.5K out · $19.20');
+  const claude = page.getByRole('article', { name: 'Claude Code on hery-mbp' });
+  await expect(claude).toContainText('All hosts: 1.2M in · 115.5K out · $19.20');
   await expect(claude).toContainText('Quota window, last 5 h: 183.6K in · 16.2K out');
-  await expect(page.getByRole('article', { name: 'OpenCode' })).not.toContainText('Quota window');
+  await expect(page.getByRole('article', { name: 'lan-qwen' })).not.toContainText('Quota window');
 });
 
 test('the timeline filter fits a 360 px phone', async ({ page }) => {

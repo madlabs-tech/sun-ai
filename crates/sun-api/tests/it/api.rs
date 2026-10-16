@@ -18,8 +18,9 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sun_core::model::RuntimeSource;
 use sun_core::{HostId, ModCall, ModLink, Result, RunId, WorkspaceId};
-use sun_store::{MemberRepo, SecretRepo};
+use sun_store::{MemberRepo, RuntimeRepo, SecretRepo};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -753,7 +754,7 @@ async fn host_socket_enrolment_session_sse_and_steer() {
     send(&mut host, hello(k.host, &key)).await;
     until_online(app, k.host).await;
     let (_, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
-    assert_eq!(runtimes[0]["status"], "ready");
+    assert_eq!(runtimes[0]["state"], "idle");
     assert_eq!(runtimes[0]["permission_mode"], Value::Null, "host default");
     let (_, hosts) = call(app, "GET", "/api/v1/hosts", None).await;
     let envs = &hosts[0]["capabilities"]["exec_envs"];
@@ -765,7 +766,7 @@ async fn host_socket_enrolment_session_sse_and_steer() {
 
     // A permission mode per runtime: validated, bypass refused without the
     // operator's opt-in, audited, listed and sent with every session.
-    let adapter = runtimes[0]["id"].as_str().unwrap().to_owned();
+    let adapter = runtimes[0]["tool"].as_str().unwrap().to_owned();
     let policy = format!("/api/v1/runtimes/{adapter}/policy");
     for bad in ["yolo", "acceptEdits", "bypass_permissions"] {
         let body = json!({ "permission_mode": bad });
@@ -2374,15 +2375,15 @@ async fn connect_host(app: &Router, host: HostId, hello: Value) -> Socket {
     socket
 }
 
-/// The `fake` runtime's status in `GET /runtimes`.
+/// The `fake` runtime's state in `GET /runtimes`.
 async fn fake_runtime_status(app: &Router) -> Value {
     let (_, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
     let fake = runtimes
         .as_array()
         .unwrap()
         .iter()
-        .find(|r| r["adapter"] == "fake");
-    fake.unwrap()["status"].clone()
+        .find(|r| r["tool"] == "fake");
+    fake.unwrap()["state"].clone()
 }
 
 /// The `fake` runtime of a `hello`/`capabilities` report.
@@ -2400,15 +2401,7 @@ async fn a_login_after_hello_shows_after_one_reprobe() {
     hello["protocol"] = json!("2.1");
     hello["capabilities"]["runtimes"] = fake_runtime(false);
     let mut host = connect_host(app, k.host, hello.clone()).await;
-    assert_eq!(fake_runtime_status(app).await, "offline", "needs login");
-    // The same kernel read through the `host_runtime` projection
-    // (`runtimes.model: v2`) agrees at every step.
-    let v2 = sun_api::router(
-        k.api
-            .clone()
-            .with_runtimes_model(sun_api::RuntimesModel::V2),
-    );
-    assert_eq!(fake_runtime_status(&v2).await, "offline");
+    assert_eq!(fake_runtime_status(app).await, "needs_login");
 
     // `fake login` on the machine; "Check again" asks the host to re-probe.
     let main = "00000000000000000000000001";
@@ -2434,8 +2427,7 @@ async fn a_login_after_hello_shows_after_one_reprobe() {
     let (status, _) = check.await.unwrap();
     assert_eq!(status, StatusCode::NO_CONTENT);
     // Stored before the 204: no polling needed.
-    assert_eq!(fake_runtime_status(app).await, "ready");
-    assert_eq!(fake_runtime_status(&v2).await, "ready");
+    assert_eq!(fake_runtime_status(app).await, "idle");
 
     // A logout seen by the 5-min re-probe arrives unasked.
     capabilities["runtimes"] = fake_runtime(false);
@@ -2447,13 +2439,12 @@ async fn a_login_after_hello_shows_after_one_reprobe() {
     let mut status = Value::Null;
     for _ in 0..200 {
         status = fake_runtime_status(app).await;
-        if status == "offline" {
+        if status == "needs_login" {
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(status, "offline");
-    assert_eq!(fake_runtime_status(&v2).await, "offline");
+    assert_eq!(status, "needs_login");
 
     // Not attached to that workspace (or no such host): 404, nothing sent.
     let elsewhere = format!(
@@ -2472,7 +2463,7 @@ async fn a_2_0_host_without_effort_or_reprobe_still_connects() {
     let app = &k.app;
     // `hello` as 2.0 hosts send it: no `effort_options` or `models`.
     let _host = scripted_host(&k, json!({})).await;
-    assert_eq!(fake_runtime_status(app).await, "ready");
+    assert_eq!(fake_runtime_status(app).await, "idle");
     let main = "00000000000000000000000001";
     let path = format!("/api/v1/workspaces/{main}/hosts/{}/reprobe", k.host);
     // It wouldn't understand `reprobe`: refused at once, not a 30 s wait.
@@ -2686,4 +2677,165 @@ async fn per_host_cap_queues_the_second_task() {
         .await;
     }
     panic!("the second task never started");
+}
+
+/// A host's `runtimes` report: Claude Code installed, logged in or not, and
+/// Codex not installed (no binary: not a runtime).
+fn claude_code(logged_in: bool) -> Value {
+    let detail = if logged_in {
+        Value::Null
+    } else {
+        json!("Claude Code is not logged in. Run: claude auth login")
+    };
+    json!([
+        { "adapter": "claude-code", "effort_options": [], "models": [], "readiness":
+            { "installed": true, "version": "2.1.291", "logged_in": logged_in, "detail": detail } },
+        { "adapter": "codex", "readiness":
+            { "installed": false, "version": null, "logged_in": false, "detail": "Codex not found" } }
+    ])
+}
+
+/// Enrols a host named `name` into Main and connects it with `runtimes`.
+async fn enrol_host(app: &Router, name: &str, runtimes: Value) -> (HostId, Socket) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/host", listener.local_addr().unwrap());
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let tokens = "/api/v1/workspaces/00000000000000000000000001/hosts/tokens";
+    let (_, issued) = call(app, "POST", tokens, None).await;
+    let enroll = json!({ "type": "enroll", "token": issued["token"], "name": name });
+    let enrolled = ask(&url, enroll).await.unwrap();
+    let host: HostId = serde_json::from_value(enrolled["host_id"].clone()).unwrap();
+    let mut hello = hello(host, enrolled["host_key"].as_str().unwrap());
+    hello["capabilities"]["runtimes"] = runtimes;
+    (host, connect_host(app, host, hello).await)
+}
+
+/// `GET /runtimes` entries of `tool`, keyed by host id.
+async fn runtimes_of(app: &Router, tool: &str) -> std::collections::HashMap<String, Value> {
+    let (status, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
+    assert_eq!(status, StatusCode::OK, "{runtimes}");
+    runtimes
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["tool"] == tool)
+        .map(|r| (r["host"]["id"].as_str().unwrap().to_owned(), r.clone()))
+        .collect()
+}
+
+/// Polls until `host`'s `tool` entry is in `state`.
+async fn until_state(app: &Router, tool: &str, host: HostId, state: &str) -> Value {
+    for _ in 0..500 {
+        if let Some(entry) = runtimes_of(app, tool).await.remove(&host.to_string())
+            && entry["state"] == state
+        {
+            return entry;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("{tool} on {host} never became {state}");
+}
+
+#[tokio::test]
+async fn runtimes_list_each_host_and_tool_with_an_honest_state() {
+    let k = kernel().await;
+    let app = &k.app;
+    let mut hello = kernel_host_hello(&k);
+    hello["capabilities"]["runtimes"] = claude_code(true);
+    let laptop = connect_host(app, k.host, hello).await;
+    let (vps, vps_socket) = enrol_host(app, "vps-sg-1", claude_code(false)).await;
+
+    // Two hosts with Claude Code are two entries; Codex, not installed, is none.
+    let claude = runtimes_of(app, "claude-code").await;
+    assert_eq!(claude.len(), 2, "{claude:?}");
+    assert!(runtimes_of(app, "codex").await.is_empty());
+    let ready = &claude[&k.host.to_string()];
+    assert_eq!(ready["id"], format!("{}:claude-code", k.host));
+    assert_eq!(ready["name"], "claude-code", "what chains name");
+    assert_eq!(ready["source"], "byo_runtime");
+    assert_eq!(ready["version"], "2.1.291");
+    assert_eq!(
+        (&ready["presence"], &ready["availability"], &ready["state"]),
+        (&json!("online"), &json!("ready"), &json!("idle"))
+    );
+    assert_eq!(ready["load"], json!({ "active": 0, "max": null }));
+    assert_eq!(ready["detail"], Value::Null);
+
+    // Installed but logged out: needs_login, with the command to run there.
+    let logged_out = &claude[&vps.to_string()];
+    assert_eq!(logged_out["host"]["name"], "vps-sg-1");
+    assert_eq!(logged_out["availability"], "needs_login");
+    assert_eq!(logged_out["state"], "needs_login");
+    assert_eq!(logged_out["detail"], "Run `claude auth login` on vps-sg-1");
+
+    // A cooldown: limited until then, on the host that is logged in; the
+    // logged-out one still needs a login first.
+    let until = chrono::Utc::now() + chrono::Duration::minutes(30);
+    let mut tx = k.store.begin().await.unwrap();
+    let cooled = tx
+        .upsert_runtime(
+            MAIN,
+            "claude-code",
+            "claude-code",
+            RuntimeSource::ByoRuntime,
+        )
+        .await
+        .unwrap();
+    tx.set_cooldown(cooled.id, Some(until)).await.unwrap();
+    tx.commit().await.unwrap();
+    let claude = runtimes_of(app, "claude-code").await;
+    let limited = &claude[&k.host.to_string()];
+    assert_eq!(limited["state"], "limited");
+    let back: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(limited["cooldown_until"].clone()).unwrap();
+    assert!((back - until).num_seconds().abs() <= 1, "{back} vs {until}");
+    assert!(
+        limited["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("Usage limit reached; back at"),
+        "{limited}"
+    );
+    assert_eq!(claude[&vps.to_string()]["state"], "needs_login");
+
+    // A host that goes away is offline, whatever its login or cooldown.
+    drop(vps_socket);
+    let gone = until_state(app, "claude-code", vps, "offline").await;
+    assert_eq!(gone["presence"], "offline");
+    assert_eq!(gone["detail"], "vps-sg-1 is offline");
+    drop(laptop);
+    until_state(app, "claude-code", k.host, "offline").await;
+}
+
+/// `?model=v1` is the old per-adapter list, unchanged: one entry per
+/// adapter across hosts, `status` ready/offline.
+#[tokio::test]
+async fn runtimes_v1_keeps_the_old_per_adapter_list() {
+    let k = kernel().await;
+    let app = &k.app;
+    let mut hello = kernel_host_hello(&k);
+    hello["capabilities"]["runtimes"] = claude_code(true);
+    let _laptop = connect_host(app, k.host, hello).await;
+    let (_vps, _socket) = enrol_host(app, "vps-sg-1", claude_code(false)).await;
+    let (status, v1) = call(app, "GET", "/api/v1/runtimes?model=v1", None).await;
+    assert_eq!(status, StatusCode::OK, "{v1}");
+    let allow_bypass = v1[0]["allow_bypass"].clone();
+    assert_eq!(
+        v1,
+        json!([
+            { "model": null, "workspace_id": null, "id": "claude-code", "name": "claude-code",
+              "adapter": "claude-code", "source": "byo_runtime", "status": "ready",
+              "cooldown_until": null, "sessions": 0, "max_sessions": 0, "permission_mode": null,
+              "allow_bypass": allow_bypass, "config": null },
+            { "model": null, "workspace_id": null, "id": "codex", "name": "codex",
+              "adapter": "codex", "source": "byo_runtime", "status": "offline",
+              "cooldown_until": null, "sessions": 0, "max_sessions": 0, "permission_mode": null,
+              "allow_bypass": allow_bypass, "config": null },
+        ])
+    );
+    let (status, v2) = call(app, "GET", "/api/v1/runtimes?model=v2", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(v2.as_array().unwrap().len(), 2, "one per host: {v2}");
+    let (status, body) = call(app, "GET", "/api/v1/runtimes?model=v3", None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 }

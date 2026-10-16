@@ -11,17 +11,18 @@
   import { api } from '../lib/api/client';
   import type { Agent, AgentFields } from '../lib/api/types';
   import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
+  import { chain_names } from '../lib/format';
 
   const workspace = current_workspace();
   const manage = $derived(can('manage_runtimes'));
   /** The list, also kept for the assignee pickers and cards. */
   const fetch_agents = () => api.list_agents(workspace).then((list) => (app.agents = list));
   let load = $state(fetch_agents());
-  /** Suggestions: runtime ids, and the catalog's installed skills. */
+  /** Suggestions: chain names (one per tool, however many hosts), and the catalog's installed skills. */
   let runtimes = $state<string[]>([]);
   let skills = $state<string[]>([]);
   api.list_runtimes(workspace).then(
-    (rows) => (runtimes = rows.map((r) => r.id)),
+    (rows) => (runtimes = chain_names(rows)),
     () => {},
   );
   api.list_catalog('', '', workspace).then(
