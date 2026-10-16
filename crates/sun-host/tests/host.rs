@@ -1011,7 +1011,7 @@ async fn a_bare_host_refuses_a_bypass_session() {
     let (listener, url) = listen().await;
     let data_dir = temp_dir("bypass-bare");
     let mut config = HostConfig::new(&data_dir);
-    config.permission_mode = Some("bypass_permissions".into());
+    config.permission_mode = Some(sun_core::PermissionMode::BypassPermissions);
     let fake = Arc::new(Fake::default());
     let host = Host::open(config, vec![fake.clone()]).unwrap();
     let credentials = Credentials {
@@ -1071,6 +1071,27 @@ async fn a_bare_host_refuses_a_bypass_session() {
             sun_core::Error::Forbidden(message)
         );
     }
+    // Any other spelling of a mode is not one: refused before the bypass
+    // check, so no CLI ever reads `bypassPermissions` as bypass.
+    for forged in [
+        "bypassPermissions",
+        "BYPASS_PERMISSIONS",
+        " bypass_permissions",
+    ] {
+        let spec = spec(Some(forged));
+        let body = kernel
+            .request(|id| KernelFrame::SessionStart {
+                id,
+                adapter: "fake".into(),
+                spec: Box::new(spec),
+            })
+            .await;
+        let ReplyBody::Error { code, message } = body else {
+            panic!("{forged:?}: {body:?}")
+        };
+        assert_eq!(code, "invalid_input", "{forged:?}");
+        assert!(message.contains("is not a permission mode"), "{message}");
+    }
     assert!(fake.specs.lock().unwrap().is_empty(), "no session started");
 
     let ok = spec(Some("accept_edits"));
@@ -1082,5 +1103,8 @@ async fn a_bare_host_refuses_a_bypass_session() {
         })
         .await;
     assert!(matches!(body, ReplyBody::Session { .. }), "{body:?}");
+    let started = fake.specs.lock().unwrap();
+    assert_eq!(started[0].permission_mode.as_deref(), Some("accept_edits"));
+    drop(started);
     running.abort();
 }

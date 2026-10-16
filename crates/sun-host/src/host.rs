@@ -58,9 +58,10 @@ pub struct HostConfig {
     /// process reaches mods. `None`: none.
     pub mod_envs: Option<exec_env::ModEnvs>,
     /// The permission mode the adapters fall back to when a session spec
-    /// carries none (`sun.yaml` `runtimes.permission_mode`). Read only to
-    /// refuse `bypass_permissions` outside a container or VM.
-    pub permission_mode: Option<String>,
+    /// carries none (`sun.yaml` `runtimes.permission_mode`). Checked with the
+    /// spec's to refuse `bypass_permissions` outside a container or VM, and
+    /// then written into the spec so the adapter runs the mode checked.
+    pub permission_mode: Option<sun_core::PermissionMode>,
     /// How often runtime readiness is probed again; a change goes to the
     /// kernel as a `capabilities` frame.
     pub reprobe_every: Duration,
@@ -433,14 +434,18 @@ impl Host {
         mut spec: SessionSpec,
     ) -> Result<SessionHandle> {
         // Defence in depth: whatever the kernel decided, bypass never runs
-        // bare here (the spec's mode, else this host's own default).
-        let mode = spec.permission_mode.as_deref();
-        let mode = mode.or(self.config.permission_mode.as_deref());
+        // bare here (the spec's mode, else this host's own default). A mode
+        // outside Sun's names is refused before anything reads it, and the
+        // adapter gets the canonical mode that was checked, nothing else.
+        let mode = sun_core::PermissionMode::parse_opt(spec.permission_mode.as_deref())
+            .map_err(|why| Error::InvalidInput(format!("session permission_mode: {why}")))?;
+        let mode = mode.or(self.config.permission_mode);
         if let Some(why) = sun_core::bypass_refusal(mode, &spec.exec_env) {
             return Err(Error::Forbidden(format!(
                 "this host refuses the session: {why}"
             )));
         }
+        spec.permission_mode = mode.map(|m| m.as_str().to_owned());
         let adapter = self
             .adapters
             .get(adapter_id)

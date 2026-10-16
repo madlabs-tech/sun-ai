@@ -177,8 +177,7 @@ impl HostLink for LocalHost {
             "context files are written before the session starts"
         );
         // As a real host does (FR8): bypass never starts bare.
-        if let Some(why) = sun_core::bypass_refusal(spec.permission_mode.as_deref(), &spec.exec_env)
-        {
+        if let Some(why) = sun_core::mode_refusal(spec.permission_mode.as_deref(), &spec.exec_env) {
             return Err(Error::Forbidden(why));
         }
         {

@@ -652,7 +652,7 @@ impl Scheduler {
                         None => name.clone(),
                     };
                     let mode = modes.get(&adapter).map(String::as_str);
-                    if let Some(why) = sun_core::bypass_refusal(mode, &env) {
+                    if let Some(why) = sun_core::mode_refusal(mode, &env) {
                         refusal.get_or_insert((name, why));
                         continue;
                     }

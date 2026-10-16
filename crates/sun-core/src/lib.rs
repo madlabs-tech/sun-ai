@@ -100,8 +100,9 @@ pub use mcp_grant::{McpGrant, render_mcp_config};
 pub use runtime::{
     BYO_KEY_ENV, BoxStream, ByoKey, ByoKeyKind, ContainerSpec, EXEC_SHIMS_ENV, EffortCatalog,
     EffortLevel, Envelope, ExecEnvSpec, ExtensionEnvSpec, HostCtx, ModelEffort, PERMISSION_MODES,
-    Readiness, RuntimeAdapter, SKILL_RUNTIMES_FILE, SessionHandle, SessionSpec, Steer, StopMode,
-    Transcript, VmSpec, bypass_refusal, repo_skill_dirs, skill_folders,
+    PermissionMode, Readiness, RuntimeAdapter, SKILL_RUNTIMES_FILE, SessionHandle, SessionSpec,
+    Steer, StopMode, Transcript, VmSpec, bypass_refusal, mode_refusal, repo_skill_dirs,
+    skill_folders,
 };
 pub use runtime_state::{Availability, Presence, RuntimeState};
 pub use status::{RunStatus, StateMachine, StepStatus, TaskStatus};

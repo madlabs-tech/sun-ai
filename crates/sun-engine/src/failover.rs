@@ -405,7 +405,7 @@ impl Executor {
     /// passed over is journalled as `runtime_skipped {runtime, reason}`. A
     /// host that reported no capabilities is trusted. A runtime whose
     /// permission mode is `bypass_permissions` is unready for a run outside a
-    /// container or VM ([`sun_core::bypass_refusal`]). A `market:` entry is
+    /// container or VM ([`sun_core::mode_refusal`]). A `market:` entry is
     /// ready only for a limit hit (`market`) whose run may move there
     /// ([`crate::market::unmovable`]).
     async fn pick_ready(
@@ -446,7 +446,7 @@ impl Executor {
             };
             let mode = modes.get(&adapter).map(String::as_str);
             let why = reported.as_ref().and_then(|r| r.unready(&adapter));
-            if let Some(why) = why.or_else(|| sun_core::bypass_refusal(mode, &env)) {
+            if let Some(why) = why.or_else(|| sun_core::mode_refusal(mode, &env)) {
                 unready.insert(name.clone(), why);
             }
         }

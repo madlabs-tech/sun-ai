@@ -1082,7 +1082,7 @@ async fn host(data_dir: &Path, command: HostCommand) -> Result<()> {
             let config = Config::load(data_dir)?;
             let credentials = sun_host::Credentials::load(&dir)?;
             let host_config = exec_env_tools.apply(sun_host::HostConfig {
-                permission_mode: Some(config.runtimes.permission_mode.clone()),
+                permission_mode: Some(config.runtimes.permission_mode),
                 ..sun_host::HostConfig::new(&dir)
             });
             let host = sun_host::Host::open(host_config, serve::adapters(&config))?;

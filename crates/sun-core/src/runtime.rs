@@ -193,18 +193,93 @@ pub struct Envelope {
 /// `bypass_permissions` needs the operator's `allow_bypass`.
 pub const PERMISSION_MODES: [&str; 4] = ["default", "accept_edits", "plan", "bypass_permissions"];
 
+/// One of [`PERMISSION_MODES`], parsed. Every mode a session runs in passes
+/// through this type: a spelling outside the list (`bypassPermissions`,
+/// `BYPASS_PERMISSIONS`, ` plan`) is an error, never passed on to a CLI that
+/// might read it as something else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// The CLI asks before anything that needs a permission.
+    Default,
+    /// File edits without asking.
+    AcceptEdits,
+    /// Read-only planning.
+    Plan,
+    /// Everything without asking: only in a container or VM.
+    BypassPermissions,
+}
+
+impl PermissionMode {
+    /// Every mode, in [`PERMISSION_MODES`] order.
+    pub const ALL: [Self; 4] = [
+        Self::Default,
+        Self::AcceptEdits,
+        Self::Plan,
+        Self::BypassPermissions,
+    ];
+
+    /// Sun's name of the mode, as in [`PERMISSION_MODES`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AcceptEdits => "accept_edits",
+            Self::Plan => "plan",
+            Self::BypassPermissions => "bypass_permissions",
+        }
+    }
+
+    /// Parses an optional mode (a `SessionSpec`'s, a `runtime_policy` row's):
+    /// `None` stays `None`, anything else must be an exact name.
+    pub fn parse_opt(mode: Option<&str>) -> std::result::Result<Option<Self>, String> {
+        mode.map(str::parse).transpose()
+    }
+}
+
+impl std::str::FromStr for PermissionMode {
+    type Err = String;
+
+    /// Exact names only: no case folding, trimming or CLI spellings.
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.as_str() == s)
+            .ok_or_else(|| {
+                format!(
+                    "`{s}` is not a permission mode; use {}",
+                    PERMISSION_MODES.join(", ")
+                )
+            })
+    }
+}
+
+impl std::fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Why a session in permission `mode` may not run in `env`, if it may not:
 /// `bypass_permissions` runs only in a `container` or `vm`, never bare or in
 /// an extension env. The one owner of the rule, checked at placement (the
 /// engine) and again by the host before it starts the CLI.
-pub fn bypass_refusal(mode: Option<&str>, env: &ExecEnvSpec) -> Option<String> {
+pub fn bypass_refusal(mode: Option<PermissionMode>, env: &ExecEnvSpec) -> Option<String> {
     let isolated = matches!(env, ExecEnvSpec::Container(_) | ExecEnvSpec::Vm(_));
-    (mode == Some("bypass_permissions") && !isolated).then(|| {
+    (mode == Some(PermissionMode::BypassPermissions) && !isolated).then(|| {
         format!(
             "bypass_permissions needs a container or vm exec env, and this session's is `{}`",
             env.kind()
         )
     })
+}
+
+/// [`bypass_refusal`] for a mode not parsed yet (a `runtime_policy` row): a
+/// spelling outside [`PERMISSION_MODES`] is refused too, whatever the env.
+pub fn mode_refusal(mode: Option<&str>, env: &ExecEnvSpec) -> Option<String> {
+    match PermissionMode::parse_opt(mode) {
+        Ok(mode) => bypass_refusal(mode, env),
+        Err(why) => Some(why),
+    }
 }
 
 /// The env var that carries a `byo_key` runtime's key value into the session
@@ -549,12 +624,41 @@ mod tests {
             cpu_millis: None,
             network: None,
         });
-        let bypass = Some("bypass_permissions");
+        let bypass = Some(PermissionMode::BypassPermissions);
         assert_eq!(bypass_refusal(bypass, &container), None);
         let bare = bypass_refusal(bypass, &ExecEnvSpec::Bare).unwrap();
         assert!(bare.contains("`bare`"), "{bare}");
-        for mode in [None, Some("accept_edits"), Some("plan"), Some("default")] {
+        let others = [
+            PermissionMode::AcceptEdits,
+            PermissionMode::Plan,
+            PermissionMode::Default,
+        ];
+        for mode in others.map(Some).into_iter().chain([None]) {
             assert_eq!(bypass_refusal(mode, &ExecEnvSpec::Bare), None);
         }
+    }
+
+    #[test]
+    fn a_permission_mode_has_one_spelling() {
+        let names: Vec<&str> = PermissionMode::ALL.map(PermissionMode::as_str).into();
+        assert_eq!(names, PERMISSION_MODES);
+        for mode in PermissionMode::ALL {
+            assert_eq!(mode.as_str().parse(), Ok(mode));
+            let json = serde_json::to_value(mode).unwrap();
+            assert_eq!(json, mode.as_str());
+        }
+        for forged in [
+            "bypassPermissions",
+            "BYPASS_PERMISSIONS",
+            " bypass_permissions",
+            "",
+        ] {
+            let err = forged.parse::<PermissionMode>().unwrap_err();
+            assert!(err.contains("is not a permission mode"), "{err}");
+            // Refused at placement whatever the env.
+            assert!(mode_refusal(Some(forged), &ExecEnvSpec::Bare).is_some());
+        }
+        assert_eq!(mode_refusal(None, &ExecEnvSpec::Bare), None);
+        assert_eq!(mode_refusal(Some("accept_edits"), &ExecEnvSpec::Bare), None);
     }
 }
