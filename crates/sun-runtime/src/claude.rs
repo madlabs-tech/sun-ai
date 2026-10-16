@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use serde_json::{Value, json};
 use sun_core::{
-    BoxStream, HostCtx, LimitKind, Readiness, Result, Role, RuntimeAdapter, SessionHandle,
-    SessionId, SessionSpec, Steer, StopMode, SunEvent, Todo, TodoStatus, Transcript,
+    BoxStream, EffortCatalog, EffortLevel, HostCtx, LimitKind, Readiness, Result, Role,
+    RuntimeAdapter, SessionHandle, SessionId, SessionSpec, Steer, StopMode, SunEvent, Todo,
+    TodoStatus, Transcript,
 };
 use tokio::process::Command;
 
@@ -82,6 +83,16 @@ impl RuntimeAdapter for ClaudeCode {
             login: "claude auth login",
         })
         .await
+    }
+
+    async fn effort(&self, _host: &HostCtx) -> EffortCatalog {
+        let help = process::run(&self.binary, &["--help"]).await;
+        EffortCatalog {
+            effort_options: help
+                .map(|out| parse_effort_help(&String::from_utf8_lossy(&out.stdout)))
+                .unwrap_or_default(),
+            models: Vec::new(),
+        }
     }
 
     async fn start(&self, mut spec: SessionSpec) -> Result<SessionHandle> {
@@ -214,6 +225,35 @@ fn user_message(text: &str) -> String {
         "message": {"role": "user", "content": [{"type": "text", "text": text}]},
     })
     .to_string()
+}
+
+/// `claude --help` → the levels its `--effort` option lists, e.g.
+/// `--effort <level>  Effort level for the current session (low, medium,
+/// high, xhigh, max)`, the list possibly wrapped onto the next line. Claude
+/// Code scopes effort per session, not per model. Empty when the CLI
+/// predates the flag or the list doesn't parse (the picker greys out).
+pub fn parse_effort_help(help: &str) -> Vec<EffortLevel> {
+    // The option's own line, not a mention in another option's text.
+    let defined = help.match_indices("--effort").find(|(at, _)| {
+        let line_start = help[..*at].rfind('\n').map_or(0, |n| n + 1);
+        help[line_start..*at].trim().is_empty()
+    });
+    let Some((at, _)) = defined else {
+        return Vec::new();
+    };
+    let rest = &help[at + "--effort".len()..];
+    // The option's text ends where the next option's line starts.
+    let text = rest.find("\n  -").map_or(rest, |end| &rest[..end]);
+    let Some(list) = text
+        .split_once('(')
+        .and_then(|(_, after)| after.split_once(')'))
+        .map(|(list, _)| list)
+    else {
+        return Vec::new();
+    };
+    list.split(',')
+        .filter_map(|value| crate::effort::level(value.trim(), None))
+        .collect()
 }
 
 /// `claude auth status --json` → `loggedIn`.

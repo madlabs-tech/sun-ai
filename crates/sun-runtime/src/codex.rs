@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Value, json};
 use sun_core::{
-    BoxStream, Error, HostCtx, Readiness, Result, Role, RuntimeAdapter, SessionHandle, SessionId,
-    SessionSpec, Steer, StopMode, SunEvent, Todo, TodoStatus, Transcript,
+    BoxStream, EffortCatalog, Error, HostCtx, ModelEffort, Readiness, Result, Role, RuntimeAdapter,
+    SessionHandle, SessionId, SessionSpec, Steer, StopMode, SunEvent, Todo, TodoStatus, Transcript,
 };
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
@@ -220,6 +220,22 @@ impl RuntimeAdapter for Codex {
             login: "codex login",
         })
         .await
+    }
+
+    // ponytail: `--bundled` is the binary's own snapshot (no network, fast);
+    // the live list adds account-only models but can take 15 s. Use it when
+    // users ask for those models.
+    async fn effort(&self, _host: &HostCtx) -> EffortCatalog {
+        let out = process::run(&self.binary, &["debug", "models", "--bundled"]).await;
+        let models = match out {
+            Ok(out) if out.status.success() => parse_debug_models(&out.stdout),
+            // Older than 0.122 (no `debug models`), or not installed.
+            _ => Vec::new(),
+        };
+        EffortCatalog {
+            effort_options: crate::effort::union(&models),
+            models,
+        }
     }
 
     async fn start(&self, mut spec: SessionSpec) -> Result<SessionHandle> {
@@ -486,4 +502,44 @@ fn todo(item: &Value) -> Todo {
             TodoStatus::Pending
         },
     }
+}
+
+/// `codex debug models` (Codex 0.122+) → each listed model's reasoning
+/// levels, in the order Codex lists them. Hidden models and bad tokens are
+/// left out; a payload that doesn't parse gives none.
+pub fn parse_debug_models(json: &[u8]) -> Vec<ModelEffort> {
+    let Ok(catalog) = serde_json::from_slice::<Value>(json) else {
+        return Vec::new();
+    };
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+    catalog["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"] != "hide")
+        .filter_map(|m| {
+            // The id goes to `--model`: a plain name, never an option.
+            let id = m["slug"].as_str().filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 128
+                    && !id.starts_with('-')
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._-:/".contains(c))
+            })?;
+            let id = id.to_owned();
+            let effort_options = m["supported_reasoning_levels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| crate::effort::level(l["effort"].as_str()?, text(l, "description")))
+                .collect();
+            Some(ModelEffort {
+                label: text(m, "display_name").unwrap_or_else(|| id.clone()),
+                id,
+                effort_options,
+                default_effort: text(m, "default_reasoning_level"),
+            })
+        })
+        .collect()
 }

@@ -18,14 +18,18 @@
 //! test runtime (binary `sun-fake-runtime`). [`skills`] copies
 //! installed skills into each CLI's native skills folder per session.
 //! [`mod_adapter`] forwards to a runtime an extension serves (mod API 1.2).
+//! [`effort`] labels the effort levels adapters read from their CLI;
+//! [`auth_error`] spots a failed login in CLI error text.
 //!
 //! **May depend on:** `sun-core`.
 
+pub mod auth_error;
 pub mod byo_key;
 pub mod claude;
 pub mod codex;
 pub mod contract;
 pub mod credits;
+pub mod effort;
 pub mod envelope;
 pub mod fake;
 pub mod limit;

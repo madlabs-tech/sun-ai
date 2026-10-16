@@ -153,6 +153,27 @@ const FAKE_CODEX: &str = r#"#!/bin/sh
 case "$1" in
   --version) echo "codex-cli 0.160.0"; exit 0 ;;
   login) exit 0 ;;
+  debug) [ "$2 $3" = "models --bundled" ] || exit 2; cat <<'MODELS'
+{"models": [
+  {"slug": "gpt-5-codex", "display_name": "GPT-5 Codex", "visibility": "list",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [
+     {"effort": "low", "description": "Fast responses with lighter reasoning"},
+     {"effort": "medium", "description": "Balances speed and reasoning depth"},
+     {"effort": "high", "description": "Greater reasoning depth"}]},
+  {"slug": "gpt-5", "display_name": "GPT-5", "visibility": "list",
+   "default_reasoning_level": "medium",
+   "supported_reasoning_levels": [
+     {"effort": "minimal"}, {"effort": "low"}, {"effort": "medium"},
+     {"effort": "high"}, {"effort": "xhigh"}]},
+  {"slug": "gpt-5.1-mini", "display_name": "GPT-5.1 Mini", "visibility": "list",
+   "supported_reasoning_levels": []},
+  {"slug": "internal", "display_name": "Hidden", "visibility": "hide",
+   "supported_reasoning_levels": [{"effort": "low"}]},
+  {"slug": "--danger", "visibility": "list", "supported_reasoning_levels": []}
+]}
+MODELS
+  exit 0 ;;
 esac
 printf '%s\n' "$*" >> "$SUN_OUT.args"
 thread='{"type":"thread.started","thread_id":"t-1"}'
@@ -321,6 +342,51 @@ async fn readiness_reports_version_and_login() {
             .unwrap()
             .contains("npm install -g @openai/codex")
     );
+}
+
+/// The effort probe reads `codex debug models --bundled` (Codex 0.122+; the
+/// fake prints its JSON shape): per-model levels, and their union tool-wide.
+#[tokio::test]
+async fn effort_is_per_model_from_the_installed_cli() {
+    let dir = sandbox("codex", FAKE_CODEX, "effort");
+    let host = HostCtx {
+        host_id: HostId::generate(),
+    };
+    let catalog = Codex::new(dir.join("codex")).effort(&host).await;
+    let values = |levels: &[sun_core::EffortLevel]| -> Vec<String> {
+        levels.iter().map(|l| l.value.clone()).collect()
+    };
+    assert_eq!(
+        values(&catalog.effort_options),
+        ["minimal", "low", "medium", "high", "xhigh"]
+    );
+    let ids: Vec<&str> = catalog.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["gpt-5-codex", "gpt-5", "gpt-5.1-mini"],
+        "hidden and bad ids left out"
+    );
+    let codex = &catalog.models[0];
+    assert_eq!(codex.label, "GPT-5 Codex");
+    assert_eq!(values(&codex.effort_options), ["low", "medium", "high"]);
+    assert_eq!(codex.default_effort.as_deref(), Some("medium"));
+    assert_eq!(
+        codex.effort_options[2].description.as_deref(),
+        Some("Greater reasoning depth")
+    );
+    assert_eq!(catalog.models[1].effort_options[4].label, "Extra high");
+    assert!(catalog.models[2].effort_options.is_empty());
+
+    // Too old for `debug models`, or not installed: none.
+    let old = sandbox(
+        "codex",
+        &FAKE_CODEX.replace("  debug)", "  debug) exit 2 ;;\n  unused)"),
+        "effort-old",
+    );
+    let none = sun_core::EffortCatalog::default();
+    assert_eq!(Codex::new(old.join("codex")).effort(&host).await, none);
+    assert_eq!(Codex::new(dir.join("not-there")).effort(&host).await, none);
+    assert!(sun_runtime::codex::parse_debug_models(b"not json").is_empty());
 }
 
 #[tokio::test]

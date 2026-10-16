@@ -569,7 +569,8 @@ pub fn parse_version(out: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-async fn run(binary: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
+/// Runs `binary args` to completion (15 s cap): readiness and effort probes.
+pub(crate) async fn run(binary: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
     tokio::time::timeout(
         Duration::from_secs(15),
         Command::new(binary).args(args).output(),

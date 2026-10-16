@@ -32,6 +32,13 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Is the CLI installed on this host, which version, is it logged in?
     async fn readiness(&self, host: &HostCtx) -> Readiness;
 
+    /// The effort levels the installed CLI itself offers (read from the CLI,
+    /// never a Sun list), probed with [`readiness`](Self::readiness). Uses
+    /// no quota. Default: none, so the agent form greys the picker out.
+    async fn effort(&self, _host: &HostCtx) -> EffortCatalog {
+        EffortCatalog::default()
+    }
+
     /// Starts a session in `spec.worktree` with the rendered envelope.
     async fn start(&self, spec: SessionSpec) -> Result<SessionHandle>;
 
@@ -69,6 +76,49 @@ pub struct Readiness {
     pub logged_in: bool,
     /// Human-readable reason when not ready, with a fix if known.
     pub detail: Option<String>,
+}
+
+/// The effort (reasoning) levels a CLI offers, in its own vocabulary:
+/// Claude Code's `--effort`, Codex's `model_reasoning_effort`. Same shape as
+/// Multica's per-model thinking catalog (`RuntimeModel.thinking`), so the
+/// agent form renders the picker from it alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffortCatalog {
+    /// Levels for any model, lowest first; empty when the CLI has no effort
+    /// setting (or the probe could not read it).
+    #[serde(default)]
+    pub effort_options: Vec<EffortLevel>,
+    /// Per-model levels, when the CLI scopes effort by model (Codex). A
+    /// model not listed here uses `effort_options`.
+    #[serde(default)]
+    pub models: Vec<ModelEffort>,
+}
+
+/// One effort level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffortLevel {
+    /// The CLI's own token, passed to it unchanged, e.g. `xhigh`.
+    pub value: String,
+    /// What the CLI's own UI calls it, e.g. `Extra high`.
+    pub label: String,
+    /// The CLI's description of the level, when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// The effort levels of one model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEffort {
+    /// The model id the CLI takes, e.g. `gpt-5-codex`.
+    pub id: String,
+    /// Its display name.
+    pub label: String,
+    /// Levels this model accepts, lowest first; empty: no effort setting.
+    #[serde(default)]
+    pub effort_options: Vec<EffortLevel>,
+    /// The level the CLI uses when none is set, if it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
 }
 
 /// Everything needed to start one agent session.
