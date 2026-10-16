@@ -1081,10 +1081,21 @@ function route(method: string, full_path: string, body: unknown): unknown {
       const t = find_task(parts[1]);
       const text = String(input.body ?? '').trim();
       if (!text || [...text].length > 10_000) throw invalid('Write a comment of 1 to 10000 characters.');
-      const entry = log(t, 'comment', { text }, undefined, true);
+      const mentions = [...new Set((input.mentions as string[] | undefined) ?? [])];
+      if (mentions.length > 5) throw invalid('Mention at most 5 agents in one comment.');
+      const named = mentions.map(find_agent);
+      if (named.some((a) => !a || a.archived_at || a.workspace_id !== t.workspace_id)) throw invalid("Mention active agents of this task's workspace.");
+      const entry = log(t, 'comment', mentions.length ? { text, mentions } : { text }, undefined, true);
+      // Mentioned agents wake instead of the assignee; one that isn't it answers from its hidden chat.
+      const assignee = t.assignee?.kind === 'agent' ? t.assignee.id : null;
+      for (const agent of named) {
+        if (agent && agent.id !== assignee)
+          setTimeout(() => log(t, 'comment', { text: `${agent.name} here: noted, see above.`, by_agent: agent.id, run_id: fake_id('R', 800 + next_seq++) }), 800);
+      }
       // Wake-on-comment: a running agent is steered; a stopped one starts a new run with the comment.
-      if (t.assignee?.kind === 'agent' && t.run?.status === 'running') event(t.run.id, 'intervention', `You: ${text}`);
-      else if (t.assignee?.kind === 'agent' && t.status !== 'done' && t.status !== 'cancelled') start_agent_run(t, 'comment');
+      const wakes = assignee && (!mentions.length || mentions.includes(assignee));
+      if (wakes && t.run?.status === 'running') event(t.run.id, 'intervention', `You: ${text}`);
+      else if (wakes && t.status !== 'done' && t.status !== 'cancelled') start_agent_run(t, 'comment');
       return clone(entry);
     }
     case 'GET /tasks/:id/activity': {

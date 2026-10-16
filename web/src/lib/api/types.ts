@@ -245,7 +245,7 @@ export interface TaskActivity {
   kind: ActivityKind;
   /** The person's member row; `null` for the engine, or the token holder (see `body.by`) */
   actor_member_id: Ulid | null;
-  /** `comment`: `{text}`, an agent's reply `{text, by_agent, run_id}`; `status`/`priority`/`title`/`project`: `{from, to}` (a merge-driven move adds
+  /** `comment`: `{text, mentions?}` (`mentions`: agent ids), an agent's reply `{text, by_agent, run_id}`; `status`/`priority`/`title`/`project`: `{from, to}` (a merge-driven move adds
    *  `source: pr_automation, pull_requests: "#12, #15"`); `created`: `{status}`; `run`: `{run_id, trigger}`;
    *  `pull_request`: `{action: linked|unlinked|merged, number, url, repo, source}`.
    *  A person's entry also has `by`, the audit actor (e.g. `user:ana`); without it the engine did it. */

@@ -1,5 +1,5 @@
 // The create dialog and the task page (#/tasks/<KEY>): assignee kinds and the run hint, Create another,
-// comments that wake an agent, Stop, inline edits, legal status moves, PRs, the execution log, old links, 360 px.
+// comments that wake an agent, @mentions, Stop, inline edits, legal status moves, PRs, the execution log, old links, 360 px.
 import { expect, test, type Page } from '@playwright/test';
 
 const open = (page: Page, route = '') => page.goto(`/?mock=1#/${route}`);
@@ -108,6 +108,33 @@ test('an agent task: the live chip, a comment wakes the agent, Stop moves it to 
   await expect(main(page).getByRole('button', { name: 'Status: Blocked' })).toBeVisible();
   await expect(main(page).getByText('Ada is working')).toHaveCount(0);
   await expect(activity).toContainText('You moved it from In progress to Blocked');
+});
+
+test('@ lists the agents: a mentioned one wakes instead of the assignee and replies in the thread', async ({ page }) => {
+  await open(page);
+  const dialog = await new_task(page);
+  await dialog.getByRole('textbox', { name: 'Title' }).fill('Tidy the README');
+  await pick(page, 'Assignee', 'Ada');
+  await pick(page, 'Status', 'Backlog');
+  await dialog.getByRole('button', { name: 'Create task' }).click();
+  await expect(page).toHaveURL(/#\/tasks\/SUN-152/);
+
+  const activity = main(page).getByRole('region', { name: 'Activity' });
+  const box = main(page).getByRole('textbox', { name: 'Comment' });
+  await box.pressSequentially('Any thoughts, @ni');
+  const list = page.getByRole('listbox', { name: 'Mention an agent' });
+  await expect(list.getByRole('option')).toHaveText(['Night Owl']);
+  await box.press('Enter');
+  await expect(list).toHaveCount(0);
+  await expect(box).toHaveValue('Any thoughts, @Night Owl ');
+  await expect(main(page).getByText('Wakes Night Owl: each answers here.')).toBeVisible();
+  await box.press('ControlOrMeta+Enter');
+
+  await expect(activity.locator('mark', { hasText: '@Night Owl' })).toBeVisible();
+  await expect(activity).toContainText('Night Owl replied');
+  // Ada wasn't named: she stays asleep in Backlog.
+  await expect(activity).not.toContainText('Ada started a run');
+  await expect(main(page).getByText('Ada is working')).toHaveCount(0);
 });
 
 test('title and description edit in place: Enter or blur saves, Escape cancels', async ({ page }) => {
