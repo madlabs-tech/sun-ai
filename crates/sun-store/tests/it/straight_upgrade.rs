@@ -296,7 +296,7 @@ async fn a_pre_rename_data_dir_upgrades_through_every_migration_in_one_open() {
     // keys resolve, counters continue.
     for (id, flow, _, priority, status, number) in TASKS {
         let task = tx.get_task(id.parse().unwrap()).await.unwrap();
-        assert_eq!((task.status, task.number), (status, number), "{id}");
+        assert_eq!((task.status, task.number), (status, Some(number)), "{id}");
         assert_eq!(task.priority, Priority::from_int(priority as i32), "{id}");
         let workspace = if flow == OPS_FLOW {
             ops

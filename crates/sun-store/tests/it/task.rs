@@ -1,11 +1,11 @@
-//! Tasks: the T23 rebuild on a seeded old database, numbers, keys and the
-//! activity log.
+//! Tasks: the T23 rebuild on a seeded old database, numbers, keys, chats
+//! and the activity log.
 #![allow(clippy::unwrap_used)]
 
 use serde_json::json;
 use sqlx::migrate::Migrate;
 use sqlx::{Connection, SqliteConnection};
-use sun_core::model::{ActivityKind, Priority, Run, Task, TaskKey};
+use sun_core::model::{ActivityKind, Priority, Run, Task, TaskKey, TaskKind};
 use sun_core::{RunId, RunStatus, TaskId, TaskStatus, WorkflowId, WorkspaceId};
 use sun_store::{RunRepo, Store, TaskRepo, WorkspaceRepo};
 
@@ -246,7 +246,7 @@ async fn task_migration_backfills_a_seeded_old_database() {
     let ops: WorkspaceId = OPS.parse().unwrap();
     for (id, _, _, priority, status, number) in OLD {
         let task = tx.get_task(id.parse().unwrap()).await.unwrap();
-        assert_eq!((task.status, task.number), (status, number), "{id}");
+        assert_eq!((task.status, task.number), (status, Some(number)), "{id}");
         assert_eq!(task.priority, Priority::from_int(priority as i32), "{id}");
         assert_eq!(task.position, f64::from(number));
         let want = if id == OLD[10].0 {
@@ -318,6 +318,33 @@ async fn task_migration_backfills_a_seeded_old_database() {
 }
 
 #[tokio::test]
+async fn a_chat_takes_no_number_and_stays_off_task_lists() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let task = Task::new(WorkspaceId::MAIN, "Fix the login");
+    assert_eq!(tx.insert_task(&task).await.unwrap(), Some(1));
+    let chat = Task {
+        kind: TaskKind::Chat,
+        source_task_id: Some(task.id),
+        ..Task::new(WorkspaceId::MAIN, "Fix the login")
+    };
+    assert_eq!(tx.insert_task(&chat).await.unwrap(), None);
+    let stored = tx.get_task(chat.id).await.unwrap();
+    assert_eq!(
+        (stored.number, stored.kind, stored.source_task_id),
+        (None, TaskKind::Chat, Some(task.id))
+    );
+    let ids = |tasks: Vec<Task>| tasks.into_iter().map(|t| t.id).collect::<Vec<_>>();
+    assert_eq!(ids(tx.tasks().await.unwrap()), [task.id]);
+    let on_main = tx.tasks_of_workspace(WorkspaceId::MAIN).await.unwrap();
+    assert_eq!(ids(on_main), [task.id]);
+    // No gap in the keys: the next task is 2.
+    let next = Task::new(WorkspaceId::MAIN, "Next");
+    assert_eq!(tx.insert_task(&next).await.unwrap(), Some(2));
+}
+
+#[tokio::test]
 async fn task_numbers_are_unique_under_concurrent_creates() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
@@ -337,7 +364,7 @@ async fn task_numbers_are_unique_under_concurrent_creates() {
         .collect();
     let mut numbers = Vec::new();
     for create in creates {
-        numbers.push(create.await.unwrap());
+        numbers.push(create.await.unwrap().unwrap());
     }
     numbers.sort_unstable();
     assert_eq!(numbers, (1..=20).collect::<Vec<u32>>());
@@ -348,7 +375,7 @@ async fn task_numbers_are_unique_under_concurrent_creates() {
         prefix: "main".into(),
         number: 7,
     };
-    assert_eq!(tx.task_by_key(&key).await.unwrap().number, 7);
+    assert_eq!(tx.task_by_key(&key).await.unwrap().number, Some(7));
     let missing = TaskKey {
         prefix: "MAIN".into(),
         number: 21,

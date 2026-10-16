@@ -179,8 +179,10 @@ export const api = {
   create_task: (input: CreateTask) => request<TaskSummary>('POST', '/tasks', input),
   /** Fields and moves; an illegal move is 409 with a plain sentence. */
   update_task: (id: string, patch: TaskPatch) => request<TaskSummary>('PATCH', `/tasks/${id_path(id)}`, patch),
-  /** A comment of 1–10 000 characters, as the next activity entry. */
-  comment_task: (id: string, body: string) => request<TaskActivity>('POST', `/tasks/${id_path(id)}/comments`, { body }),
+  /** A comment of 1–10 000 characters, as the next activity entry; `mentions` (agent ids, at most
+   *  five) wake instead of the assignee. */
+  comment_task: (id: string, body: string, mentions: string[] = []) =>
+    request<TaskActivity>('POST', `/tasks/${id_path(id)}/comments`, mentions.length ? { body, mentions } : { body }),
   task_activity: (id: string, after = 0) => request<TaskActivity[]>('GET', `/tasks/${id_path(id)}/activity?after=${after}`),
   task_runs: (id: string) => request<TaskRun[]>('GET', `/tasks/${id_path(id)}/runs`),
   /** Any run of a task (not only the latest), with its steps and gates. */

@@ -1,6 +1,8 @@
 <!-- A task's Activity: comments (an agent's final message is its reply), moves, priority, assignee and project changes, and runs ("{runner} started
      a run", "{runner} completed a run", "Run 2 failed"), merged by time (the page streams the log live).
-     A comment box sticks to the bottom: ⌘↵ / Ctrl+↵ sends, and on an agent's task the comment wakes it. -->
+     A comment box sticks to the bottom: ⌘↵ / Ctrl+↵ sends, and on an agent's task the comment wakes it.
+     Typing @ lists the workspace's agents: a picked one is mentioned, and the mentioned agents wake
+     instead of the assignee (each answers in the thread). -->
 <script lang="ts">
   import { Button, Icon } from '@hryer/madlabs-design-system/svelte';
   import TextArea from '../lib/ui/TextArea.svelte';
@@ -29,9 +31,28 @@
     on_comment: (entry: TaskActivity) => void;
   } = $props();
 
-  type Entry = { key: string; at: string; icon: string; who: string; text: string; comment?: string; tone?: 'danger' };
+  type Entry = {
+    key: string;
+    at: string;
+    icon: string;
+    who: string;
+    text: string;
+    comment?: string;
+    /** Names the comment mentions, highlighted in it. */
+    mentioned?: string[];
+    tone?: 'danger';
+  };
 
   const status_label = (s: unknown) => STATUS_BADGE[s as TaskStatus]?.[1] ?? String(s);
+  const agent_name = (id: unknown) => app.agents.find((a) => a.id === id)?.name;
+
+  /** `text` cut around `@Name` of each mentioned name (longest first), mentions marked. */
+  function segments(text: string, names: string[]): { text: string; mention: boolean }[] {
+    if (!names.length) return [{ text, mention: false }];
+    const escaped = [...names].sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const parts = text.split(new RegExp(`(@(?:${escaped.join('|')}))`));
+    return parts.filter(Boolean).map((part) => ({ text: part, mention: names.some((n) => part === `@${n}`) }));
+  }
   const project_label = (id: unknown) => projects.find((p) => p.id === id)?.name ?? 'a project';
 
   function describe(a: TaskActivity): Entry {
@@ -39,12 +60,12 @@
     const who = actor_name(b.by, app.me?.user);
     const base = { key: `a${a.seq}`, at: a.created_at, who };
     switch (a.kind) {
-      case 'comment':
-        if (b.by_agent) {
-          const agent = app.agents.find((x) => x.id === b.by_agent)?.name ?? runner;
-          return { ...base, who: agent, icon: 'bot', text: 'replied', comment: String(b.text ?? '') };
-        }
-        return { ...base, icon: 'message-square', text: 'commented', comment: String(b.text ?? '') };
+      case 'comment': {
+        const comment = String(b.text ?? '');
+        if (b.by_agent) return { ...base, who: agent_name(b.by_agent) ?? runner, icon: 'bot', text: 'replied', comment };
+        const mentioned = ((b.mentions as string[] | undefined) ?? []).map(agent_name).filter((n): n is string => !!n);
+        return { ...base, icon: 'message-square', text: 'commented', comment, mentioned };
+      }
       case 'created':
         return { ...base, icon: 'circle-plus', text: `created the task in ${status_label(b.status)}` };
       case 'status':
@@ -92,7 +113,43 @@
   let draft = $state('');
   let sending = $state(false);
   const SEND_KEY = SIDEBAR_SHORTCUT.startsWith('⌘') ? '⌘↵' : 'Ctrl+↵';
-  const wakes = $derived(task.assignee?.kind === 'agent');
+
+  /** Agents picked from the @ list; the ones whose `@Name` is still in the draft are mentioned. */
+  let picked = $state<string[]>([]);
+  const mentions = $derived(
+    app.agents.filter((a) => picked.includes(a.id) && draft.includes(`@${a.name}`)),
+  );
+  const wakes = $derived(mentions.length ? mentions.map((a) => a.name).join(', ') : task.assignee?.kind === 'agent' ? runner : '');
+
+  /** The open @ list: what follows the @ before the caret, and the highlighted option. */
+  let query = $state<string | null>(null);
+  let active = $state(0);
+  let field: HTMLTextAreaElement | null = null;
+  const options = $derived(
+    query === null
+      ? []
+      : app.agents.filter((a) => a.workspace_id === task.workspace_id && a.name.toLowerCase().startsWith(query!.toLowerCase())).slice(0, 8),
+  );
+  const listing = $derived(options.length > 0);
+
+  function typed(e: Event) {
+    field = e.target as HTMLTextAreaElement;
+    const before = field.value.slice(0, field.selectionStart);
+    query = /(?:^|\s)@([^\s@]{0,30})$/.exec(before)?.[1] ?? null;
+    active = 0;
+  }
+
+  function pick(agent: { id: string; name: string }) {
+    if (!field || query === null) return;
+    const at = field.selectionStart - query.length - 1;
+    const insert = `@${agent.name} `;
+    draft = draft.slice(0, at) + insert + draft.slice(field.selectionStart);
+    picked = [...picked, agent.id];
+    query = null;
+    const caret = at + insert.length;
+    requestAnimationFrame(() => field?.setSelectionRange(caret, caret));
+    field.focus();
+  }
 
   async function send(e?: Event) {
     e?.preventDefault();
@@ -100,8 +157,9 @@
     if (!text || sending) return;
     sending = true;
     try {
-      on_comment(await api.comment_task(task.id, text));
+      on_comment(await api.comment_task(task.id, text, mentions.map((a) => a.id)));
       draft = '';
+      picked = [];
     } catch (err) {
       toast('danger', 'Comment not sent', error_text(err));
     }
@@ -109,6 +167,14 @@
   }
 
   function key(e: KeyboardEvent) {
+    if (listing && ['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape'].includes(e.key) && !e.metaKey && !e.ctrlKey) {
+      e.preventDefault();
+      if (e.key === 'ArrowDown') active = (active + 1) % options.length;
+      else if (e.key === 'ArrowUp') active = (active - 1 + options.length) % options.length;
+      else if (e.key === 'Escape') query = null;
+      else pick(options[active]);
+      return;
+    }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send(e);
   }
 </script>
@@ -121,7 +187,11 @@
         <span class="entry__icon" class:entry__icon--danger={e.tone === 'danger'}><Icon name={e.icon} size={14} /></span>
         <div class="entry__body">
           <p class="entry__line"><strong>{e.who}</strong> {e.text} <time class="ml-mono entry__time" datetime={e.at}>{stamp(e.at)}</time></p>
-          {#if e.comment !== undefined}<p class="entry__comment">{e.comment}</p>{/if}
+          {#if e.comment !== undefined}
+            <p class="entry__comment">
+              {#each segments(e.comment, e.mentioned ?? []) as part, i (i)}{#if part.mention}<mark class="entry__mention">{part.text}</mark>{:else}{part.text}{/if}{/each}
+            </p>
+          {/if}
         </div>
       </li>
     {:else}
@@ -132,10 +202,33 @@
 
 {#if can('run')}
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions: ⌘↵ sends from the comment field -->
-  <form class="composer" onsubmit={send} onkeydown={key}>
-    <TextArea aria-label="Comment" aria-describedby="comment-hint" placeholder="Leave a comment…" rows={2} maxlength={10000} bind:value={draft} />
+  <form class="composer" onsubmit={send} onkeydown={key} oninput={typed}>
+    {#if listing}
+      <ul class="mentions" role="listbox" id="mention-list" aria-label="Mention an agent">
+        {#each options as agent, i (agent.id)}
+          <!-- svelte-ignore a11y_click_events_have_key_events: the comment field drives the list (arrows, Enter) -->
+          <li id="mention-{agent.id}" role="option" aria-selected={i === active} class="mentions__option" class:mentions__option--active={i === active} onmousedown={(e) => e.preventDefault()} onclick={() => pick(agent)}>
+            <Icon name="bot" size={14} /> {agent.name}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    <TextArea
+      aria-label="Comment"
+      aria-describedby="comment-hint"
+      aria-controls={listing ? 'mention-list' : undefined}
+      aria-expanded={listing}
+      aria-autocomplete="list"
+      aria-activedescendant={listing ? `mention-${options[active]?.id}` : undefined}
+      placeholder="Leave a comment… @ mentions an agent"
+      rows={2}
+      maxlength={10000}
+      bind:value={draft}
+    />
     <div class="composer__row">
-      <p class="composer__hint" id="comment-hint">{wakes ? `A comment wakes ${runner}: it reads it and picks the task up.` : 'Comments stay on the task for people to read.'}</p>
+      <p class="composer__hint" id="comment-hint">
+        {mentions.length ? `Wakes ${wakes}: each answers here.` : wakes ? `A comment wakes ${runner}: it reads it and picks the task up.` : 'Comments stay on the task for people to read.'}
+      </p>
       <Button size="sm" variant="ice" iconLeft="send" type="submit" loading={sending} disabled={!draft.trim()} aria-keyshortcuts="Meta+Enter Control+Enter">
         Comment <kbd class="composer__kbd" aria-hidden="true">{SEND_KEY}</kbd>
       </Button>
@@ -204,6 +297,34 @@
     color: var(--fg-1);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .entry__mention {
+    padding: 0 2px;
+    border-radius: 4px;
+    background: var(--accent-soft);
+    color: var(--fg-accent);
+    font-weight: 600;
+  }
+  .mentions {
+    list-style: none;
+    margin: 0;
+    padding: var(--space-1);
+    border-radius: var(--radius-lg);
+    border: 1.5px solid var(--border-subtle);
+    background: var(--surface-card);
+  }
+  .mentions__option {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    color: var(--fg-1);
+    cursor: pointer;
+  }
+  .mentions__option--active {
+    background: var(--accent-soft);
   }
   .entry__empty {
     font-size: 13px;

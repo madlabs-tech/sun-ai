@@ -30,7 +30,10 @@
 //!   Needs you or Failed task it moves the task to Todo, which resumes the
 //!   paused run or queues a new one, the comment going to its next session.
 //!   The engine handles comments one at a time, so a storm of them finds
-//!   the run the first one queued and queues no other.
+//!   the run the first one queued and queues no other. A comment that
+//!   @mentions agents wakes only them (`conversation`).
+//! - **Chats** (`TaskKind::Chat`) follow the same rules; they start in
+//!   Needs you, so their first message queues their first run.
 //! - **Assigning** ([`Engine::assign_task`]) cancels the task's run going
 //!   (it no longer moves the task) and, on an open task out of Backlog,
 //!   queues one for the new assignee.
@@ -39,7 +42,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use serde_json::{Value, json};
-use sun_core::model::{ActivityKind, Assignee, Priority, Run, Task, TaskActivity, TaskKey};
+use sun_core::model::{
+    ActivityKind, Assignee, Priority, Run, Task, TaskActivity, TaskKey, TaskKind,
+};
 use sun_core::{
     AgentId, Error, ExecEnvSpec, MemberId, ProjectId, Result, RunId, RunStatus, StateMachine,
     StepStatus, TaskId, TaskStatus, WorkflowId, WorkspaceId,
@@ -51,7 +56,7 @@ use sun_workflow::StepKind;
 use tokio::sync::broadcast;
 
 use super::{Command, Engine, Executor, pause, state};
-use crate::{agents, queue, queued};
+use crate::{agents, conversation, queue, queued};
 
 /// Who did something to a task: a person (signed in, or the token holder,
 /// who has no member id) as the audit names them, e.g. `user:ana`.
@@ -345,7 +350,7 @@ impl Executor {
             }
             RunAction::Queue => {
                 let trigger = if message.is_some() {
-                    crate::conversation::COMMENT
+                    conversation::COMMENT
                 } else {
                     "moved"
                 };
@@ -469,7 +474,7 @@ impl Executor {
         drop(tx);
         // A message left for a later session says who wrote it.
         let left = match &actor {
-            Some(actor) => format!("{}: {text}", crate::conversation::person(&actor.name)),
+            Some(actor) => format!("{}: {text}", conversation::person(&actor.name)),
             None => text.clone(),
         };
         match active.map(|r| (r.id, r.status)) {
@@ -768,19 +773,26 @@ impl Engine {
         Ok(tx.commit().await?)
     }
 
-    /// A person's comment on the task (1–10 000 characters). On a task
-    /// assigned to an agent it steers or wakes the agent (see the module
+    /// A person's comment on the task (1–10 000 characters), mentioning
+    /// `mentions` (`conversation::mentioned`). It steers or wakes the
+    /// mentioned agents (each on the task if it is the assignee, else in its
+    /// mention chat), or with no mentions the task's agent (see the module
     /// doc); a wake that fails is logged, and the comment stays.
     pub async fn comment(
         &self,
         task_id: TaskId,
         text: &str,
         actor: Option<Actor>,
+        mentions: &[AgentId],
     ) -> Result<TaskActivity> {
         let text = TaskActivity::clean_comment(text)?;
         let mut tx = self.store.begin().await?;
-        let agent = tx.get_task(task_id).await?.assignee_agent_id;
-        let comment = json!({ "text": text });
+        let task = tx.get_task(task_id).await?;
+        let mentions = conversation::mentioned(&mut tx, &task, mentions).await?;
+        let mut comment = json!({ "text": text });
+        if !mentions.is_empty() {
+            comment["mentions"] = json!(mentions);
+        }
         let activity = log(
             &mut tx,
             task_id,
@@ -789,9 +801,20 @@ impl Engine {
             comment,
         )
         .await?;
+        let mut wake = Vec::new();
+        if mentions.is_empty() && task.assignee_agent_id.is_some() {
+            wake.push(task_id);
+        }
+        for agent in mentions {
+            wake.push(match task.assignee_agent_id == Some(agent) {
+                true => task_id,
+                false => conversation::mention_chat(&mut tx, &task, agent).await?,
+            });
+        }
         tx.commit().await?;
-        if agent.is_some() {
-            let wake = self
+        for task_id in wake {
+            let (text, actor) = (text.clone(), actor.clone());
+            let woken = self
                 .request(|reply| Command::Comment {
                     task_id,
                     text,
@@ -799,7 +822,7 @@ impl Engine {
                     reply,
                 })
                 .await;
-            if let Err(e) = wake {
+            if let Err(e) = woken {
                 eprintln!("sun: task {task_id}: the comment didn't reach its agent: {e}");
             }
         }
@@ -843,18 +866,20 @@ pub(crate) async fn set_priority(
     Ok(())
 }
 
-/// The task's key, `<PREFIX>-<number>` on its workspace.
+/// The task's key, `<PREFIX>-<number>` on its workspace; `InvalidInput` for a chat.
 pub(crate) async fn key_of(tx: &mut Tx, task: &Task) -> Result<TaskKey> {
     let prefix = tx.get_workspace(task.workspace_id).await?.issue_prefix;
-    Ok(TaskKey {
-        prefix,
-        number: task.number,
-    })
+    task.key(prefix)
 }
 
 /// The task's git branch, `sun/<KEY>-<slug>` ([`TaskKey::branch`]): what
-/// the host checks out and every PR, review and merge is matched on.
+/// the host checks out and every PR, review and merge is matched on. A
+/// chat has no key, and no repos, but its runs still read one
+/// (`outbox::RunFacts`): `sun/chat-<id>`, which no key parses from.
 pub(crate) async fn branch_of(tx: &mut Tx, task: &Task) -> Result<String> {
+    if task.kind == TaskKind::Chat {
+        return Ok(format!("sun/chat-{}", task.id));
+    }
     Ok(key_of(tx, task).await?.branch(&task.title))
 }
 

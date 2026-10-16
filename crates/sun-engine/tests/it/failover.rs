@@ -410,7 +410,7 @@ impl Harness {
                 .await
                 .unwrap()
                 .issue_prefix,
-            number: tx.get_task(task.id).await.unwrap().number,
+            number: tx.get_task(task.id).await.unwrap().number.unwrap(),
         }
         .branch(&task.title);
         let pinned = TaskContext {

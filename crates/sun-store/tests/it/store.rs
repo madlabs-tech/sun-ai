@@ -319,7 +319,11 @@ async fn workflow_versions_count_up_and_tasks_queue_by_priority() {
     let mut urgent = tx.get_task(run.task_id).await.unwrap();
     urgent.id = TaskId::generate();
     urgent.priority = sun_core::model::Priority::Urgent;
-    assert_eq!(tx.insert_task(&urgent).await.unwrap(), 2, "the next number");
+    assert_eq!(
+        tx.insert_task(&urgent).await.unwrap(),
+        Some(2),
+        "the next number"
+    );
     let queued = tx.tasks().await.unwrap();
     assert_eq!(
         queued.iter().map(|t| t.id).collect::<Vec<_>>(),

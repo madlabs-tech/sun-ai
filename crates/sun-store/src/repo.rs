@@ -13,10 +13,10 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Row, Sqlite, SqliteConnection, Transaction};
 use sun_core::model::{
     ActivityKind, Budget, ContextPack, EventRecord, OutboxItem, OutboxStatus, Run, Step, Task,
-    TaskActivity, TaskKey, Workflow, WorkflowVersion,
+    TaskActivity, TaskKey, TaskKind, Workflow, WorkflowVersion,
 };
 use sun_core::{
-    BlobHash, ContextPackId, MemberId, OutboxId, RunId, RunStatus, RuntimeId, SessionId,
+    AgentId, BlobHash, ContextPackId, MemberId, OutboxId, RunId, RunStatus, RuntimeId, SessionId,
     StateMachine, StepId, StepKey, StepStatus, SunEvent, TaskActivityId, TaskId, TaskStatus,
     Timestamp, WorkflowId, WorkspaceId,
 };
@@ -128,10 +128,10 @@ pub trait WorkflowRepo {
 pub trait TaskRepo {
     /// Inserts a task with the next number of its workspace
     /// (`issue_counter + 1`, counted here, so numbers are unique) and that
-    /// number as its position; returns the number. `task.number` and
-    /// `task.position` are not read. `InvalidInput` when its workflow or
-    /// project is on another workspace.
-    async fn insert_task(&mut self, task: &Task) -> Result<u32>;
+    /// number as its position; returns the number. A chat takes no number
+    /// (position 0). `task.number` and `task.position` are not read.
+    /// `InvalidInput` when its workflow or project is on another workspace.
+    async fn insert_task(&mut self, task: &Task) -> Result<Option<u32>>;
     /// The task, or `NotFound`.
     async fn get_task(&mut self, id: TaskId) -> Result<Task>;
     /// The task `key` names (its prefix in any case), or `NotFound`.
@@ -152,10 +152,12 @@ pub trait TaskRepo {
     /// Turns "move when PRs merge" off (or back on) for one task; `NotFound`
     /// when missing.
     async fn set_pr_auto_complete(&mut self, id: TaskId, disabled: bool) -> Result<()>;
-    /// Every task, highest [`Priority::rank`] first, then oldest first.
+    /// Every task (no chats), highest [`Priority::rank`] first, then oldest first.
     async fn tasks(&mut self) -> Result<Vec<Task>>;
     /// The tasks of one workspace, in [`Self::tasks`] order.
     async fn tasks_of_workspace(&mut self, workspace_id: WorkspaceId) -> Result<Vec<Task>>;
+    /// The chat `agent` was @mentioned into on `source`, if any.
+    async fn mention_chat(&mut self, source: TaskId, agent: AgentId) -> Result<Option<Task>>;
     /// Saves the task's title, body, workflow, priority, assignee, project
     /// and position, and sets `updated_at`. `NotFound` if there is no task;
     /// `InvalidInput` when the project is on another workspace.
@@ -446,7 +448,7 @@ pub(crate) fn workflow_from(row: &SqliteRow) -> Result<Workflow> {
 
 const TASK_COLUMNS: &str = "id, workspace_id, number, title, body, workflow_id, priority, status, \
      pr_auto_complete_disabled, assignee_agent_id, project_id, position, created_by, created_at, \
-     updated_at";
+     updated_at, kind, source_task_id";
 
 impl Tx {
     /// `InvalidInput` unless the task's workflow and project are on its workspace.
@@ -494,19 +496,25 @@ impl Tx {
 
 #[async_trait]
 impl TaskRepo for Tx {
-    async fn insert_task(&mut self, task: &Task) -> Result<u32> {
+    async fn insert_task(&mut self, task: &Task) -> Result<Option<u32>> {
         self.check_task_links(task).await?;
-        let number: i64 = sqlx::query_scalar(
-            "UPDATE workspace SET issue_counter = issue_counter + 1 WHERE id = $1
-             RETURNING issue_counter",
-        )
-        .bind(task.workspace_id.to_string())
-        .fetch_optional(self.conn())
-        .await?
-        .ok_or_else(|| StoreError::not_found("workspace", task.workspace_id))?;
+        let number: Option<i64> = match task.kind {
+            TaskKind::Chat => None,
+            TaskKind::Task => Some(
+                sqlx::query_scalar(
+                    "UPDATE workspace SET issue_counter = issue_counter + 1 WHERE id = $1
+                     RETURNING issue_counter",
+                )
+                .bind(task.workspace_id.to_string())
+                .fetch_optional(self.conn())
+                .await?
+                .ok_or_else(|| StoreError::not_found("workspace", task.workspace_id))?,
+            ),
+        };
         sqlx::query(&format!(
             "INSERT INTO task ({TASK_COLUMNS})
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $3, $12, $13, $14)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, coalesce($3, 0), $12, $13,
+                     $14, $15, $16)"
         ))
         .bind(task.id.to_string())
         .bind(task.workspace_id.to_string())
@@ -522,10 +530,16 @@ impl TaskRepo for Tx {
         .bind(task.created_by.map(|m| m.to_string()))
         .bind(ts(&task.created_at))
         .bind(ts(&task.updated_at))
+        .bind(task.kind.as_str())
+        .bind(task.source_task_id.map(|t| t.to_string()))
         .execute(self.conn())
         .await?;
-        u32::try_from(number)
-            .map_err(|_| sun_core::Error::InvalidInput(format!("task number {number}")).into())
+        number
+            .map(|n| {
+                u32::try_from(n)
+                    .map_err(|_| sun_core::Error::InvalidInput(format!("task number {n}")).into())
+            })
+            .transpose()
     }
 
     async fn get_task(&mut self, id: TaskId) -> Result<Task> {
@@ -597,12 +611,24 @@ impl TaskRepo for Tx {
     }
 
     async fn tasks(&mut self) -> Result<Vec<Task>> {
-        self.tasks_where("", None).await
+        self.tasks_where("WHERE kind = 'task'", None).await
     }
 
     async fn tasks_of_workspace(&mut self, workspace_id: WorkspaceId) -> Result<Vec<Task>> {
-        self.tasks_where("WHERE workspace_id = $1", Some(workspace_id.to_string()))
+        let filter = "WHERE kind = 'task' AND workspace_id = $1";
+        self.tasks_where(filter, Some(workspace_id.to_string()))
             .await
+    }
+
+    async fn mention_chat(&mut self, source: TaskId, agent: AgentId) -> Result<Option<Task>> {
+        let row = sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM task WHERE source_task_id = $1 AND assignee_agent_id = $2"
+        ))
+        .bind(source.to_string())
+        .bind(agent.to_string())
+        .fetch_optional(self.conn())
+        .await?;
+        row.as_ref().map(task_from).transpose()
     }
 
     async fn update_task(&mut self, task: &Task) -> Result<()> {
@@ -1180,7 +1206,13 @@ fn task_from(row: &SqliteRow) -> Result<Task> {
     Ok(Task {
         id: parse(row.try_get("id")?)?,
         workspace_id: parse(row.try_get("workspace_id")?)?,
-        number: u32_at(row, "number")?,
+        number: row
+            .try_get::<Option<i64>, _>("number")?
+            .map(|n| {
+                u32::try_from(n)
+                    .map_err(|_| sun_core::Error::InvalidInput(format!("stored number {n}")))
+            })
+            .transpose()?,
         title: row.try_get("title")?,
         body: row.try_get("body")?,
         workflow_id: parse_opt(row.try_get("workflow_id")?)?,
@@ -1193,6 +1225,8 @@ fn task_from(row: &SqliteRow) -> Result<Task> {
         created_by: parse_opt(row.try_get("created_by")?)?,
         created_at: parse_ts(row.try_get("created_at")?)?,
         updated_at: parse_ts(row.try_get("updated_at")?)?,
+        kind: parse(row.try_get("kind")?)?,
+        source_task_id: parse_opt(row.try_get("source_task_id")?)?,
     })
 }
 

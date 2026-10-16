@@ -1,6 +1,6 @@
 //! Agents over HTTP: CRUD (DELETE archives) behind `manage_runtimes` in
 //! the agent's workspace, reads for its members,
-//! readiness, assigning tasks, and the hidden system workflow.
+//! readiness, assigning tasks, the hidden system workflow, and @mentions.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use axum::http::StatusCode;
@@ -108,6 +108,48 @@ async fn agents_crud_needs_manage_runtimes_and_members_read_their_workspaces() {
 
 async fn task(app: &axum::Router, body: Value) -> (StatusCode, Value) {
     call(app, "POST", "/api/v1/tasks", Some(body)).await
+}
+
+#[tokio::test]
+async fn a_comment_mentions_agents_of_its_workspace_and_their_chats_stay_off_task_lists() {
+    let k = kernel().await;
+    let app = &k.app;
+    let new_agent = |name: &str| json!({ "name": name, "runtime_chain": ["claude-code"] });
+    let (_, ada) = call(app, "POST", "/api/v1/agents", Some(new_agent("Ada"))).await;
+    let (_, bob) = call(app, "POST", "/api/v1/agents", Some(new_agent("Bob"))).await;
+    let agent = json!({ "kind": "agent", "id": ada["id"] });
+    let body = json!({ "title": "Fix login", "workspace_id": MAIN, "status": "backlog", "assignee": agent });
+    let (_, view) = task(app, body).await;
+    let comments = format!("/api/v1/tasks/{}/comments", view["key"].as_str().unwrap());
+
+    let ask = json!({ "body": "@Bob thoughts?", "mentions": [bob["id"], bob["id"]] });
+    let (status, comment) = call(app, "POST", &comments, Some(ask)).await;
+    assert_eq!(status, StatusCode::CREATED, "{comment}");
+    assert_eq!(comment["body"]["mentions"], json!([bob["id"]]));
+    for bad in [json!(["00000000000000000000000009"]), json!(["not an id"])] {
+        let (status, _) = call(
+            app,
+            "POST",
+            &comments,
+            Some(json!({ "body": "hi", "mentions": bad })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    // Bob's mention chat is no task: one task listed, Bob has none assigned.
+    let (_, tasks) = call(app, "GET", "/api/v1/tasks", None).await;
+    assert_eq!(tasks.as_array().unwrap().len(), 1, "{tasks}");
+    let (_, listed) = call(app, "GET", "/api/v1/agents", None).await;
+    let count = |name: &str| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap()["task_count"]
+            .clone()
+    };
+    assert_eq!((count("Ada"), count("Bob")), (json!(1), json!(0)));
 }
 
 #[tokio::test]
