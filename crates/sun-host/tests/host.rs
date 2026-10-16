@@ -1108,3 +1108,90 @@ async fn a_bare_host_refuses_a_bypass_session() {
     drop(started);
     running.abort();
 }
+
+/// BLO-136 case 2b (abuse): a kernel check bypassed by a hand-crafted
+/// `SessionSpec`. Every spelling a runtime CLI reads as bypass must be
+/// refused on a bare host, not only Sun's snake_case one: the Claude Code
+/// adapter passes any mode it does not map through to `--permission-mode`
+/// as is (`sun_runtime::claude::cli_permission_mode`), and `claude` itself
+/// accepts `bypassPermissions`. An extension env is not isolation either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bare_host_refuses_bypass_under_any_spelling_or_in_an_extension_env() {
+    let (listener, url) = listen().await;
+    let data_dir = temp_dir("bypass-forged");
+    let fake = Arc::new(Fake::default());
+    let host = Host::open(HostConfig::new(&data_dir), vec![fake.clone()]).unwrap();
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let running = tokio::spawn(Arc::clone(&host).run(credentials));
+    let mut kernel = Kernel::accept(&listener).await;
+    kernel.hello().await;
+    let task_id = TaskId::generate();
+    let ReplyBody::Worktree { path } = kernel
+        .request(|id| KernelFrame::WorktreePrepare {
+            id,
+            worktree: Worktree::Folder { task_id },
+        })
+        .await
+    else {
+        panic!()
+    };
+    let spec = |mode: &str, exec_env: ExecEnvSpec| SessionSpec {
+        skills: None,
+        session_id: SessionId::generate(),
+        run_id: RunId::generate(),
+        step_key: StepKey::new("implement").unwrap(),
+        worktree: path.clone(),
+        envelope: "do it".into(),
+        envelope_parts: None,
+        model: None,
+        mcp_config: None,
+        env: BTreeMap::new(),
+        exec_env,
+        resume: None,
+        permission_mode: Some(mode.into()),
+        byo_key: None,
+    };
+    let extension = ExecEnvSpec::Extension(sun_core::ExtensionEnvSpec {
+        name: "echo.sandbox".into(),
+        config: serde_json::Value::Null,
+    });
+    let forged = [
+        ("bypassPermissions", ExecEnvSpec::Bare),
+        ("BYPASS_PERMISSIONS", ExecEnvSpec::Bare),
+        (" bypass_permissions", ExecEnvSpec::Bare),
+        ("bypass_permissions", extension),
+    ];
+    let mut started = Vec::new();
+    for (mode, env) in forged {
+        let kind = env.kind().to_owned();
+        // A started session streams events; read past them to the reply.
+        kernel.next_id += 1;
+        let id = kernel.next_id;
+        let start = KernelFrame::SessionStart {
+            id,
+            adapter: "fake".into(),
+            spec: Box::new(spec(mode, env)),
+        };
+        kernel.send(&start).await;
+        let body = loop {
+            match kernel.recv(false).await {
+                HostFrame::Reply { id: got, body } if got == id => break body,
+                _ => {}
+            }
+        };
+        if !matches!(&body, ReplyBody::Error { .. }) {
+            started.push(format!("{mode:?} on {kind}: {body:?}"));
+        }
+    }
+    running.abort();
+    assert!(
+        started.is_empty(),
+        "the host started bypass sessions outside a container or vm:\n{}",
+        started.join("\n")
+    );
+    assert!(fake.specs.lock().unwrap().is_empty(), "no session started");
+}
