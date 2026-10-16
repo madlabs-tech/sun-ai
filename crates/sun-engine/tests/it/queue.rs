@@ -238,8 +238,9 @@ async fn queue_respects_priority_fifo_caps_and_cooldown() {
     let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(1500);
     // What failover journals on a limit hit.
     let account = login(host, "fake");
-    let cooling = serde_json::json!({ "runtime": "fake", "account": account, "until": reset_at });
+    let cooling = serde_json::json!({ "runtime": "fake", "until": reset_at });
     let mut tx = store.begin().await.unwrap();
+    tx.set_cooldown(&account, Some(reset_at)).await.unwrap();
     tx.append_event(NewEvent::new(run_c, None, "runtime_cooling", cooling))
         .await
         .unwrap();
@@ -689,8 +690,9 @@ async fn chain_fails_over_to_market_runtime() {
     .await;
     let until = chrono::Utc::now() + chrono::Duration::minutes(10);
     let account = login(buyer, "fake");
-    let cooling = serde_json::json!({ "runtime": "fake", "account": account, "until": until });
+    let cooling = serde_json::json!({ "runtime": "fake", "until": until });
     let mut tx = store.begin().await.unwrap();
+    tx.set_cooldown(&account, Some(until)).await.unwrap();
     tx.append_event(NewEvent::new(run, None, "runtime_cooling", cooling))
         .await
         .unwrap();
@@ -1188,10 +1190,9 @@ async fn cooling_runtime_never_starts_a_run_under_random_interleavings() {
         let racer = new_task(format!("racer {round}")).await;
         let releaser = new_task(format!("releaser {round}")).await;
         let until = cool_now() + chrono::Duration::minutes(10);
-        // Lagging only with the cooldown in `runtime_state` too, as failover
-        // writes it: an event-only cooldown the receiver drops is lost.
-        let in_store = random(2) == 1;
-        let fillers = if in_store { random(3) * 700 } else { 0 };
+        // The cooldown is in `account_cooldown` with its event, as failover
+        // writes it; fillers may make the receiver lag past the event.
+        let fillers = random(3) * 700;
         // Another enqueue racing the cooldown's commit (it may start or not).
         let racing = {
             let queue = queue.clone();
@@ -1203,10 +1204,8 @@ async fn cooling_runtime_never_starts_a_run_under_random_interleavings() {
         };
         let mut tx = store.begin().await.unwrap();
         let account = login(host, "fake");
-        if in_store {
-            tx.set_cooldown(&account, Some(until)).await.unwrap();
-        }
-        let cooling = serde_json::json!({ "runtime": "fake", "account": account, "until": until });
+        tx.set_cooldown(&account, Some(until)).await.unwrap();
+        let cooling = serde_json::json!({ "runtime": "fake", "until": until });
         tx.append_event(NewEvent::new(anchor_run, None, "runtime_cooling", cooling))
             .await
             .unwrap();
@@ -1227,7 +1226,7 @@ async fn cooling_runtime_never_starts_a_run_under_random_interleavings() {
             assert_eq!(
                 run_of(&store, held).await,
                 Some((held_run, RunStatus::Queued)),
-                "{what}: started on a cooling runtime (in store: {in_store}, fillers: {fillers})"
+                "{what}: started on a cooling runtime (fillers: {fillers})"
             );
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -1499,8 +1498,9 @@ async fn queue_cools_the_account_not_every_host_with_the_tool() {
         created_by: None,
     };
     let account = Account::Credential(key.id).key(h1);
-    let cooling = serde_json::json!({ "runtime": "fake", "account": account, "until": until });
+    let cooling = serde_json::json!({ "runtime": "fake", "until": until });
     let mut tx = store.begin().await.unwrap();
+    tx.set_cooldown(&account, Some(until)).await.unwrap();
     assert!(tx.insert_runtime(&key).await.unwrap());
     tx.set_cooldown(&account, Some(until)).await.unwrap();
     tx.append_event(NewEvent::new(run_a, None, "runtime_cooling", cooling))

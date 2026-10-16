@@ -871,9 +871,10 @@ async fn failover_switches_to_the_next_runtime_mid_step() {
     let events = h.events().await;
     let cooling = events.iter().find(|e| e.kind == "runtime_cooling").unwrap();
     assert_eq!(cooling.payload["runtime"], "fake-limit");
+    // The journal is API-visible: it names the runtime, never the account key.
+    assert_eq!(cooling.payload.get("account"), None, "{}", cooling.payload);
     // The account that hit the limit: the CLI's own login on the run's host.
     let account = format!("login:{}:fake-limit", h.config.host);
-    assert_eq!(cooling.payload["account"], account.as_str());
     // The cooldown is stored, so it survives a restart.
     let mut read = h.store.read().await.unwrap();
     let stored = sun_store::RuntimeRepo::cooldowns(&mut read).await.unwrap();

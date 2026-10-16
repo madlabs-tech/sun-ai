@@ -31,14 +31,15 @@
 //! - Each active run counts against the runtime of its latest session
 //!   (`session_assigned`, so failover moves it), else the one it was
 //!   placed for.
-//! - A `runtime_cooling` event (failover journals one per limit hit) cools
-//!   its **account** until its end ([`Account`]): a `byo_key`/`credits`
+//! - A `runtime_cooling` event (failover journals one per limit hit, with
+//!   the account's cooldown stored in `account_cooldown`) cools its
+//!   **account** until its end ([`Account`]): a `byo_key`/`credits`
 //!   runtime's key on every host, a CLI's own login only on the host that hit
 //!   the limit. A chain entry is passed over while its account cools on every
 //!   host that may take the run, and a run never goes to a host where its
 //!   entry's account cools; a run waits only while every entry of its
-//!   workflow's chain is cooling. Cooldowns are reloaded from the store at
-//!   start. A timer re-pumps when the cooldown ends.
+//!   workflow's chain is cooling. Cooldowns are read from the store at
+//!   start and after each `runtime_cooling`. A timer re-pumps when the cooldown ends.
 //! - While the ecosystem's monthly spend cap is reached (`budget`), runs
 //!   with an agent step stay queued; raising the cap wakes the pump, and so
 //!   does a timer at the next month's start (UTC), when the count resets.
@@ -221,6 +222,7 @@ impl Queue {
             config,
             clock,
             cooling: HashMap::new(),
+            stale_cooling: false,
             held_until: None,
             sessions: HashMap::new(),
         };
@@ -496,6 +498,8 @@ struct Scheduler {
     /// Cooling accounts ([`Account::key`]) → end of the cooldown (a cache
     /// of `account_cooldown`, which failover writes).
     cooling: HashMap<String, Timestamp>,
+    /// A `runtime_cooling` was seen: reload `cooling` before the next pass.
+    stale_cooling: bool,
     /// The spend cap holds runs until this month start.
     held_until: Option<Timestamp>,
     /// Active runs → the runtime of their latest session (`session_assigned`).
@@ -535,9 +539,9 @@ impl Scheduler {
         }
     }
 
-    /// Merges the cooldowns stored in `account_cooldown` into the cache: at start,
-    /// and when the event receiver lagged and may have dropped a
-    /// `runtime_cooling` (failover writes both in one transaction).
+    /// Merges the cooldowns stored in `account_cooldown` into the cache: at
+    /// start, after a `runtime_cooling`, and when the event receiver lagged
+    /// and may have dropped one (failover writes both in one transaction).
     async fn reload_cooldowns(&mut self) -> Result<()> {
         for (account, until) in self.store.read().await?.cooldowns().await? {
             self.cool(account, until);
@@ -555,11 +559,10 @@ impl Scheduler {
     fn observe(&mut self, event: &EventRecord) -> bool {
         match event.kind.as_str() {
             "run_status" => true,
+            // The event names no account (it is API-visible); the cooldown
+            // is in `account_cooldown`, committed with it.
             "runtime_cooling" => {
-                let Ok(cooling) = serde_json::from_value::<Cooling>(event.payload.clone()) else {
-                    return false;
-                };
-                self.cool(cooling.account, cooling.until);
+                self.stale_cooling = true;
                 true
             }
             "session_assigned" => {
@@ -590,6 +593,9 @@ impl Scheduler {
                 }
                 Err(TryRecvError::Empty | TryRecvError::Closed) => break,
             }
+        }
+        if std::mem::take(&mut self.stale_cooling) {
+            self.reload_cooldowns().await?;
         }
         let now = (self.clock)();
         self.cooling.retain(|_, end| *end > now);
@@ -886,13 +892,6 @@ async fn ready_on<'a>(
         cache.insert(runtime.to_owned(), hosts);
     }
     Ok(cache.get(runtime).map_or(&[], Vec::as_slice))
-}
-
-/// A `runtime_cooling` event: `{runtime, account, until}`.
-#[derive(serde::Deserialize)]
-struct Cooling {
-    account: String,
-    until: Timestamp,
 }
 
 #[cfg(test)]

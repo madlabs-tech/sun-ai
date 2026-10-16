@@ -8,7 +8,8 @@ CREATE TABLE account_cooldown (
 ) STRICT;
 
 -- Cooldowns still running carry over: a key's as is, and a CLI login's on
--- every host, which is how it cooled before.
+-- every host of the runtime's workspace (another workspace's host never
+-- cools on it).
 INSERT INTO account_cooldown (account, until)
 SELECT account, MAX(until) FROM (
     SELECT 'cred:' || r.id AS account, s.cooldown_until AS until
@@ -16,8 +17,10 @@ SELECT account, MAX(until) FROM (
     WHERE s.status = 'cooling_down' AND s.cooldown_until IS NOT NULL
       AND r.source != 'byo_runtime'
     UNION ALL
-    SELECT 'login:' || h.id || ':' || r.adapter, s.cooldown_until
-    FROM runtime_state s JOIN runtime r ON r.id = s.runtime_id, host h
+    SELECT 'login:' || h.host_id || ':' || r.adapter, s.cooldown_until
+    FROM runtime_state s
+    JOIN runtime r ON r.id = s.runtime_id
+    JOIN workspace_host h ON h.workspace_id = r.workspace_id
     WHERE s.status = 'cooling_down' AND s.cooldown_until IS NOT NULL
       AND r.source = 'byo_runtime'
 )

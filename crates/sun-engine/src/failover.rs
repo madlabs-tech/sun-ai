@@ -9,7 +9,7 @@
 //! 1. `running → limit_hit`; the account the runtime spends
 //!    ([`Account`]: its key, or the CLI's login on the run's host) cools down
 //!    until `reset_at` (or [`DEFAULT_COOLDOWN`]), journalled as
-//!    `runtime_cooling {runtime, account, until}`; the old session is stopped
+//!    `runtime_cooling {runtime, until}` (the account's cooldown is stored, not journalled); the old session is stopped
 //!    and no longer routed. Another host's login of the same CLI stays usable.
 //! 2. The policy:
 //!    - `switch`: `limit_hit → handing_off` to the first runtime of the chain
@@ -530,7 +530,9 @@ impl Executor {
         let account = self.account(tx, step.run_id, &from).await?;
         self.failover.cooling.insert(account.clone(), until);
         tx.set_cooldown(&account, Some(until)).await?;
-        let payload = json!({ "runtime": from, "account": account, "until": until });
+        // The journal is API-visible (`GET /runs/{id}/events`): no account key.
+        // The queue reads the cooldown back from `account_cooldown`.
+        let payload = json!({ "runtime": from, "until": until });
         append(tx, step, RUNTIME_COOLING, payload).await?;
         self.stop_step_sessions(step.id, effects);
         self.limit_policy(tx, step, from, None, effects).await

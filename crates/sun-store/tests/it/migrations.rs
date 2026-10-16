@@ -142,8 +142,9 @@ async fn duplicate_passkey_credentials_keep_the_oldest() {
 }
 
 /// Cooldowns running when 20261106090000 lands carry over to
-/// `account_cooldown`: a key's as itself, a CLI login's on every host (how
-/// it cooled before); a runtime that isn't cooling carries nothing.
+/// `account_cooldown`: a key's as itself, a CLI login's on every host of the
+/// runtime's workspace (not on a host outside it); a runtime that isn't
+/// cooling carries nothing.
 #[tokio::test]
 async fn running_cooldowns_move_to_their_accounts() {
     use sqlx::migrate::Migrate;
@@ -157,7 +158,9 @@ async fn running_cooldowns_move_to_their_accounts() {
     }
     let until = "2026-10-16T20:00:00+00:00";
     for sql in [
-        "INSERT INTO host (id, name) VALUES ('H1', 'mac'), ('H2', 'vps')",
+        "INSERT INTO host (id, name) VALUES ('H1', 'mac'), ('H2', 'vps'), ('H3', 'other')",
+        "INSERT INTO workspace_host (workspace_id, host_id) VALUES
+           ('00000000000000000000000001', 'H1'), ('00000000000000000000000001', 'H2')",
         "INSERT INTO runtime (id, workspace_id, name, adapter, source) VALUES
            ('R1', '00000000000000000000000001', 'claude-credits', 'claude-code', 'credits'),
            ('R2', '00000000000000000000000001', 'claude-code', 'claude-code', 'byo_runtime'),
