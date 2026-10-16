@@ -18,7 +18,7 @@ test('runtimes: one row per host and CLI, each state with its badge, line and ac
 
   // Copy per state (TRD §6), one row each.
   const states: [string, RegExp | string, string | null][] = [
-    ['Claude Code on rina-laptop', /Host offline\s*rina-laptop hasn’t been seen since \d\d:\d\d\./, 'How to restart the host'],
+    ['Claude Code on rina-laptop', /Host offline\s*rina-laptop hasn’t been seen since \w{3} \d{1,2}, \d\d:\d\d\./, 'How to restart the host'],
     ['Claude Code on build-box-01', /Needs login\s*Claude Code is installed but not signed in on build-box-01\. Run claude auth login there\./, 'Check again'],
     ['OpenCode on build-box-01', /Limit reached\s*This account hit its usage limit\. Back at \d\d:\d\d\./, null],
     ['kiro-cli on build-box-01', /Not supported yet\s*Sun found kiro-cli 1\.4 but can’t run it yet\./, 'Request support'],

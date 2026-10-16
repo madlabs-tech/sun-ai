@@ -37,10 +37,7 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
         } else {
             Presence::Offline
         };
-        let last_seen = api
-            .hosts
-            .last_seen(host.id)
-            .unwrap_or_else(|| wire::created_at(&host.id.to_string()));
+        let last_seen = api.hosts.last_seen(host.id);
         let reported = match api.runtimes_model {
             RuntimesModel::V1 => installed(&host),
             RuntimesModel::V2 => projected
@@ -71,6 +68,11 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
             entry["probed_at"] = json!(probed_at);
             entry["host"] = json!({ "id": host.id, "name": host.name });
             entry["load"] = json!({ "active": load, "max": null });
+            // Not seen since this kernel started: the row's last probe
+            // (`v2`), else the enrolment (the host id's ULID time).
+            let last_seen = last_seen
+                .or(probed_at)
+                .unwrap_or_else(|| wire::created_at(&host.id.to_string()));
             entry["last_seen_at"] = json!(last_seen);
             entry["name"] = json!(tool);
             entry["source"] = json!(RuntimeSource::ByoRuntime);
