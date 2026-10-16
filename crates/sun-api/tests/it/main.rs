@@ -10,6 +10,7 @@ mod common;
 mod device;
 mod entitlement;
 mod features;
+mod host_liveness;
 mod isolation;
 mod knowledge;
 mod marketplace;
