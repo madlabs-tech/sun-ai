@@ -977,6 +977,101 @@ mod tests {
         assert_eq!(start, [(runs[0], docker_host), (runs[2], bare_host)]);
     }
 
+    /// The preferred host is a tiebreak among hosts that may take the run,
+    /// never a way around the exec env, VM room, runtime readiness or
+    /// workspace checks.
+    #[test]
+    fn queue_never_puts_a_run_on_its_preferred_host_when_that_one_cant_take_it() {
+        let (bare_host, docker_host, vm_host) =
+            (HostId::generate(), HostId::generate(), HostId::generate());
+        let hosts = [
+            (bare_host, vec!["bare".to_owned()], HostCap::default()),
+            (
+                docker_host,
+                vec!["bare".to_owned(), "container".to_owned()],
+                HostCap::default(),
+            ),
+            (
+                vm_host,
+                vec!["bare".to_owned(), "vm".to_owned()],
+                HostCap {
+                    memory_mb: Some(4096),
+                    ..HostCap::default()
+                },
+            ),
+        ];
+        let prefer = |host, env: &str| Want {
+            prefer: Some(host),
+            ..want(RunId::generate(), "claude", env)
+        };
+        let place = |w: &Want, runs_on: &dyn Fn(&HostId, &Want) -> bool| {
+            admit(
+                std::slice::from_ref(w),
+                &hosts,
+                &[],
+                &Caps::default(),
+                |_| false,
+                runs_on,
+            )
+        };
+        // A container run whose last session was on a bare-only host.
+        let container = prefer(bare_host, "container");
+        assert_eq!(place(&container, &any), [(container.run_id, docker_host)]);
+        // A VM run preferring a host without VMs ready.
+        let vm = prefer(docker_host, "vm");
+        assert_eq!(place(&vm, &any), [(vm.run_id, vm_host)]);
+        // Nowhere else has its env: it waits rather than land on the preferred one.
+        let stuck = prefer(bare_host, "vm");
+        let no_vm_host = |h: &HostId, _: &Want| *h != vm_host;
+        assert!(place(&stuck, &no_vm_host).is_empty());
+        // The preferred host has the VM env but not the RAM.
+        let big = Want {
+            load: Load {
+                memory_mb: 8192,
+                cpus: 1,
+            },
+            ..prefer(vm_host, "vm")
+        };
+        assert!(place(&big, &any).is_empty());
+        // Its CLI isn't ready there, or it isn't attached to the run's workspace.
+        let bare = prefer(docker_host, "bare");
+        let not_docker = |h: &HostId, _: &Want| *h != docker_host;
+        assert_eq!(place(&bare, &not_docker), [(bare.run_id, bare_host)]);
+        // A preferred host that is gone (offline: not a candidate at all).
+        let gone = prefer(HostId::generate(), "bare");
+        assert_eq!(place(&gone, &any), [(gone.run_id, bare_host)]);
+    }
+
+    /// Two runs prefer the same host with one slot left: the first takes it,
+    /// the second goes to the least busy other host instead of waiting.
+    #[test]
+    fn queue_sends_a_second_run_preferring_a_full_host_elsewhere() {
+        let (h1, h2, h3) = (HostId::generate(), HostId::generate(), HostId::generate());
+        let bare = |h: HostId, cap: HostCap| (h, vec!["bare".to_owned()], cap);
+        let hosts = [
+            bare(h1, HostCap::default()),
+            bare(h2, HostCap::default()),
+            bare(h3, runs_cap(1)),
+        ];
+        let active = [slot("claude", h1)];
+        let waiting = [
+            Want {
+                prefer: Some(h3),
+                ..want(RunId::generate(), "claude", "bare")
+            },
+            Want {
+                prefer: Some(h3),
+                ..want(RunId::generate(), "claude", "bare")
+            },
+        ];
+        let start = admit(&waiting, &hosts, &active, &Caps::default(), |_| false, any);
+        assert_eq!(
+            start,
+            [(waiting[0].run_id, h3), (waiting[1].run_id, h2)],
+            "h1 is busier than h2"
+        );
+    }
+
     /// A queued run gets the workspace repos the task and workflow text
     /// name; a coding workflow naming none fails fast while the workspace
     /// has repos, and runs in a folder when it has none.
