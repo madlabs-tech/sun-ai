@@ -454,10 +454,7 @@ pub struct TaskPullRequests {
 /// The task's PRs and the merge rule's decision, written nowhere.
 async fn view(tx: &mut Tx, task: &Task) -> Result<TaskPullRequests> {
     let workspace = tx.get_workspace(task.workspace_id).await?;
-    let key = TaskKey {
-        prefix: workspace.issue_prefix.clone(),
-        number: task.number,
-    };
+    let key = task.key(workspace.issue_prefix.clone())?;
     let links = tx.pull_requests_of_task(task.id).await?;
     let prs: Vec<PullRequest> = links.iter().map(|(_, pr)| pr.clone()).collect();
     let target = target_of(tx, task).await?;
@@ -626,10 +623,7 @@ pub(crate) async fn mirror(
     if pr.state == PrState::Merged && before != Some(PrState::Merged) {
         for link in tx.tasks_of_pull_request(pr.id).await? {
             let task = tx.get_task(link.task_id).await?;
-            let key = TaskKey {
-                prefix: workspace.issue_prefix.clone(),
-                number: task.number,
-            };
+            let key = task.key(workspace.issue_prefix.clone())?;
             let source = link_source(&link, &pr, &key);
             log_link(tx, task.id, &pr, "merged", source, None).await?;
             if !touched.contains(&task.id) {
@@ -1333,7 +1327,7 @@ mod tests {
 
     impl Seed {
         fn key(&self, task: &Task) -> String {
-            format!("{}-{}", self.workspace.issue_prefix, task.number)
+            format!("{}-{}", self.workspace.issue_prefix, task.number.unwrap())
         }
 
         async fn deliver(&self, payload: &Value) -> Option<PullRequest> {
@@ -1618,7 +1612,7 @@ mod tests {
         // key in a PR delivered to Ops links nothing in Main: a workspace
         // only links its own tasks, whatever prefixes the PR names.
         let (ops, ops_task) = other_workspace(&seed).await;
-        let ok = format!("OPS-{}", ops_task.number);
+        let ok = format!("OPS-{}", ops_task.number.unwrap());
         seed.deliver(&github_payload(
             4,
             &format!("{ok} and {wk}"),

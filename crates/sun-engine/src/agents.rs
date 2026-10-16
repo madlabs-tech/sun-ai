@@ -102,7 +102,8 @@ pub(crate) fn system_source(agent: &Agent) -> Result<(String, sun_workflow::Work
 
 /// `prompt` (a step's) for a session of `run`: on an agent's system
 /// workflow, its instructions followed by the task's key, title and
-/// description, then the workspace's repositories and how to work in them
+/// description (a mention chat's: the task it was mentioned on, and no
+/// repositories), then the workspace's repositories and how to work in them
 /// (the session runs in an empty folder and clones what it needs with the
 /// host machine's own git credentials); any other workflow's as it is.
 // ponytail: add `sun repo checkout <url>` reusing `Worktrees::fetch`'s bare
@@ -111,15 +112,31 @@ pub(crate) async fn with_task(tx: &mut Tx, run: &Run, prompt: String) -> Result<
     if tx.system_agent_of(run.workflow_id).await?.is_none() {
         return Ok(prompt);
     }
-    let task = tx.get_task(run.task_id).await?;
-    let key = tasks::key_of(tx, &task).await?;
+    let mut task = tx.get_task(run.task_id).await?;
     let mut out = match prompt.trim() {
         "" => String::new(),
         instructions => format!("{instructions}\n\n"),
     };
-    out.push_str(&format!("Your task: {key} {}", task.title));
+    // A mention chat: the task it came from, without its repos (a chat
+    // answers; the task's own agent does its work).
+    let mentioned = task.source_task_id.is_some();
+    if let Some(source) = task.source_task_id {
+        task = tx.get_task(source).await?;
+    }
+    let key = tasks::key_of(tx, &task).await?;
+    match mentioned {
+        true => out.push_str(&format!(
+            "You were mentioned on task {key} {}. Your final message is posted \
+             there as your reply.",
+            task.title
+        )),
+        false => out.push_str(&format!("Your task: {key} {}", task.title)),
+    }
     if !task.body.trim().is_empty() {
         out.push_str(&format!("\n\n{}", task.body.trim()));
+    }
+    if mentioned {
+        return Ok(out);
     }
     let repos = tx.repos(task.workspace_id).await?;
     if !repos.is_empty() {

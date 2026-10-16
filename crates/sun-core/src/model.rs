@@ -573,8 +573,9 @@ pub struct Task {
     pub id: TaskId,
     /// The workspace it is on.
     pub workspace_id: WorkspaceId,
-    /// Its number on the workspace, given by the store on insert (see [`TaskKey`]).
-    pub number: u32,
+    /// Its number on the workspace, given by the store on insert (see
+    /// [`TaskKey`]); `None` for a chat, which has no key.
+    pub number: Option<u32>,
     /// Title.
     pub title: String,
     /// Description.
@@ -601,6 +602,29 @@ pub struct Task {
     pub created_at: Timestamp,
     /// When a field or its status last changed.
     pub updated_at: Timestamp,
+    /// A board task, or a conversation with its agent.
+    #[serde(default)]
+    pub kind: TaskKind,
+    /// The task a chat's agent was @mentioned on; its replies go there.
+    #[serde(default)]
+    pub source_task_id: Option<TaskId>,
+}
+
+string_enum! {
+    /// What a [`Task`] is.
+    pub enum TaskKind {
+        /// A task on the board, with a key.
+        Task => "task",
+        /// A conversation with its agent: hidden from task lists, no key, no
+        /// repos.
+        Chat => "chat",
+    }
+}
+
+impl Default for TaskKind {
+    fn default() -> Self {
+        Self::Task
+    }
 }
 
 impl Task {
@@ -619,7 +643,7 @@ impl Task {
         Self {
             id,
             workspace_id,
-            number: 0,
+            number: None,
             title: title.into(),
             body: String::new(),
             workflow_id: None,
@@ -632,6 +656,8 @@ impl Task {
             created_by: None,
             created_at: now,
             updated_at: now,
+            kind: TaskKind::Task,
+            source_task_id: None,
         }
     }
 
@@ -646,6 +672,15 @@ impl Task {
                 Self::MAX_TITLE
             )))
         }
+    }
+
+    /// Its key on a workspace whose prefix is `prefix`; `InvalidInput` for
+    /// a chat, which has none.
+    pub fn key(&self, prefix: String) -> crate::Result<TaskKey> {
+        let number = self
+            .number
+            .ok_or_else(|| crate::Error::InvalidInput("A chat has no task key.".into()))?;
+        Ok(TaskKey { prefix, number })
     }
 
     /// True when it runs a workflow or an agent (the engine moves it after its run).

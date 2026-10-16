@@ -24,8 +24,8 @@ pub trait AgentRepo {
     /// Saves an agent's fields (`archived_at` too; never its workspace);
     /// `NotFound` or `InvalidInput` (name taken).
     async fn update_agent(&mut self, agent: &Agent) -> Result<()>;
-    /// The number of open tasks (not Done or Cancelled) assigned to each
-    /// agent, per workspace.
+    /// The number of open tasks (not Done or Cancelled, not chats) assigned
+    /// to each agent, per workspace.
     async fn agent_task_counts(&mut self) -> Result<Vec<(AgentId, WorkspaceId, u32)>>;
     /// Inserts `workflow` as `agent`'s system workflow on its workspace.
     async fn insert_system_workflow(&mut self, workflow: &Workflow, agent: AgentId) -> Result<()>;
@@ -119,6 +119,7 @@ impl AgentRepo for Tx {
         let rows: Vec<(String, String, i64)> = sqlx::query_as(
             "SELECT assignee_agent_id, workspace_id, count(*) FROM task
              WHERE assignee_agent_id IS NOT NULL AND status NOT IN ('done', 'cancelled')
+               AND kind = 'task'
              GROUP BY assignee_agent_id, workspace_id",
         )
         .fetch_all(self.conn())

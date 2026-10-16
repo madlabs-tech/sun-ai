@@ -8,8 +8,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sun_core::model::{
-    Artifact, Assignee, EventRecord, Priority, Run as RunRow, Step as StepRow, Task, TaskKey,
-    Workflow,
+    Artifact, Assignee, EventRecord, Priority, Run as RunRow, Step as StepRow, Task, Workflow,
 };
 use sun_core::{Result, RunStatus, StateMachine, TaskStatus, Timestamp, WorkflowId, WorkspaceId};
 use sun_engine::{Engine, Plan};
@@ -18,10 +17,11 @@ use sun_engine::{Engine, Plan};
 #[derive(Debug, Serialize)]
 pub(crate) struct TaskView {
     pub id: String,
-    /// `{issue_prefix}-{number}`.
-    pub key: String,
+    /// `{issue_prefix}-{number}`; `null` for a chat.
+    pub key: Option<String>,
     pub workspace_id: String,
-    pub number: u32,
+    /// `null` for a chat.
+    pub number: Option<u32>,
     pub title: String,
     pub body: String,
     pub priority: Priority,
@@ -166,14 +166,13 @@ impl Workflows {
         all
     }
 
-    /// The task's key, from its workspace's prefix (the one place keys are written).
-    pub(crate) fn task_key(&self, task: &Task) -> String {
+    /// The task's key, from its workspace's prefix (the one place keys are
+    /// written); `None` for a chat.
+    pub(crate) fn task_key(&self, task: &Task) -> Option<String> {
         let prefix = self.prefixes.get(&task.workspace_id).cloned();
-        TaskKey {
-            prefix: prefix.unwrap_or_default(),
-            number: task.number,
-        }
-        .to_string()
+        task.key(prefix.unwrap_or_default())
+            .ok()
+            .map(|k| k.to_string())
     }
 }
 
