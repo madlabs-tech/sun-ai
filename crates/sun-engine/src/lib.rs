@@ -47,6 +47,8 @@
 //! - `triggers`: mod triggers start tasks per workflow `on:`,
 //!   alerts and review corrections; run hooks feed `observe` mods the log.
 //! - `query`: the read **Facade** the API uses (it may not reach the store).
+//! - `conversation`: an agent's final message as its comment, and comment-woken
+//!   runs that pick the conversation up.
 
 mod access;
 mod agents;
@@ -54,6 +56,7 @@ mod approval;
 mod attention;
 mod base;
 mod budget;
+mod conversation;
 mod data_touched;
 mod device;
 mod dry_run;

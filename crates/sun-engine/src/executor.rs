@@ -1201,6 +1201,9 @@ impl Executor {
         {
             move_step(&mut tx, &mut step, next, None).await?;
             if next == StepStatus::Verifying {
+                if let SunEvent::DoneClaimed { summary } = &event.event {
+                    crate::conversation::reply(&mut tx, step.run_id, summary).await?;
+                }
                 // Agent steps have no inline gates; `gate` steps verify (see `gates`).
                 self.finish_agent(&mut tx, &mut step, &mut effects).await?;
             }
@@ -1330,6 +1333,9 @@ impl Executor {
             return self.apply(tripped).await;
         }
         move_step(&mut tx, &mut step, next, None).await?;
+        if let SunEvent::DoneClaimed { summary } = &claim {
+            crate::conversation::reply(&mut tx, run_id, summary).await?;
+        }
         // Agent steps have no inline gates; `gate` steps verify (see `gates`).
         let mut effects = Vec::new();
         self.finish_agent(&mut tx, &mut step, &mut effects).await?;
@@ -1949,7 +1955,8 @@ impl Executor {
                 move_step(tx, step, StepStatus::Dispatched, None).await?;
                 let adapter = self.first_runtime(tx, step).await?;
                 let prompt = self.agent_prompt(tx, step).await?;
-                self.assign_session(tx, step, &adapter, &prompt, None, effects)
+                let (prompt, resume) = self.follow_up(tx, step, &adapter, prompt).await?;
+                self.assign(tx, step, &adapter, &prompt, None, resume, effects)
                     .await?;
             }
             StepKind::Action { .. } | StepKind::Notify { .. } => {

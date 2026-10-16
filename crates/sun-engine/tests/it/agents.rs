@@ -1,7 +1,8 @@
 //! Agents end to end: the real engine, store and queue over a host whose
 //! agent sessions keep working until the test lets them finish. Covers the
-//! triggers (create, Backlog, comments, reassignment), a comment storm, and
-//! the hidden system workflow.
+//! triggers (create, Backlog, comments, reassignment), a comment storm, the
+//! hidden system workflow, and the conversation on a task's thread (the
+//! agent's reply as a comment, a comment resuming its session).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;
@@ -17,12 +18,12 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use sun_core::model::{Assignee, Host, Priority, Run, Task};
 use sun_core::{
-    AgentId, BoxStream, Error, HostEvent, HostId, HostLink, ModCall, ModLink, Result, Role,
-    RunStatus, SessionHandle, SessionId, SessionSpec, Steer, StepStatus, StopMode, SunEvent,
+    AgentId, BoxStream, EngineHandle, Error, HostEvent, HostId, HostLink, ModCall, ModLink, Result,
+    Role, RunStatus, SessionHandle, SessionId, SessionSpec, Steer, StepStatus, StopMode, SunEvent,
     TaskId, TaskStatus, WorkflowId, WorkspaceId,
 };
 use sun_engine::{
-    AgentFields, Engine, EngineConfig, NewTask, Queue, QueueConfig, Slot, WatchdogConfig,
+    Actor, AgentFields, Engine, EngineConfig, NewTask, Queue, QueueConfig, Slot, WatchdogConfig,
     WorkflowPick,
 };
 use sun_store::{
@@ -41,6 +42,12 @@ struct HoldHost {
     /// The skills each session got.
     skills: Mutex<Vec<Option<Vec<String>>>>,
     steers: Mutex<Vec<String>>,
+    /// Sessions get a native id (`n-<session id>`), so they can be resumed.
+    native: AtomicBool,
+    /// A start that resumes a session is refused (the CLI lost it).
+    refuse_resume: AtomicBool,
+    /// Each started session's `(resume, native id)`.
+    natives: Mutex<Vec<(Option<String>, Option<String>)>>,
     alive: Arc<Mutex<HashSet<SessionId>>>,
     sink: Arc<Mutex<Option<mpsc::UnboundedSender<HostEvent>>>>,
 }
@@ -68,6 +75,15 @@ impl HostLink for HoldHost {
         spec: SessionSpec,
     ) -> Result<SessionHandle> {
         let id = spec.session_id;
+        if spec.resume.is_some() && self.refuse_resume.load(Ordering::SeqCst) {
+            return Err(Error::InvalidInput("no conversation found".into()));
+        }
+        let native_id = match self.native.load(Ordering::SeqCst) {
+            true => Some(spec.resume.clone().unwrap_or_else(|| format!("n-{id}"))),
+            false => None,
+        };
+        let started = (spec.resume.clone(), native_id.clone());
+        self.natives.lock().unwrap().push(started);
         self.adapters.lock().unwrap().push(adapter.to_owned());
         self.skills.lock().unwrap().push(spec.skills.clone());
         self.envelopes.lock().unwrap().push(spec.envelope);
@@ -106,7 +122,7 @@ impl HostLink for HoldHost {
         });
         Ok(SessionHandle {
             session_id: id,
-            native_id: None,
+            native_id,
             pid: None,
         })
     }
@@ -301,6 +317,23 @@ impl Kernel {
     async fn comment(&self, task: TaskId, text: &str) {
         self.engine.comment(task, text, None).await.unwrap();
     }
+
+    /// The bodies of the task's comments, oldest first.
+    async fn comments(&self, task: TaskId) -> Vec<Value> {
+        let activity = self.engine.activity(task, 0).await.unwrap();
+        activity
+            .into_iter()
+            .filter(|a| a.kind == sun_core::model::ActivityKind::Comment)
+            .map(|a| a.body)
+            .collect()
+    }
+}
+
+fn ana() -> Option<Actor> {
+    Some(Actor {
+        member_id: None,
+        name: "user:ana".into(),
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -656,6 +689,100 @@ async fn saving_an_agent_regenerates_a_stale_system_workflow_version() {
     let mut tx = k.store.read().await.unwrap();
     let latest = tx.latest_workflow_version(system).await.unwrap().unwrap();
     assert_eq!((latest.version, &latest.source_yaml), (3, &v1.source_yaml));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agents_final_message_is_its_comment_and_wakes_nobody() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+    let run = k.runs(task).await[0].id;
+    let reply = json!({ "text": "done", "by_agent": ada, "run_id": run });
+    assert_eq!(k.comments(task).await, [reply]);
+    // No member wrote it, and it wakes nobody: no new run.
+    let activity = k.engine.activity(task, 0).await.unwrap();
+    assert!(activity.iter().all(|a| a.actor_member_id.is_none()));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(k.runs(task).await.len(), 1);
+    assert_eq!(k.get(task).await.status, TaskStatus::NeedsYou);
+
+    // `sun.done` claims through the engine: the same comment, once.
+    k.host.finish.store(false, Ordering::SeqCst);
+    k.comment(task, "Also fix signup").await;
+    k.until(task, TaskStatus::InProgress).await;
+    k.working(task).await;
+    let run = k.runs(task).await[1].id;
+    let step = sun_core::StepKey::new(sun_engine::AGENT_STEP).unwrap();
+    k.engine
+        .done(run, step, "Fixed signup too.".into())
+        .await
+        .unwrap();
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let texts: Vec<Value> = k
+        .comments(task)
+        .await
+        .iter()
+        .map(|c| c["text"].clone())
+        .collect();
+    assert_eq!(texts, ["done", "Also fix signup", "Fixed signup too."]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_comment_resumes_the_agents_last_session_or_a_fresh_one_reads_the_thread() {
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    let ada = k.agent("Ada").await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::NeedsYou).await;
+
+    // A comment: the next run resumes the last session with the new message.
+    k.host.finish.store(false, Ordering::SeqCst);
+    k.engine
+        .comment(task, "Also fix signup", ana())
+        .await
+        .unwrap();
+    eventually("the resumed session", || async {
+        k.host.envelopes().len() == 2
+    })
+    .await;
+    let natives = k.host.natives.lock().unwrap().clone();
+    assert!(natives[0].1.is_some());
+    assert_eq!(natives[1].0, natives[0].1, "resumes the first session");
+    let resumed = k.host.envelopes()[1].clone();
+    assert!(resumed.contains("Sun resumed this session"), "{resumed}");
+    assert!(resumed.contains("- ana: Also fix signup"), "{resumed}");
+    assert!(!resumed.contains("Your task:"), "{resumed}");
+
+    // The CLI lost it: a fresh session with the task and the thread.
+    k.host.finish.store(true, Ordering::SeqCst);
+    k.until(task, TaskStatus::NeedsYou).await;
+    k.host.finish.store(false, Ordering::SeqCst);
+    k.host.refuse_resume.store(true, Ordering::SeqCst);
+    k.engine
+        .comment(task, "And the logout", ana())
+        .await
+        .unwrap();
+    eventually("a fresh session", || async {
+        k.host.envelopes().len() == 3
+    })
+    .await;
+    let fresh = k.host.envelopes()[2].clone();
+    let at = |text: &str| {
+        fresh
+            .find(text)
+            .unwrap_or_else(|| panic!("{text}: {fresh}"))
+    };
+    assert!(at("You are Ada.") < at("Your task: MAIN-1 Fix the login"));
+    let thread = at("The conversation on this task so far, oldest first:");
+    assert!(thread < at("- Ada (you): done\n- ana: Also fix signup\n- Ada (you): done"));
+    assert!(
+        at("- ana: And the logout\n\nMessages left for this step:\n- ana: And the logout") > thread
+    );
 }
 
 /// Runs of `task` still going (queued, running or paused).

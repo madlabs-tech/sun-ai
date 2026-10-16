@@ -9,6 +9,11 @@
 //!   and `exited`) before any other event. The engine then journals
 //!   `resume_failed` (the notice) and starts a fresh session with the same
 //!   prompt and hand-off pack.
+//! - **A comment continues the task's last session.** The first session of
+//!   a run a comment queued ([`Executor::follow_up`]) resumes the CLI
+//!   session of the task's previous run when that one ran the same runtime
+//!   on the same host (the CLI keeps its sessions on the host). Its fresh
+//!   fallback reads the thread (`conversation::thread`).
 //! - **Retry while the host is unreachable.** A failed
 //!   `prepare_worktree`/`start_session` leaves the step `dispatched`; a
 //!   session whose host didn't answer the probe after a restart stays
@@ -24,12 +29,12 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::json;
-use sun_core::model::Step;
+use sun_core::model::{Run, Step};
 use sun_core::{Error, Result, RunStatus, SessionHandle, SessionId, StepId, StepStatus, SunEvent};
-use sun_store::{HostRepo, RunRepo, SessionRepo, Tx};
+use sun_store::{HostRepo, RunRepo, RuntimeRepo, SessionRepo, TaskRepo, Tx};
 
 use super::{Command, Effect, Executor, Start, append, kind, move_step};
-use crate::state;
+use crate::{conversation, queue, queued, state};
 
 /// A resumed session failed; payload `{step_id, session_id, native_id, error}`.
 const RESUME_FAILED: &str = "resume_failed";
@@ -155,6 +160,72 @@ impl Executor {
             "error": error,
         });
         append(tx, step, RESUME_FAILED, payload).await
+    }
+
+    /// The prompt (and resume) of an agent step's first session. On a run
+    /// a comment queued: `prompt` with the thread, or a resume of the task's
+    /// last session with the messages left for the step, falling back to
+    /// that. Any other start: `prompt` as it is.
+    pub(super) async fn follow_up(
+        &mut self,
+        tx: &mut Tx,
+        step: &Step,
+        runtime: &str,
+        prompt: String,
+    ) -> Result<(String, Option<Resume>)> {
+        if step.attempt != 1 || !conversation::woken_by_comment(tx, step.run_id).await? {
+            return Ok((prompt, None));
+        }
+        let run = tx.get_run(step.run_id).await?;
+        let me = tx.get_task(run.task_id).await?.assignee_agent_id;
+        let fresh = match conversation::thread(tx, run.task_id, me).await?.as_str() {
+            "" => prompt,
+            thread => format!("{prompt}\n\n{thread}"),
+        };
+        let native_id = match conversation::previous_run(tx, &run).await? {
+            Some(previous) => self.last_session(tx, &previous, &run, runtime).await?,
+            None => None,
+        };
+        let Some(native_id) = native_id else {
+            return Ok((fresh, None));
+        };
+        let messages = queued::take(tx, step).await?;
+        let first = format!("Sun resumed this session for new messages on your task.{messages}");
+        let resume = Resume {
+            native_id,
+            runtime: runtime.to_owned(),
+            prompt: fresh + &messages,
+        };
+        Ok((first, Some(resume)))
+    }
+
+    /// The CLI's own id of `previous`'s last agent session, when it ran
+    /// `runtime` on the host `run` is on.
+    async fn last_session(
+        &self,
+        tx: &mut Tx,
+        previous: &Run,
+        run: &Run,
+        runtime: &str,
+    ) -> Result<Option<String>> {
+        let host = queue::placed_host(tx, previous.id).await?;
+        if host.unwrap_or(self.config.host) != self.host(run.id) {
+            return Ok(None);
+        }
+        let last = tx
+            .steps_of_run(previous.id)
+            .await?
+            .into_iter()
+            .filter(|s| s.session_id.is_some())
+            .max_by_key(|s| s.started_at);
+        let Some((Some(session), Some(runtime_id))) = last.map(|s| (s.session_id, s.runtime_id))
+        else {
+            return Ok(None);
+        };
+        if tx.get_runtime(runtime_id).await?.name != runtime {
+            return Ok(None);
+        }
+        Ok(tx.get_session(session).await?.native_id)
     }
 
     /// `start_session` failed (the step is still `dispatched`, `tx` open).

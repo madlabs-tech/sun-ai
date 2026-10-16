@@ -46,6 +46,11 @@ pub(crate) async fn leave(tx: &mut Tx, run_id: RunId, text: &str) -> Result<Even
 /// `prompt` plus every message queued since the last delivery, which is
 /// journaled on `step` in the caller's transaction.
 pub(crate) async fn take_queued(tx: &mut Tx, step: &Step, prompt: String) -> Result<String> {
+    Ok(prompt + &take(tx, step).await?)
+}
+
+/// [`take_queued`]'s messages block (empty without messages).
+pub(crate) async fn take(tx: &mut Tx, step: &Step) -> Result<String> {
     let (mut after, mut queued) = (0, Vec::new());
     loop {
         let page = tx.events_after(Some(step.run_id), after, 500).await?;
@@ -60,7 +65,7 @@ pub(crate) async fn take_queued(tx: &mut Tx, step: &Step, prompt: String) -> Res
         }
     }
     let Some(through) = queued.last().map(|e| e.seq) else {
-        return Ok(prompt);
+        return Ok(String::new());
     };
     tx.append_event(NewEvent::new(
         step.run_id,
@@ -69,7 +74,7 @@ pub(crate) async fn take_queued(tx: &mut Tx, step: &Step, prompt: String) -> Res
         json!({ "step_id": step.id, "through": through, "count": queued.len() }),
     ))
     .await?;
-    let mut out = format!("{prompt}\n\nMessages left for this step:");
+    let mut out = String::from("\n\nMessages left for this step:");
     for e in &queued {
         out.push_str(&format!(
             "\n- {}",
