@@ -1,6 +1,6 @@
 // In-memory fake of the /api/v1 kernel API (Fake transport for the client).
 // Sample data mirrors the Madlabs orchestrator UI kit. State resets on reload.
-import type { OutboxItem, Agent, MemoryItem,
+import type { OutboxItem, Agent, Chat, MemoryItem,
   Workspace,
   Project,
   ApiError,
@@ -675,6 +675,50 @@ function start_agent_run(t: TaskDetail, trigger: string) {
   follow_run(t);
 }
 
+/** Chats (`GET|POST /chats`, and a chat's comments and activity under `/tasks/{id}`): each message runs the
+ *  agent, which "types" for a moment (a `text` event) and then replies in the chat. */
+const chats: Chat[] = [];
+const find_chat = (id: string) => chats.find((c) => c.id === id);
+
+function chat_route(method: string, parts: string[], params: URLSearchParams, input: Record<string, unknown>): unknown {
+  if (parts[0] === 'chats' && method === 'GET') {
+    const workspace = params.get('workspace') ?? MAIN_WORKSPACE;
+    return clone(chats.filter((c) => c.workspace_id === workspace).sort((a, b) => b.updated_at.localeCompare(a.updated_at)));
+  }
+  if (parts[0] === 'chats' && method === 'POST') {
+    const agent = find_agent(String(input.agent_id ?? ''));
+    if (!agent) throw not_found('agent');
+    if (agent.archived_at) throw invalid(`The agent ${agent.name} is archived; pick another one.`);
+    const now = new Date().toISOString();
+    const chat: Chat = {
+      id: fake_id('H', 700 + next_seq++), workspace_id: agent.workspace_id, agent_id: agent.id, title: `Chat with ${agent.name}`,
+      status: 'needs_you', run: null, last: null, queued_behind: [], created_at: now, updated_at: now,
+    };
+    chats.push(chat);
+    return clone(chat);
+  }
+  const chat = find_chat(parts[1]);
+  if (!chat) throw not_found('task');
+  // `log` reads only the id.
+  const as_task = chat as unknown as TaskDetail;
+  if (method === 'GET' && parts[2] === 'activity') return clone((activity.get(chat.id) ?? []).filter((a) => a.seq > Number(params.get('after') ?? 0)));
+  if (method !== 'POST' || parts[2] !== 'comments') throw not_found('route');
+  const text = String(input.body ?? '').trim();
+  if (!text || [...text].length > 10_000) throw invalid('Write a comment of 1 to 10000 characters.');
+  if ((input.mentions as unknown[] | undefined)?.length) throw invalid('Mention agents on a task, not in a chat.');
+  const entry = log(as_task, 'comment', { text }, undefined, true);
+  const run = { id: fake_id('R', 700 + next_seq++), status: 'running' };
+  Object.assign(chat, { last: entry, run, status: 'in_progress', updated_at: entry.created_at });
+  event(run.id, 'text', 'Looking into it…');
+  setTimeout(() => {
+    const name = find_agent(chat.agent_id)?.name ?? 'The agent';
+    const reply = log(as_task, 'comment', { text: `${name} here: noted. Ask me anything else.`, by_agent: chat.agent_id, run_id: run.id });
+    Object.assign(chat, { last: reply, status: 'needs_you', updated_at: reply.created_at });
+    run.status = 'succeeded';
+  }, 2500);
+  return clone(entry);
+}
+
 // Workflow files for the builder. Seed workflows get a minimal valid file; templates are the real ones.
 const STEP_FIELDS: Record<StepType, Record<string, unknown>> = {
   agent: { prompt: 'Do the work described in the task.' },
@@ -905,6 +949,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
   if (method === 'GET' && path === '/agents') return in_workspace(agents_route(method, parts, input) as Agent[]);
   if (method === 'POST' && path === '/agents') return agents_route(method, parts, input, params.get('workspace') ?? MAIN_WORKSPACE);
   if (parts[0] === 'agents') return agents_route(method, parts, input);
+  if (parts[0] === 'chats' || (parts[0] === 'tasks' && find_chat(parts[1] ?? ''))) return chat_route(method, parts, params, input);
   const key = `${method} /${parts[0] ?? ''}${parts.length > 1 ? '/:id' : ''}${parts[2] ? '/' + parts[2] : ''}`;
   /** Like the kernel's `listed_workspace`: `?workspace=` (404 unless the caller sees it), or none for a deployment owner. */
   const listed = () => {

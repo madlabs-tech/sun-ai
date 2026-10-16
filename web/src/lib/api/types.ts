@@ -253,6 +253,24 @@ export interface TaskActivity {
   created_at: Timestamp;
 }
 
+/** GET /api/v1/chats?workspace= — a person's own conversation with an agent: a hidden task whose messages are
+ *  its comments (POST /tasks/{id}/comments, GET /tasks/{id}/activity) and whose replies are the agent's. */
+export interface Chat {
+  id: Ulid;
+  workspace_id: Ulid;
+  agent_id: Ulid;
+  title: string;
+  status: TaskStatus;
+  /** Its latest run; `status` is the engine's (`queued`, `running`, `succeeded`, `failed`, …). */
+  run: { id: Ulid; status: string } | null;
+  /** Its latest message. */
+  last: TaskActivity | null;
+  /** While its run is queued: the keys of the agent's tasks holding the slots. */
+  queued_behind: string[];
+  created_at: Timestamp;
+  updated_at: Timestamp;
+}
+
 /** GET /api/v1/tasks/{id}/runs — the task's runs, oldest first. */
 export interface TaskRun {
   id: Ulid;
