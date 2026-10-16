@@ -36,6 +36,8 @@ struct Fake {
     logged_out: AtomicBool,
     /// Sessions end at once on a rejected key.
     auth_fails: AtomicBool,
+    /// Sessions end at once on this error (an auth error or not).
+    fails_with: Mutex<Option<String>>,
 }
 
 struct FakeSession {
@@ -75,8 +77,12 @@ impl RuntimeAdapter for Fake {
             })
             .unwrap();
         }
-        let tx = if self.auth_fails.load(Ordering::SeqCst) {
-            let message = "Invalid API key · Please run /login".into();
+        let failure = self.fails_with.lock().unwrap().clone().or_else(|| {
+            self.auth_fails
+                .load(Ordering::SeqCst)
+                .then(|| "Invalid API key · Please run /login".into())
+        });
+        let tx = if let Some(message) = failure {
             tx.send(SunEvent::Error { message }).unwrap();
             tx.send(SunEvent::Exited { code: Some(1) }).unwrap();
             None // the stream ends: the session is over
@@ -1000,5 +1006,185 @@ async fn a_kernel_that_stops_answering_pings_is_redialled() {
         started.elapsed()
     );
     drop(kernel);
+    running.abort();
+}
+
+/// Starts a `fake` session in `worktree` and reads its events up to
+/// `exited`, answering nothing else.
+async fn run_to_exit(kernel: &mut Kernel, worktree: &Path) {
+    let session_id = SessionId::generate();
+    let spec = SessionSpec {
+        skills: None,
+        session_id,
+        run_id: RunId::generate(),
+        step_key: StepKey::new("implement").unwrap(),
+        worktree: worktree.to_path_buf(),
+        envelope: "do it".into(),
+        envelope_parts: None,
+        model: None,
+        mcp_config: None,
+        env: BTreeMap::new(),
+        exec_env: Default::default(),
+        resume: None,
+        permission_mode: None,
+        byo_key: None,
+    };
+    kernel.next_id += 1;
+    let start = kernel.next_id;
+    kernel
+        .send(&KernelFrame::SessionStart {
+            id: start,
+            adapter: "fake".into(),
+            spec: Box::new(spec),
+        })
+        .await;
+    loop {
+        match kernel.recv(false).await {
+            HostFrame::Event(e)
+                if e.session_id == session_id && matches!(e.event, SunEvent::Exited { .. }) =>
+            {
+                return;
+            }
+            HostFrame::Reply { id, .. } if id == start => {}
+            HostFrame::Event(_) | HostFrame::Disk(_) => {}
+            other => panic!("unexpected {other:?} before the session exited"),
+        }
+    }
+}
+
+/// TRD item 15 case 3: only an auth error re-probes. A session that ends on
+/// a limit, an upstream 5xx or a failing test leaves the (changed) login
+/// unreported until something else probes: here, an explicit `reprobe`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_ending_on_a_non_auth_error_does_not_reprobe() {
+    let (listener, url) = listen().await;
+    let data_dir = temp_dir("no-reprobe");
+    let mut config = HostConfig::new(&data_dir);
+    config.reprobe_every = Duration::from_secs(3600);
+    let fake = Arc::new(Fake::default());
+    let host = Host::open(config, vec![fake.clone()]).unwrap();
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let running = tokio::spawn(Arc::clone(&host).run(credentials));
+    let mut kernel = Kernel::accept(&listener).await;
+    kernel.hello().await;
+    let ReplyBody::Worktree { path } = kernel
+        .request(|id| KernelFrame::WorktreePrepare {
+            id,
+            worktree: Worktree::Folder {
+                task_id: TaskId::generate(),
+            },
+        })
+        .await
+    else {
+        panic!()
+    };
+
+    for message in [
+        "Claude AI usage limit reached|1760000000",
+        "API Error: 500 {\"type\":\"error\",\"error\":{\"type\":\"api_error\"}}",
+        "429 Too Many Requests: rate limit exceeded, retry in 20s",
+        "error: tests failed (4010 assertions)",
+        "permission denied (os error 13)",
+    ] {
+        *fake.fails_with.lock().unwrap() = Some(message.into());
+        // A probe now would see a change: any re-probe would report it.
+        fake.logged_out.store(true, Ordering::SeqCst);
+        run_to_exit(&mut kernel, &path).await;
+        let quiet = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match kernel.recv(false).await {
+                    HostFrame::Disk(_) | HostFrame::Event(_) => {}
+                    other => return other,
+                }
+            }
+        })
+        .await;
+        assert!(quiet.is_err(), "{message:?} made the host send {quiet:?}");
+        // Still unreported: the explicit probe is the one that finds it.
+        let changed = reprobe(&mut kernel).await;
+        assert!(
+            changed.is_some_and(|c| !fake_logged_in(&c)),
+            "{message:?}: the logout was already reported"
+        );
+        fake.logged_out.store(false, Ordering::SeqCst);
+        assert!(fake_logged_in(&reprobe(&mut kernel).await.unwrap()));
+    }
+
+    // The control: the same flow on an auth error does re-probe by itself.
+    *fake.fails_with.lock().unwrap() = Some("OAuth token has expired. Please run /login".into());
+    fake.logged_out.store(true, Ordering::SeqCst);
+    run_to_exit(&mut kernel, &path).await;
+    assert!(!fake_logged_in(&next_capabilities(&mut kernel).await));
+    running.abort();
+}
+
+/// TRD item 15 case 6: a 2.1 host against a 2.0 kernel. The old kernel
+/// can't parse `capabilities` and drops the connection (its reader returns
+/// on a frame that does not parse); the host redials and its new `hello`
+/// carries the changed report. The old kernel never pings: the host's own
+/// pings and the kernel's automatic pongs keep the connection up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_host_recovers_on_an_old_kernel_that_drops_capabilities() {
+    let (listener, url) = listen().await;
+    let data_dir = temp_dir("old-kernel");
+    let mut config = HostConfig::new(&data_dir);
+    config.reprobe_every = Duration::from_millis(100);
+    config.ping_every = Duration::from_millis(50);
+    config.liveness = Duration::from_millis(300);
+    config.backoff_min = Duration::from_millis(20);
+    config.backoff_max = Duration::from_millis(50);
+    let fake = Arc::new(Fake::default());
+    let host = Host::open(config, vec![fake.clone()]).unwrap();
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let running = tokio::spawn(Arc::clone(&host).run(credentials));
+    let mut old = Kernel::accept(&listener).await;
+    old.hello().await;
+
+    // Pongs only: no redial while the old kernel reads, for many windows.
+    let quiet = tokio::time::timeout(Duration::from_millis(1500), old.recv(false)).await;
+    assert!(
+        matches!(quiet, Err(_) | Ok(HostFrame::Disk(_))),
+        "{quiet:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), listener.accept())
+            .await
+            .is_err(),
+        "the host redialled a kernel that answers its pings"
+    );
+
+    // `login` changes; the periodic probe sends what 2.0 can't parse.
+    fake.logged_out.store(true, Ordering::SeqCst);
+    let frame = loop {
+        match old.recv(false).await {
+            HostFrame::Disk(_) => {}
+            other => break other,
+        }
+    };
+    assert!(matches!(frame, HostFrame::Capabilities { .. }), "{frame:?}");
+    drop(old); // the 2.0 kernel's reaction: close
+
+    let mut again = Kernel::accept(&listener).await;
+    let HostFrame::Hello {
+        protocol,
+        capabilities,
+        ..
+    } = again.recv(false).await
+    else {
+        panic!("expected hello");
+    };
+    assert_eq!(protocol, "2.1");
+    assert!(
+        !fake_logged_in(&capabilities),
+        "the redial carries the change"
+    );
     running.abort();
 }
