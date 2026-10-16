@@ -9,7 +9,8 @@ use serde::Serialize;
 use serde_json::Value;
 use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::{
-    Artifact, EventRecord, Host, Repo, Run, SecretScope, Step, Task, Workflow, WorkflowVersion,
+    Artifact, EventRecord, Host, HostRuntime, Repo, Run, SecretScope, Step, Task, Workflow,
+    WorkflowVersion,
 };
 use sun_core::{
     ArtifactId, BlobHash, Error, HostId, MemberId, Result, RunId, StepKey, TaskId, Timestamp,
@@ -337,6 +338,12 @@ impl Engine {
             Some(workspace) => read.hosts_in(workspace).await?,
             None => read.hosts().await?,
         })
+    }
+
+    /// The `(host, tool)` rows of the hosts attached to `workspace`
+    /// (`None`: every host) that their latest report names.
+    pub async fn host_runtimes(&self, workspace: Option<WorkspaceId>) -> Result<Vec<HostRuntime>> {
+        Ok(self.store.read().await?.host_runtimes(workspace).await?)
     }
 
     /// The workspaces `item` is linked to (a host's, a catalog entry's).
