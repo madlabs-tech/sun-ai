@@ -44,6 +44,7 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task).patch(crate::tasks::update))
         .route("/tasks/{id}/comments", post(crate::tasks::comment))
+        .route("/chats", get(crate::chats::list).post(crate::chats::create))
         .route("/tasks/{id}/activity", get(crate::tasks::activity))
         .route("/tasks/{id}/runs", get(crate::tasks::runs))
         .route("/tasks/{id}/interrupt", post(crate::tasks::interrupt))

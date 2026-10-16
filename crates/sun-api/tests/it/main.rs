@@ -6,6 +6,7 @@ mod agents;
 mod api;
 mod auth;
 mod billing;
+mod chats;
 mod common;
 mod device;
 mod entitlement;

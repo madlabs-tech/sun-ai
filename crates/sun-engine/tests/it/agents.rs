@@ -3,7 +3,7 @@
 //! triggers (create, Backlog, comments, reassignment), a comment storm, the
 //! hidden system workflow, and the conversation on a task's thread (the
 //! agent's reply as a comment, a comment resuming its session, @mentions
-//! and their chats).
+//! and their chats, direct chats).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;
@@ -24,8 +24,8 @@ use sun_core::{
     TaskId, TaskStatus, WorkflowId, WorkspaceId,
 };
 use sun_engine::{
-    Actor, AgentFields, Engine, EngineConfig, NewTask, Queue, QueueConfig, Slot, WatchdogConfig,
-    WorkflowPick,
+    Actor, AgentFields, Caps, Engine, EngineConfig, NewTask, Queue, QueueConfig, Slot,
+    WatchdogConfig, WorkflowPick,
 };
 use sun_store::{
     HostRepo, RunRepo, RuntimeRepo, Store, TaskRepo, WorkflowRepo, WorkspaceItem, WorkspaceRepo,
@@ -183,6 +183,10 @@ struct Kernel {
 }
 
 async fn kernel() -> Kernel {
+    kernel_with(Caps::default()).await
+}
+
+async fn kernel_with(caps: Caps) -> Kernel {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
     let host_id = HostId::generate();
@@ -212,7 +216,6 @@ async fn kernel() -> Kernel {
         runtime: "fake".into(),
         host: host_id,
     };
-    let caps = Default::default();
     let (queue, _) = Queue::start(store.clone(), engine.clone(), QueueConfig { slot, caps });
     Kernel {
         engine,
@@ -923,6 +926,76 @@ async fn mentions_name_up_to_five_active_agents_of_the_workspace_and_never_in_a_
     ));
     // Only the accepted comment was written.
     assert_eq!(k.comments(task).await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_answers_its_creator_and_says_what_it_waits_behind() {
+    let one_at_a_time = Caps {
+        per_ecosystem: Some(1),
+        ..Caps::default()
+    };
+    let k = kernel_with(one_at_a_time).await;
+    let ada = k.agent("Ada").await;
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::InProgress).await;
+    k.working(task).await;
+
+    let chat = k.engine.create_chat(ada, None).await.unwrap();
+    assert_eq!(
+        (chat.kind, chat.number, chat.status, chat.source_task_id),
+        (TaskKind::Chat, None, TaskStatus::NeedsYou, None)
+    );
+    k.engine
+        .comment(chat.id, "What are you on?", ana(), &[])
+        .await
+        .unwrap();
+    // The only slot is Ada's task: the chat waits behind it, and says so.
+    let chats = k.engine.chats(WorkspaceId::MAIN, None).await.unwrap();
+    assert_eq!(chats.len(), 1);
+    assert_eq!(chats[0].run.as_ref().unwrap().status, RunStatus::Queued);
+    let behind: Vec<String> = chats[0]
+        .queued_behind
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(behind, ["MAIN-1"]);
+    assert_eq!(
+        chats[0].last.as_ref().unwrap().body["text"],
+        "What are you on?"
+    );
+
+    // The task ends; the chat's session gets the chat brief and answers in the chat.
+    k.host.finish.store(true, Ordering::SeqCst);
+    eventually("the chat's session", || async {
+        k.host.envelopes().len() == 2
+    })
+    .await;
+    let asked = k.host.envelopes()[1].clone();
+    assert!(
+        asked.contains("You are Ada.\n\nYou are chatting with a person."),
+        "{asked}"
+    );
+    assert!(asked.contains("- ana: What are you on?"), "{asked}");
+    assert!(!asked.contains("Your task:"), "{asked}");
+    eventually("Ada's reply in the chat", || async {
+        let comments = k.comments(chat.id).await;
+        comments.iter().any(|c| c["by_agent"] == json!(ada))
+    })
+    .await;
+    // Someone else's list doesn't have it; no task list does.
+    let theirs = k
+        .engine
+        .chats(WorkspaceId::MAIN, Some(sun_core::MemberId::generate()));
+    assert!(theirs.await.unwrap().is_empty());
+    let listed: Vec<TaskId> = k
+        .engine
+        .tasks()
+        .await
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(listed, [task]);
 }
 
 /// Runs of `task` still going (queued, running or paused).

@@ -40,6 +40,7 @@ mod agents;
 mod auth;
 mod billing;
 mod catalog;
+mod chats;
 mod corrections;
 mod device;
 mod entitlement;
