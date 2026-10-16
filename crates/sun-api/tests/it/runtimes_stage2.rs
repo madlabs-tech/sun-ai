@@ -1,0 +1,546 @@
+//! Stage 2 of the runtime rework (TRD BLO-117 §15 item 15; items 2 and 3):
+//! `GET /runtimes` per `(host, tool)` read next to the `host_runtime`
+//! projection. Who may see and re-probe a host, that no key or token rides
+//! in a runtimes or hosts answer, one assertion per row of the §6 state
+//! table with its precedence, and the `runtimes.model` kill switch.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::time::Duration;
+
+use axum::Router;
+use axum::http::StatusCode;
+use futures_util::StreamExt;
+use serde_json::{Value, json};
+use sun_api::RuntimesModel;
+use sun_core::model::{Role, RuntimeSource};
+use sun_core::{HostId, WorkspaceId};
+use sun_store::{HostRepo, RuntimeRepo};
+use tokio_tungstenite::tungstenite::Message;
+
+use crate::api::{
+    AGENT, Socket, claude_code, connect_host, enrol_host, host_starts_session, kernel_host_hello,
+    new_task, recv, runtimes_of, scripted_host, send, until_state,
+};
+use crate::common::{self, SECRET, TOKEN, kernel};
+use crate::workspaces::{call, call_as, member_token_in};
+
+const MAIN: WorkspaceId = WorkspaceId::MAIN;
+
+/// A protocol 2.1 host (it takes `reprobe`) reporting `runtimes`.
+async fn host_with(k: &common::Kernel, runtimes: Value) -> Socket {
+    let mut hello = kernel_host_hello(k);
+    hello["protocol"] = json!("2.1");
+    hello["capabilities"]["runtimes"] = runtimes;
+    connect_host(&k.app, k.host, hello).await
+}
+
+/// No text frame reaches `host` within half a second.
+async fn assert_quiet(host: &mut Socket, why: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+    loop {
+        match tokio::time::timeout_at(deadline, host.next()).await {
+            Err(_) => return,
+            Ok(Some(Ok(Message::Text(text)))) => panic!("{why}: the host got {text}"),
+            Ok(Some(Ok(_))) => {}
+            Ok(_) => panic!("{why}: the socket closed"),
+        }
+    }
+}
+
+fn reprobe_path(workspace: impl std::fmt::Display, host: HostId) -> String {
+    format!("/api/v1/workspaces/{workspace}/hosts/{host}/reprobe")
+}
+
+/// A second workspace, Beta, made by the deployment owner.
+async fn beta(app: &Router) -> WorkspaceId {
+    let (status, w) = call(
+        app,
+        "POST",
+        "/api/v1/workspaces",
+        Some(json!({ "name": "Beta" })),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {w}");
+    serde_json::from_value(w["id"].clone()).unwrap()
+}
+
+// --- Case 2: cross-member access ---------------------------------------
+
+/// An admin of Beta (every permission there, `manage_runtimes` included)
+/// neither sees Main's host in any runtimes or hosts list nor makes it
+/// re-probe, whichever workspace the path names.
+#[tokio::test]
+async fn another_workspaces_admin_cannot_see_or_reprobe_a_host() {
+    let k = kernel().await;
+    let app = &k.app;
+    let mut host = host_with(&k, claude_code(true)).await;
+    let b = beta(app).await;
+    let bea = member_token_in(&k.store, "bea", &[(b, Role::Admin)]).await;
+
+    for path in [
+        format!("/api/v1/runtimes?workspace={MAIN}"),
+        format!("/api/v1/runtimes?workspace={MAIN}&model=v1"),
+        format!("/api/v1/runtimes?workspace={MAIN}&model=v2"),
+        format!("/api/v1/hosts?workspace={MAIN}"),
+    ] {
+        let (status, body) = call_as(app, &bea, "GET", &path, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "GET {path}: {body}");
+        assert!(
+            !body.to_string().contains(&k.host.to_string()),
+            "{path}: {body}"
+        );
+    }
+    // No `?workspace=`: only a deployment owner may list every workspace's.
+    let (status, body) = call_as(app, &bea, "GET", "/api/v1/runtimes", None).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    // Her own workspace's lists hold nothing of Main's host.
+    for path in [
+        format!("/api/v1/runtimes?workspace={b}"),
+        format!("/api/v1/runtimes?workspace={b}&model=v1"),
+        format!("/api/v1/hosts?workspace={b}"),
+    ] {
+        let (status, body) = call_as(app, &bea, "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK, "GET {path}: {body}");
+        assert!(
+            !body.to_string().contains(&k.host.to_string()),
+            "{path}: {body}"
+        );
+    }
+    let (status, v2) = call_as(
+        app,
+        &bea,
+        "GET",
+        &format!("/api/v1/runtimes?workspace={b}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        v2.as_array().unwrap().iter().all(|r| r["host"].is_null()),
+        "Beta has no host: {v2}"
+    );
+
+    // "Check again" on Main's host: 404 through Main (she can't see it, as
+    // every cross-workspace path answers) and through Beta (not attached
+    // there); the host is never asked.
+    let (status, body) = call_as(app, &bea, "POST", &reprobe_path(MAIN, k.host), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, body) = call_as(app, &bea, "POST", &reprobe_path(b, k.host), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_quiet(&mut host, "a re-probe from another workspace").await;
+}
+
+/// "Check again" needs `manage_runtimes` in the host's workspace: a member
+/// (run, approve) and a viewer are refused and the host is never asked; an
+/// admin there gets the re-probe.
+#[tokio::test]
+async fn reprobe_needs_manage_runtimes_in_the_hosts_workspace() {
+    let k = kernel().await;
+    let app = &k.app;
+    let mut host = host_with(&k, claude_code(false)).await;
+    let path = reprobe_path(MAIN, k.host);
+    for (name, role) in [("mo", Role::Member), ("vi", Role::Viewer)] {
+        let token = member_token_in(&k.store, name, &[(MAIN, role)]).await;
+        // Both may read the list…
+        let (status, _) = call_as(
+            app,
+            &token,
+            "GET",
+            &format!("/api/v1/runtimes?workspace={MAIN}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{role:?} reads runtimes");
+        // …neither may make the host re-probe.
+        let (status, body) = call_as(app, &token, "POST", &path, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{role:?}: {body}");
+        assert_quiet(&mut host, &format!("a re-probe by a {role:?}")).await;
+    }
+
+    let ada = member_token_in(&k.store, "ada", &[(MAIN, Role::Admin)]).await;
+    let check = tokio::spawn({
+        let (app, path) = (app.clone(), path.clone());
+        async move { call_as(&app, &ada, "POST", &path, None).await }
+    });
+    let frame = recv(&mut host).await.unwrap();
+    assert_eq!(frame["type"], "reprobe");
+    let done = json!({ "type": "reply", "id": frame["id"], "body": { "kind": "done" } });
+    send(&mut host, done).await;
+    let (status, body) = check.await.unwrap();
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+}
+
+// --- Case 3: no secret in any response ---------------------------------
+
+/// A byo_key runtime's key, the host's key, an enrolment token and the
+/// kernel token never show in any `/runtimes` or `/hosts` answer, under
+/// either list model and either kill-switch setting.
+#[tokio::test]
+async fn no_key_or_token_in_runtimes_or_hosts_answers() {
+    const KEY: &str = "sk-live-stage2-0123456789abcdef";
+    let k = kernel().await;
+    let app = &k.app;
+    let _host = host_with(&k, claude_code(true)).await;
+    let (_, issued) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{MAIN}/hosts/tokens"),
+        None,
+    )
+    .await;
+    let enrol_token = issued["token"].as_str().unwrap().to_owned();
+    let (_vps, _vps_socket) = enrol_host(app, "vps-sg-1", claude_code(false)).await;
+    let put = format!("/api/v1/secrets/workspace/{MAIN}/OR_KEY");
+    let (status, body) = call(app, "PUT", &put, Some(json!({ "value": KEY }))).await;
+    assert!(status.is_success(), "{status} {body}");
+    let runtime = json!({ "name": "or-qwen", "source": "byo_key", "config":
+        { "endpoint": "http://localhost:11434/v1", "model": "qwen", "key_secret": "OR_KEY" } });
+    let (status, saved) = call(
+        app,
+        "POST",
+        &format!("/api/v1/runtimes?workspace={MAIN}"),
+        Some(runtime),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {saved}");
+    let host_key = sun_api::host_key_for(SECRET, k.host);
+
+    let secrets = [KEY, host_key.as_str(), enrol_token.as_str(), TOKEN];
+    let paths = [
+        "/api/v1/runtimes".to_owned(),
+        "/api/v1/runtimes?model=v1".to_owned(),
+        "/api/v1/runtimes?model=v2".to_owned(),
+        format!("/api/v1/runtimes?workspace={MAIN}"),
+        format!("/api/v1/runtimes?workspace={MAIN}&model=v1"),
+        "/api/v1/runtimes/or-qwen/readiness".to_owned(),
+        "/api/v1/hosts".to_owned(),
+        format!("/api/v1/hosts?workspace={MAIN}"),
+    ];
+    for model in [RuntimesModel::V1, RuntimesModel::V2] {
+        let app = sun_api::router(k.api.clone().with_runtimes_model(model));
+        for path in &paths {
+            let (status, body) = call(&app, "GET", path, None).await;
+            assert_eq!(status, StatusCode::OK, "{model:?} GET {path}: {body}");
+            let text = body.to_string();
+            for secret in secrets {
+                assert!(
+                    !text.contains(secret),
+                    "{model:?} GET {path} shows a secret ({}…): {text}",
+                    &secret[..6]
+                );
+            }
+        }
+    }
+    // What a literal grep for `key_secret` finds: the secret's *name*, as v1
+    // has always returned in `config`, never its value.
+    let (_, v2) = call(app, "GET", "/api/v1/runtimes?model=v2", None).await;
+    let keyed = v2
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "or-qwen")
+        .unwrap();
+    assert_eq!(keyed["config"]["key_secret"], "OR_KEY", "{keyed}");
+}
+
+// --- Case 4: the §6 state table, one assertion per row -------------------
+
+/// `availability` + `state` + `detail` of `host`'s `tool`.
+fn row(entry: &Value) -> (Value, Value, Value) {
+    (
+        entry["availability"].clone(),
+        entry["state"].clone(),
+        entry["detail"].clone(),
+    )
+}
+
+/// idle, idle with the `outdated` badge, needs_login, limited, offline: the
+/// rows a host can produce today (`unsupported` can't appear until item 10).
+#[tokio::test]
+async fn each_state_row_of_the_copy_table() {
+    let k = kernel().await;
+    let app = &k.app;
+    let untested = json!([
+        { "adapter": "claude-code", "readiness": { "installed": true, "version": "2.2.0",
+          "logged_in": true, "detail": "Claude Code 2.2.0 is untested" } },
+        { "adapter": "codex", "readiness": { "installed": true, "version": "0.160.0",
+          "logged_in": true, "detail": null } },
+        { "adapter": "opencode", "readiness": { "installed": true, "version": "1.0.0",
+          "logged_in": false, "detail": "OpenCode is not logged in. Run: opencode auth login" } },
+    ]);
+    let laptop = host_with(&k, untested).await;
+    let at = |tool: &'static str| {
+        let app = app.clone();
+        let host = k.host.to_string();
+        async move { runtimes_of(&app, tool).await.remove(&host).unwrap() }
+    };
+
+    // idle: success "Ready", no line.
+    let codex = at("codex").await;
+    assert_eq!(
+        row(&codex),
+        (json!("ready"), json!("idle"), Value::Null),
+        "{codex}"
+    );
+    assert_eq!(codex["presence"], "online");
+    assert_eq!(codex["load"], json!({ "active": 0, "max": null }));
+    // idle with the "Untested version" badge: still idle (schedulable).
+    let claude = at("claude-code").await;
+    assert_eq!(
+        row(&claude),
+        (
+            json!("outdated"),
+            json!("idle"),
+            json!("Claude Code 2.2.0 is untested")
+        ),
+        "{claude}"
+    );
+    // needs_login: the real command and the host's name.
+    let opencode = at("opencode").await;
+    assert_eq!(
+        row(&opencode),
+        (
+            json!("needs_login"),
+            json!("needs_login"),
+            json!("Run `opencode auth login` on box")
+        ),
+        "{opencode}"
+    );
+    // limited: the account is cooling; back at `cooldown_until`.
+    let until = chrono::Utc::now() + chrono::Duration::minutes(30);
+    cool(&k, "codex", until).await;
+    let codex = at("codex").await;
+    assert_eq!(
+        (&codex["availability"], &codex["state"]),
+        (&json!("limited"), &json!("limited"))
+    );
+    let back: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(codex["cooldown_until"].clone()).unwrap();
+    assert!((back - until).num_seconds().abs() <= 1, "{back} vs {until}");
+    assert!(
+        codex["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("Usage limit reached; back at"),
+        "{codex}"
+    );
+
+    // offline: every tool on the host, whatever its login, cooldown or badge.
+    drop(laptop);
+    for tool in ["codex", "claude-code", "opencode"] {
+        let gone = until_state(app, tool, k.host, "offline").await;
+        assert_eq!(gone["presence"], "offline", "{gone}");
+        assert_eq!(gone["detail"], "box is offline", "{gone}");
+        assert!(
+            gone["last_seen_at"].is_string(),
+            "the UI's \"hasn't been seen since\": {gone}"
+        );
+    }
+}
+
+/// Marks `name` (a chain name; cooldowns are keyed by it until item 5) as
+/// cooling in Main until `until`.
+async fn cool(k: &common::Kernel, name: &str, until: chrono::DateTime<chrono::Utc>) {
+    let mut tx = k.store.begin().await.unwrap();
+    let row = tx
+        .upsert_runtime(MAIN, name, name, RuntimeSource::ByoRuntime)
+        .await
+        .unwrap();
+    tx.set_cooldown(row.id, Some(until)).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// busy: one live session on the host's tool; the badge reads its load.
+/// Then the precedence above it: a cooldown beats busy (limited), and a
+/// host gone beats both (offline), with the session still counted.
+#[tokio::test]
+async fn busy_then_limited_over_busy_then_offline_over_all() {
+    let k = kernel().await;
+    let app = &k.app;
+    let mut host = scripted_host(&k, json!({})).await;
+    let task = new_task(app, AGENT).await;
+    let session_id = host_starts_session(&mut host, "/data/work/t").await;
+    let stats = json!({ "type": "stats", "session_id": session_id,
+        "rss_bytes": 1024, "cpu_percent": 1.0, "uptime_s": 1 });
+    send(&mut host, stats).await;
+    let busy = until_state(app, "fake", k.host, "busy").await;
+    assert_eq!(busy["availability"], "ready", "{busy}");
+    assert_eq!(busy["load"], json!({ "active": 1, "max": null }), "{busy}");
+    assert!(task["id"].is_string());
+
+    cool(
+        &k,
+        "fake",
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    )
+    .await;
+    let limited = until_state(app, "fake", k.host, "limited").await;
+    assert_eq!(limited["load"]["active"], 1, "still running: {limited}");
+
+    drop(host);
+    let offline = until_state(app, "fake", k.host, "offline").await;
+    assert_eq!(offline["presence"], "offline", "{offline}");
+}
+
+/// The precedence rows the TRD names, as the API derives them, with the
+/// `auth` the `host_runtime` projection stores for each report:
+/// installed + logged in → `logged_in`, installed only → `logged_out`,
+/// not installed → `unknown`.
+#[tokio::test]
+async fn an_offline_host_that_is_also_logged_out_is_offline_not_needs_login() {
+    let k = kernel().await;
+    let app = &k.app;
+    let logged_out = host_with(&k, claude_code(false)).await;
+    let entry = until_state(app, "claude-code", k.host, "needs_login").await;
+    assert_eq!(entry["availability"], "needs_login");
+
+    // The projection agrees with the mapping.
+    let mut tx = k.store.begin().await.unwrap();
+    let rows = tx.host_runtimes(Some(MAIN)).await.unwrap();
+    drop(tx);
+    let auth: std::collections::BTreeMap<_, _> = rows
+        .iter()
+        .filter(|r| r.host_id == k.host)
+        .map(|r| (r.tool.as_str(), (r.installed, r.auth.as_str())))
+        .collect();
+    assert_eq!(
+        auth.get("claude-code"),
+        Some(&(true, "logged_out")),
+        "{auth:?}"
+    );
+    assert_eq!(auth.get("codex"), Some(&(false, "unknown")), "{auth:?}");
+
+    // Logged out *and* cooling: needs_login comes first.
+    cool(
+        &k,
+        "claude-code",
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    )
+    .await;
+    let entry = runtimes_of(app, "claude-code")
+        .await
+        .remove(&k.host.to_string())
+        .unwrap();
+    assert_eq!(entry["state"], "needs_login", "{entry}");
+
+    // The host goes: offline, not needs_login, though its last report
+    // (still shown as `availability`) says logged out.
+    drop(logged_out);
+    let gone = until_state(app, "claude-code", k.host, "offline").await;
+    assert_eq!(gone["availability"], "needs_login", "{gone}");
+    assert_eq!(gone["detail"], "box is offline", "{gone}");
+}
+
+// --- Case 5: the kill switch ---------------------------------------------
+
+/// The old list's exact field set (main before item 2).
+const V1_FIELDS: [&str; 13] = [
+    "adapter",
+    "allow_bypass",
+    "config",
+    "cooldown_until",
+    "id",
+    "max_sessions",
+    "model",
+    "name",
+    "permission_mode",
+    "sessions",
+    "source",
+    "status",
+    "workspace_id",
+];
+
+/// `sun.yaml` `runtimes.model` sets what `GET /runtimes` answers with no
+/// `?model=`: `v1` the old per-adapter list, `v2` one entry per `(host,
+/// tool)`. Decided on BLO-121: "sun.yaml sets the default, the query flag
+/// overrides per call".
+#[tokio::test]
+async fn sun_yaml_runtimes_model_sets_the_default_list() {
+    let k = kernel().await;
+    let _host = host_with(&k, claude_code(true)).await;
+    let (_vps, _socket) = enrol_host(&k.app, "vps-sg-1", claude_code(true)).await;
+    for (model, query) in [(RuntimesModel::V1, "v1"), (RuntimesModel::V2, "v2")] {
+        let app = sun_api::router(k.api.clone().with_runtimes_model(model));
+        let (_, default) = call(&app, "GET", "/api/v1/runtimes", None).await;
+        let (_, explicit) = call(
+            &app,
+            "GET",
+            &format!("/api/v1/runtimes?model={query}"),
+            None,
+        )
+        .await;
+        assert_eq!(default, explicit, "runtimes.model: {query} with no ?model=");
+    }
+}
+
+/// `?model=v1` returns the old JSON whatever `sun.yaml` says, and the same
+/// JSON before and after the switch is flipped both ways: no `host_runtime`
+/// row is lost, the per-host list comes back the same.
+#[tokio::test]
+async fn flipping_the_kill_switch_loses_nothing_and_v1_stays_the_old_json() {
+    let k = kernel().await;
+    let _host = host_with(&k, claude_code(true)).await;
+    let (_vps, _socket) = enrol_host(&k.app, "vps-sg-1", claude_code(false)).await;
+    let rows = || async {
+        let mut tx = k.store.begin().await.unwrap();
+        let mut rows: Vec<_> = tx
+            .host_runtimes(None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.id.to_string(), r.host_id, r.tool, r.auth, r.removed_at))
+            .collect();
+        rows.sort();
+        rows
+    };
+    let before = rows().await;
+    assert_eq!(
+        before.len(),
+        4,
+        "2 hosts × (claude-code, codex): {before:?}"
+    );
+
+    let list = |model: RuntimesModel, query: &'static str| {
+        let app = sun_api::router(k.api.clone().with_runtimes_model(model));
+        async move {
+            call(
+                &app,
+                "GET",
+                &format!("/api/v1/runtimes?model={query}"),
+                None,
+            )
+            .await
+            .1
+        }
+    };
+    let v2_on_v2 = list(RuntimesModel::V2, "v2").await;
+    let v1_on_v2 = list(RuntimesModel::V2, "v1").await;
+    // Flip to v1, then back to v2.
+    let v1_on_v1 = list(RuntimesModel::V1, "v1").await;
+    let v2_on_v1 = list(RuntimesModel::V1, "v2").await;
+    let v2_again = list(RuntimesModel::V2, "v2").await;
+    assert_eq!(v1_on_v1, v1_on_v2, "?model=v1 ignores the default");
+    assert_eq!(v2_on_v2, v2_on_v1, "?model=v2 ignores the default");
+    assert_eq!(v2_on_v2, v2_again, "flip and back");
+    assert_eq!(rows().await, before, "no host_runtime row lost or changed");
+    for entry in v1_on_v1.as_array().unwrap() {
+        let mut keys: Vec<_> = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, V1_FIELDS, "the old shape: {entry}");
+    }
+    let claude = v1_on_v1
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "claude-code")
+        .unwrap();
+    assert_eq!(
+        claude["status"], "ready",
+        "one online host is logged in: {claude}"
+    );
+}
