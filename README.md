@@ -1,377 +1,243 @@
 # Sun
 
-**One small Rust binary that turns the agent CLIs your team already pays for (Claude Code, Codex, OpenCode) into workflows that survive crashes, keep going when a quota runs out, and are checked by gates before anything counts as done.**
-
-Sun is an AI orchestrator and workflow engine for individuals and small teams. Anyone on the team (marketing, product, design, engineering, leadership) hands work to agents as tasks. Each task runs through a versioned workflow of steps. The engine decides when a task is done, not the agent. It is source-available, free to self-host as one binary, and can also run hosted in Sun Cloud.
-
-> **Status:** every planned feature has code, and the scope audit counts 107 of 122 user stories as done. Several things are still unproven against real accounts and hardware: a real quota hit, Linux sandbox CI, real VMs and simulators, live payments. No public release exists yet, and CI has not run yet. See [Status and known limits](#status-and-known-limits).
-
----
+Sun runs the agent CLIs you already use, Claude Code, Codex and OpenCode, through versioned workflows. You hand an agent a task; Sun runs it on a machine you choose, records every step, checks the result with gates, and asks a person when a step needs one. It is for individuals and small teams. Sun is one binary, `sun`, with the web UI built in. You can self-host it, or join your machines to Sun Cloud, the hosted kernel at <https://sun.madlabs.tech>.
 
 ## Contents
 
-- [The four claims](#the-four-claims)
-- [Features by milestone](#features-by-milestone)
+- [Install](#install)
 - [Quick start](#quick-start)
-- [CLI cheat sheet](#cli-cheat-sheet)
+- [Modes](#modes)
+- [Uninstall](#uninstall)
 - [Configuration](#configuration)
+- [Workflows](#workflows)
 - [Architecture](#architecture)
-- [Project layout](#project-layout)
 - [Development](#development)
-- [Footprint](#footprint)
-- [Status and known limits](#status-and-known-limits)
-- [Licensing](#licensing)
+- [Limitations](#limitations)
+- [License](#license)
 
----
+## Install
 
-## The four claims
+Linux (x86_64 or arm64, with systemd):
 
-| | Claim | How |
-|---|---|---|
-| **A** | **Runs survive anything.** A crash, restart or lost host never loses or re-runs a finished step. | Every state change is one transaction (step state + event + outbox row). Side effects go through an idempotent outbox. Hosts buffer events on disk and use seq/ack. |
-| **B** | **Agents don't stop at a quota.** When a runtime hits its limit, the work switches to the next runtime and continues in the same worktree. | Hand-off packs are written ahead while the agent works, so building one needs no LLM call. A watchdog catches stalls, loops and blown budgets. Gates, not the agent, decide "done". |
-| **C** | **Agents get a small, visible context instead of a hidden memory.** | One append-only ledger. Each step gets a budgeted context pack (≈ 10% of the model's window), delivered as files. Agents pull more through the `sun` MCP server. Retrieval uses SQLite FTS5, not a vector database. |
-| **D** | **It stays small, and one person with AI agents can build it.** | One binary with the UI embedded: 25.7 MB, 21.5 MB idle RSS, 38 ms cold start. Small crates with narrow interfaces. Every build phase fits half a context window. |
+```sh
+curl -fsSL https://get-sun.madlabs.tech | sudo sh
+```
 
-## Features by milestone
+macOS (Apple silicon):
 
-Milestones are planned in phases sized to one agent session, not in weeks.
+```sh
+curl -fsSL https://get-sun.madlabs.tech | sh
+```
 
-**M1 — v0.1 "Agents that don't stop"**
-- One-step install, a lean kernel, and safe upgrades with backup and rollback.
-- First-party plugins and extensions over one mod protocol.
-- Workflow core: YAML step lists with `agent`, `gate`, `action`, `approval`, `wait`, `notify` and extension steps.
-- Durable runs that resume from the journal.
-- Watchdog for stalls, loops, budgets and silent exits.
-- Engine-verified gates: `diff_not_empty`, `test`, `lint`, `diagnostics_clean`, `pr_exists`, `ci_green`, plus content gates.
-- Flow control: priority, FIFO and caps per runtime, host and ecosystem.
-- Run log and cost.
-- Adapters for Claude Code, Codex and OpenCode.
-- Shared runtime hosts.
-- Failover with a hand-off pack.
-- GitHub, GitLab and Slack.
-- Non-code tasks and content gates.
-- Bring your own runtime.
+The installer:
 
-**M2 — v0.2 Team**
-- Multi-repo tasks with linked PRs in merge order.
-- OIDC, RBAC and sealed secrets.
-- A connector SDK on MCP.
-- Jira, Trello and Gitea.
-- Device verify on the iOS Simulator and Android emulator.
-- A mobile-first UI.
-- A decision engine (Laya or Jev).
-- Sessions in a container or a VM.
-- A skills and MCP catalog.
-- A workflow builder and role templates.
-- Bring your own key.
-- OTel export and alerts.
-- The mod sandbox.
+1. downloads the latest release for your OS and CPU, and checks its signature and checksums;
+2. installs `sun` and `sun-mod-sandbox` (`/usr/local/bin` on Linux, `~/.local/bin` on macOS);
+3. installs a service that runs `sun serve --with-host`: a systemd unit `sun` that starts at boot (Linux, as a `sun` system user), or a launchd agent `dev.sun.kernel` that starts at login (macOS);
+4. waits for the kernel, then prints the UI URL and your first sign-in.
 
-**M3 — v0.3 Smarter**
-- Context rotation.
-- Company knowledge as scoped, cited context.
-- Eval and auto-improve from corrections.
-- A design canvas for UI tasks.
-- Confluence.
-- Data-touched detection and post-merge code quality.
+If a step fails, it says why, undoes what it did and exits non-zero.
 
-**M4 — v1.0 Paid** (Sun Cloud, closed source)
-- Sun Cloud plans: control plane, billing, support.
-- Sun credits through a metering gateway.
-- Export and sync.
-
-**M5 — Marketplace** (future; waits for a legal review)
-- A mod registry and paid mods.
-- Rented runtime capacity with escrow and kill switches.
+Add `--no-service` to install the binaries only (`... | sudo sh -s -- --no-service`). Other options: `--version V`, `--prefix DIR`, `--data-dir DIR`. To remove Sun, see [Uninstall](#uninstall).
 
 ## Quick start
 
-> No public release exists yet, so the installer below has nothing to download. Until one does, build from source (below).
+You need one agent CLI on the machine that runs the work, logged in: `claude`, `codex` or `opencode`. `sun doctor` tells you if none is found.
 
-**Install** (Linux x86_64/arm64 with systemd, or macOS arm64 with launchd):
+1. **Sign in.** Open the URL the installer printed (default <http://127.0.0.1:7700>). Sign in as `admin@sun.local` with the printed password. Sun then asks you to choose your own password, which retires the printed one, and to add your email. A short "Set up Sun" dialog asks your role and what to do when a runtime hits its usage limit.
+2. **Create an agent.** Go to **Agents → New agent**. Give it a name, optional instructions, and its runtimes in failover order (for example `claude-code`). It shows **Ready** once one of those runtimes is installed and logged in on an online host.
+3. **Give it a task.** Click **New task**, write a title and description, and pick the agent as the assignee. Tasks with no assignee run nothing.
+4. **Watch it run.** The task page shows the status, a live execution log (runtime, cost, tokens, context use), and a timeline of every event: tool calls, file changes, gates. A comment on the task wakes the agent, which reads it and picks the task up again.
+5. **Get the result.** Files the agent writes appear under **Artifacts** on the task page, ready to download. When the agent is done, the task moves to **Needs you** for your review. A task in a repository works on its own branch, `sun/<task id>`.
 
-```sh
-curl -fsSL https://get-sun.madlabs.tech | sudo sh   # Linux: writes a systemd unit
-curl -fsSL https://get-sun.madlabs.tech | sh        # macOS: writes a launchd agent
-```
-
-The script detects your OS and architecture and verifies the release signature. It starts `sun serve --with-host` and prints the UI URL and a one-time sign-in link. If anything fails, it undoes every step. Sun then starts at every login (macOS) or boot (Linux); the installer prints how to stop it.
-
-**Uninstall** (same command with `--uninstall`; keeps the data dir unless you add `--purge`):
-
-```sh
-curl -fsSL https://get-sun.madlabs.tech | sudo sh -s -- --uninstall   # Linux; add --purge to drop /var/lib/sun
-curl -fsSL https://get-sun.madlabs.tech | sh -s -- --uninstall        # macOS; add --purge to drop ~/Library/Application Support/sun
-```
-
-**From source** (Rust is pinned in `rust-toolchain.toml`; the UI needs Node; its design system `@hryer/madlabs-design-system` comes from the public npm registry):
-
-```sh
-(cd web && npm ci && npm run build)          # the UI the binary embeds
-cargo build --release -p sun-cli --bin sun
-```
-
-**Run the kernel with a local host:**
-
-```sh
-sun doctor                    # checks agent CLIs, git, disk, port, sandbox
-sun serve --with-host         # prints "listening on http://127.0.0.1:7700" and a sign-in link
-```
-
-**First task** (from a second terminal):
+From the CLI, on the kernel's machine, a code task looks like this:
 
 ```sh
 sun repo add https://github.com/acme/app --description "the web app"
-sun task create "Fix login timeout on mobile in app" \
-  --body "Sessions expire after resume; add a test first." \
-  --workflow default
+sun task create "Fix the login timeout in app" --body "Add a test first."
 sun task list
+sun task show <id>
 ```
 
-**Open the UI** at <http://127.0.0.1:7700>. On first run, sign in as `admin@sun.local` with the token `sun serve` prints (also in `kernel.json`); you then choose your own password (this retires the printed token: `kernel.json` gets a new one, so update anything that copied it into `SUN_TOKEN`) and give your real email. Settings → Account also turns on 2-step verification. Locked out? `sun user set-password <email>`. You'll see the tasks, each task's live timeline, approvals, runtimes, hosts, mods and the catalog.
+`sun task create` runs the `default` workflow: implement, run the gates (`diff_not_empty`, `test`, `lint`), open a pull request, then wait for an admin's approval. A run works in the repos the task names. Opening the pull request needs the GitHub plugin: `sun plugin add github`, then `sun secret set GITHUB_TOKEN --mod github` (it reads the token from a prompt or stdin).
 
-## CLI cheat sheet
+Locked out? `sun user set-password <email>`. Every command has `--help`; the full list is in [`docs/cli.md`](docs/cli.md).
 
-| Command | What it does |
-|---|---|
-| `sun serve [--with-host] [--listen ADDR \| --port N]` | Run the kernel: API, web UI, engine, queue and mods. `--with-host` also runs a runtime host in the same process, over loopback WebSocket. |
-| `sun status [--json]` | Show where this install lives, whether its kernel runs, and kernel and session resource use. |
-| `sun doctor` | Check this box: data dir, agent CLIs, git, disk, port, backup freshness (with Litestream), sandbox, service. |
-| `sun user set-password <email>` | Set a member's password (prompt or stdin): lockout recovery. |
-| `sun host join --kernel URL <token>` | Enrol a machine with a kernel (the token is single use), install the host as a background service (launchd `dev.sun.host` on macOS, systemd `sun-host` on Linux: a user unit, or a system unit as root) and wait until the kernel sees it connected. `--no-service` enrols only; run `sun host run` under your own supervisor. |
-| `sun host stop` · `start` · `leave` | Stop the host service until the next login/boot; (re)start it; or remove it, take the host out of the kernel's workspaces and delete its credentials. |
-| `sun repo add <url> [--description TEXT] [--workspace WS]` · `sun repo list` · `sun repo remove <id>` | A workspace's git repositories; a workflow run works in the ones the task text names. |
-| `sun task create <title> [--body] [--workflow] [--container IMG \| --vm TPL] [--priority N]` | Create and queue a task. |
-| `sun task list` · `show <id>` · `quality <id>` · `metrics` | Inspect tasks, the data they touched and post-merge quality. |
-| `sun task pause\|resume\|cancel <id>` | Control a task's run. |
-| `sun task retry <id> [--step KEY]` · `steer <id> <msg> [--queue]` | Retry a failed step (finished steps are kept), or message the running agent. |
-| `sun task switch <id> --to <runtime>` · `on-limit <id> [policy]` | Move a running step to another runtime with a hand-off pack, or set the limit policy (`switch`, `pause_and_notify`, `wait_until_reset`). |
-| `sun workflow validate <file>` · `save <file> [--id]` | Check a workflow (errors carry `line:column`), or save it as a new version. |
-| `sun plugin add\|update\|list\|remove` · `sun extension …` | Install mods from a folder, a package file, `git+https://` or a first-party name. |
-| `sun plugin mcp add\|list\|…` | Register the MCP servers agents can use. |
-| `sun mod dev <dir>` · `publish` · `yank` | Develop a mod with hot reload, sign and submit it to the registry, or hide a version. |
-| `sun skill new <name>` · `sun mcp new <name>` | Scaffold a skill or a dependency-free MCP server. |
-| `sun secret set\|list\|rm [--mod M \| --workspace W]` | Manage sealed secrets: a workspace's (default Main), a mod's, or the deployment's own (SMTP, SSO, git host apps, embeddings), which stay in the ecosystem. Values come from stdin, never argv. `scripts/load-git-apps.sh [.env]` sets the GitHub App and GitLab OAuth app secrets from a `chmod 600` `.env` (or the environment); `scripts/dev.sh` runs it when `./.env` exists. |
-| `sun runtime add <name> --byo-key --kind K --adapter A --model M [--endpoint] [--key-secret] [--workspace W]` · `check [--workspace W]` · `on-limit` | Add a bring-your-own-key runtime to a workspace (default Main), check it, or set the ecosystem limit policy. |
-| `sun knowledge …` · `sun eval …` | Manage knowledge sources and search, or replay past tasks against a changed instruction. |
-| `sun upgrade [--check]` · `rollback` · `backup` | Upgrade (wait for a checkpoint, back up, swap, migrate, restart), undo the last upgrade, or back up the store. |
-| `sun ecosystem export\|import` | Move a whole ecosystem as one archive. |
-| `sun market …` | The marketplace. It needs `SUN_CLOUD_URL` and `SUN_CLOUD_TOKEN`, which also make each workspace's plan come from Sun Cloud. |
+## Modes
 
-Run `sun <command> --help` for every flag.
+Every mode runs the same binary. What changes is where the kernel runs and where agents run.
+
+### Self-host the kernel (VPS, Mac mini)
+
+```sh
+curl -fsSL https://get-sun.madlabs.tech | sudo sh   # Linux
+```
+
+- **Data** lives in `/var/lib/sun` on Linux and `~/Library/Application Support/sun` on macOS: the SQLite store, `sun.yaml`, `kernel.json` (the local token, mode 0600) and backups.
+- **Agent CLIs** on Linux run as the `sun` user, so install and log in to them as that user. For Claude Code:
+
+  ```sh
+  sudo -u sun -H bash -c 'curl -fsSL https://claude.ai/install.sh | bash'   # into /var/lib/sun/.local/bin
+  sudo -u sun -H /var/lib/sun/.local/bin/claude                               # log in once
+  ```
+
+- **Reach the UI.** The kernel listens on `127.0.0.1:7700`. From your laptop: `ssh -L 7700:127.0.0.1:7700 <server>`, then open <http://127.0.0.1:7700>. To serve hosts and browsers directly, set `listen` and `public_url` in `sun.yaml` and put your own TLS proxy in front; `sun serve` speaks plain HTTP.
+- **Check the box:** `sun doctor` checks the data dir, agent CLIs, git, disk, port, backups, sandbox and service.
+- **Upgrade:** `sun upgrade --check` lists what would break; `sun upgrade` waits for running steps to reach a checkpoint, backs up the store, swaps the binaries, migrates and restarts. `sun rollback` undoes the last upgrade.
+
+### Join a machine as a host
+
+A host runs agent sessions for a kernel: your own kernel, or Sun Cloud. It dials out to the kernel, so a laptop behind NAT works with no open port.
+
+1. In the UI, go to **Hosts → Add host**. The dialog shows the command with a single-use token, valid for a limited time.
+2. On the machine, install `sun` if it isn't there (`curl -fsSL https://get-sun.madlabs.tech | sudo sh -s -- --no-service` on Linux, without `sudo` on macOS).
+3. Run the command from the dialog:
+
+   ```sh
+   sun host join --kernel https://sun.example.com --name build-box <token>
+   ```
+
+That one command enrols the machine, installs and starts a background service that runs `sun host run`, and waits until the kernel sees the host. The service is a launchd agent `dev.sun.host` on macOS, or a systemd unit `sun-host` on Linux (a user unit, or a system unit when run as root). It starts again at login or boot. For a Linux user unit to keep running after you log out, Sun turns on lingering for you, or prints the `loginctl enable-linger` command to run.
+
+- `sun host stop` stops the service until the next login or boot; `sun host start` starts it again.
+- `sun host leave` removes the service, takes the host out of the kernel's workspaces and deletes its credentials.
+- `--no-service` only enrols; run `sun host run` under your own supervisor.
+
+### Run everything locally
+
+Kernel and host on one laptop, as yourself, using the agent CLIs you are already logged in to.
+
+- **macOS:** the [install](#install) one-liner is this mode. The launchd agent runs as you.
+- **Linux:** install the binaries only, then run the kernel in a terminal. Data goes to `~/.sun`.
+
+  ```sh
+  curl -fsSL https://get-sun.madlabs.tech | sudo sh -s -- --no-service
+  sun serve --with-host
+  ```
+
+`sun serve --with-host` runs the kernel and a host in one process and prints the sign-in line. Stop it with Ctrl-C.
+
+## Uninstall
+
+| Command | Removes | Keeps |
+|---|---|---|
+| `curl -fsSL https://get-sun.madlabs.tech \| sudo sh -s -- --uninstall` | the `sun` service, `sun` and `sun-mod-sandbox` | the data dir and the `sun` user |
+| `... --uninstall --purge` | the same, plus the data dir | the `sun` user (`sudo userdel sun` removes it) |
+| `sun host leave` | a joined host's service and credentials | the `sun` binary, and cloned repos under `<data dir>/host` |
+
+On macOS, run the same commands without `sudo`; they remove the launchd agent and `~/.local/bin/sun`. On a joined host, run `sun host leave` before `--uninstall`.
 
 ## Configuration
 
-The data dir is `--data-dir`, else `$SUN_DATA_DIR`, else `~/.sun`. The installer uses `/var/lib/sun` on Linux and `~/Library/Application Support/sun` on macOS. The data dir holds:
-- `sun.yaml`;
-- `kernel.json` (the local token and host secret, mode 0600);
-- the SQLite store;
-- content-addressed blobs;
-- `host/` and `mods/`.
-
-**`sun.yaml` highlights** (every key is optional):
+The data dir is `--data-dir`, else `$SUN_DATA_DIR`, else `~/.sun`. When `~/.sun` doesn't exist, the `sun` CLI uses the installed service's data dir. Settings live in `<data dir>/sun.yaml`. Every key is optional, and unknown keys are refused, so a typo fails loudly. The keys most people set:
 
 ```yaml
-listen: 127.0.0.1:7700
-public_url: https://sun.example.com     # for hosts and deep links
-default_runtime: claude-code
+listen: 127.0.0.1:7700                  # where `sun serve` listens
+public_url: https://sun.example.com     # how hosts and links reach the kernel
+default_runtime: claude-code            # for workflows without `runtime:`
 runtimes:
   permission_mode: accept_edits         # default | accept_edits | plan | bypass_permissions
-  template_dir: templates               # per-CLI envelope overrides
+  allow_bypass: false                   # required before bypass_permissions can be chosen
 caps:
-  per_runtime: { claude-code: 2 }
-  per_host: { vps: { runs: 4, memory_mb: 8192, cpus: 4 }, "*": { runs: 2 } }
+  per_runtime: { claude-code: 2 }       # active runs per runtime; extra tasks queue
+  per_host: { "*": { runs: 2 } }        # active runs per host
 watchdog: { stall_after: 15m, on_stall: nudge }   # nudge | restart | fail
-rotate_at_percent: 80                   # context rotation
-notify_to: ["slack:#eng"]
-worktree_retention_hours: 24
-event_retention_days: 90
-features: { knowledge: true, canvas: true, evals: true, market: false, catalog: true }
+worktree_retention_hours: 24            # default 0: removed when a task is done
+event_retention_days: 90                # default: keep forever
+notify_to: ["slack:#eng"]               # where approvals and stalls are announced
 ```
 
-Sign-in providers (Google, GitHub, any OIDC) are set up in Settings → Sign-in, with their client secrets sealed in the store. An `oidc:` entry from an older `sun.yaml` is imported there once, with `SUN_OIDC_CLIENT_SECRET`.
+**Permissions.** Each agent CLI has a permission mode. `runtimes.permission_mode` in a host's `sun.yaml` is that host's default (`accept_edits`). A deployment owner can set the mode per runtime on the **Runtimes** page, which applies to every new session of that runtime on any host. Claude Code takes the mode as a flag. OpenCode's permission requests are answered by it. Codex runs in its own `workspace-write` sandbox. `bypass_permissions` lets the agent run any command, so it needs `allow_bypass: true` first; use it only when sessions run in a container or VM.
 
-Secrets never go in the file. They come from environment variables:
-- `SUN_DECISIONS_API_KEY`
-- `SUN_MASTER_KEY`, or `<data dir>/master.key`
+**Secrets** never go in `sun.yaml`. `sun secret set` seals them in the store, with the key in `<data dir>/master.key` or `SUN_MASTER_KEY`. Back that key up: losing it loses every secret. Sign-in providers (Google, GitHub, any OIDC) and SMTP are set in **Settings**.
 
-The store is SQLite only (`<data dir>/sun.db`). Postgres support was removed: `sun` refuses to start while `SUN_DATABASE_URL` holds a `postgres://` URL.
+**High availability** (active-passive with Litestream) is described in [`docs/deployment.md`](docs/deployment.md#3-high-availability-active-passive).
 
-**High availability** is active-passive: Litestream replicates the store, and a standby restores it when the primary is gone. On each node, install `litestream` (plus `rclone` for a remote files replica), copy `packaging/litestream.yml` to `/etc/litestream.yml` (or point `LITESTREAM_CONFIG` at it) and run `scripts/ha.sh start [sun serve args]`. It needs `SUN_DATA_DIR`, `SUN_FILES_REPLICA` (an absolute dir, or an rclone remote such as `s3:my-bucket/sun/files`), `SUN_DB_REPLICA` for Litestream (e.g. `s3://my-bucket/sun/db`, with the usual `AWS_*` credentials) and the same `SUN_MASTER_KEY` on every node. The recommended path is a manual restore: stop the primary (`ha.sh` exits 0 on SIGTERM after a last file sync, so nothing is lost), then run `ha.sh start` on the other node; it restores the latest database and files, and refuses to start on an empty database when a backup should exist. Automatic takeover is **experimental, verified only by `scripts/ha-chaos.sh` on one machine**: a node that finds a live primary waits as a standby and takes over when the primary's heartbeat stops; exit code 3 means another node took over, so start it again to rejoin as a standby. Run `ha.sh` as the service's main process: systemd (default `KillMode=control-group`) and Docker (PID 1) stop or kill `sun` together with it, and if only Litestream dies, `ha.sh` stops Sun itself and exits 1 so the service restarts on the same database. `sun doctor` on the primary checks that the replica has caught up and the file sync is fresh; it needs `SUN_DB_REPLICA` (and the S3 credentials) in its shell, as it cannot discover them.
+## Workflows
 
-**A workflow** is a versioned YAML file. This is the bundled bug-fix role template:
+A workflow is a versioned YAML file: a list of steps. Step types are `agent`, `gate`, `action`, `approval`, `wait`, `notify` and `decide`; mods can add more. The engine, not the agent, decides when a step is done: a `gate` step runs checks, and on failure sends the work back to an earlier step a limited number of times. Code gates include `diff_not_empty`, `test`, `lint`, `diagnostics_clean`, `pr_exists` and `ci_green`. Content gates for non-code work include `sections_present`, `length`, `format` and `links_resolve`.
+
+This is the built-in `default` workflow (`crates/sun-workflow/defaults/default.yaml`):
 
 ```yaml
-name: bug-fix
+name: default
 on: [manual]
-runtime:
-  chain: [claude-code, codex]          # failover order
-  on_limit: switch
-budget: { wall: 2h, turns: 200, cost_usd: 5 }
 steps:
-  - { id: reproduce, type: agent, prompt: "Reproduce the bug with a failing test…", skills: [tdd] }
-  - { id: fix, type: agent, prompt: "Fix the root cause…", skills: [tdd] }
-  - { id: verify, type: gate, gates: [diff_not_empty, test, lint], on_fail: { send_back_to: fix, max: 2 } }
-  - { id: pr, type: action, use: github.open_pr }
-  - { id: review, type: approval, who: [role:admin], timeout: { after: 24h, then: remind } }
+  - id: implement
+    type: agent
+    prompt: |
+      Implement the task. Keep the change focused, add or update tests for it,
+      and run them before you say you are done.
+
+  - id: verify
+    type: gate
+    gates: [diff_not_empty, test, lint]
+    on_fail: { send_back_to: implement, max: 2 }
+
+  - id: pr
+    type: action
+    use: github.open_pr
+
+  - id: review
+    type: approval
+    who: [role:admin]
+    timeout: { after: 24h, then: remind }
 ```
 
-The other role templates live in `templates/workflows/`: feature across repos, UI refactor, marketing campaign, PRD, weekly summary and client deployment.
+`runtime: { chain: [claude-code, codex], on_limit: switch }` sets the failover order: when a runtime hits its usage limit, the step moves to the next one in the same worktree. `on:` also takes `cron:<expr>` (UTC) and `webhook`. More examples are in [`templates/workflows/`](templates/workflows/): bug fix, feature across repos, UI refactor, marketing campaign, PRD, weekly summary, client deployment. A repo can keep its own in `.sun/workflows/`. `sun workflow validate <file>` checks one; errors carry `line:column`.
 
 ## Architecture
 
-For a plain-language overview with diagrams (the parts, how a task runs, the ways to deploy), see [`docs/`](docs/README.md).
-
 ```
- triggers: UI · CLI · REST · cron · webhook · plugin events
-                     │
- ┌───────────────────▼────────────── sun serve (kernel, one binary) ───────────────────┐
- │ api (axum: REST, SSE, WS) · auth (local token, OIDC, RBAC) · embedded Svelte UI      │
- │ queue + flow control ─► engine: step state machine ─► transactional outbox           │
- │ watchdog · gates & approvals · failover · decision hooks                              │
- │ context: compiler · hand-off packs · knowledge (FTS5) · `sun` MCP server              │
- │ mod host: plugins & extensions over JSON-RPC stdio                                    │
- │ store: SQLite WAL + content-addressed zstd blobs                                      │
- └──────────────┬────────────────────────────────────────────────┬──────────────────────┘
-                │ WebSocket, the host dials out (seq/ack)         │ JSON-RPC 2.0, stdio
- ┌──────────────▼─────────── sun host (same binary) ──┐   ┌───────▼────────────────────┐
- │ sessions · worktrees · exec envs: bare/container/VM │   │ plugins: GitHub, GitLab,   │
- │ adapters: Claude Code · Codex · OpenCode · mods     │   │ Slack, Jira, MCP, …        │
- │ devices: iOS Simulator · Android emulator           │   │ extensions: steps, gates…  │
- └─────────────────────────────────────────────────────┘   └────────────────────────────┘
-          Sun Cloud (closed, private repo): control plane · gateway · billing · registry · marketplace
+ UI · CLI · REST · cron · webhooks
+              │
+   sun serve (kernel) ── API, engine, queue, gates, approvals, mods ── SQLite store
+              │  WebSocket; each host dials out
+   sun host ── worktrees, sessions ── Claude Code · Codex · OpenCode
 ```
 
-**Process model.**
-- `sun serve` is the kernel. It owns all state.
-- `sun host` is a runtime host. It dials out to the kernel, so a Mac behind NAT just works.
-- On one box, `sun serve --with-host` runs both in one process. They still talk over the same WebSocket protocol on loopback, so there is one code path.
-- Mods are child processes.
+- **Kernel** (`sun serve`) owns all state: the task queue, the step state machine, gates, approvals and the store (SQLite plus compressed blobs in the data dir). Every step change is one transaction, so a crash or restart resumes a run without redoing finished steps.
+- **Hosts** (`sun host`) run agent sessions, one git worktree per task. `sun serve --with-host` runs a host in the kernel's process, over the same protocol.
+- **Runtimes** are the agent CLIs, each behind an adapter that turns its output into Sun events.
+- **Mods** (plugins and extensions: GitHub, GitLab, Slack, Jira, ...) are child processes of the kernel, run in an OS sandbox.
 
-**Crates.** Each crate's `lib.rs` doc comment is its contract.
-
-| Crate | Single responsibility |
-|---|---|
-| `sun-core` | The shared vocabulary: ids, domain types, the run/step state machines, `SunEvent`, and the boundary traits `RuntimeAdapter`, `HostLink`, `ModLink` and `EngineHandle`. It also holds the secret filter and entitlements. No I/O. |
-| `sun-store` | The only crate that touches the database and blobs: migrations, backup, the event log (ledger), the step journal, the outbox, FTS5 and zstd blobs. It exposes Repository traits. |
-| `sun-workflow` | Parse and validate workflow YAML (errors carry `line:column`), version by hash, publish the JSON Schema. |
-| `sun-engine` | The single writer of run and step transitions: queue, state machine, gates, approvals, watchdog, failover, outbox worker and triggers. |
-| `sun-context` | The context pack compiler, hand-off packs, the knowledge index and the `sun` MCP server. |
-| `sun-runtime` | One Adapter per agent CLI, normalized to `SunEvent`. Adapters are tested by replaying recorded fixtures. |
-| `sun-host` | The host daemon: sessions, worktrees, exec envs, resource accounting, device verify and the on-disk event buffer. |
-| `sun-mod` | The mod (Plugin) host: manifests, JSON-RPC stdio, lifecycle, permissions and the OS sandbox. |
-| `sun-catalog` | The curated skills and MCP catalog, with stack-based suggestions. |
-| `sun-api` | The network edge: REST `/api/v1`, the SSE timeline, auth, the `/host` WebSocket and the embedded UI. |
-| `sun-cli` | The `sun` binary. It wires the real implementations into the traits (dependency injection). |
-
-**Dependency rule.** CI enforces this with `scripts/check-deps.sh`.
-
-| Crate | May depend on |
-|---|---|
-| `sun-core` | nothing (std, serde, serde_json, ulid, chrono, thiserror, async-trait, futures-core, ed25519-dalek) |
-| `sun-store`, `sun-workflow`, `sun-runtime` | `sun-core` |
-| `sun-mod` | `sun-core`, `sun-mod-sdk` |
-| `sun-context` | `sun-core`, `sun-store` |
-| `sun-engine` | `sun-core`, `sun-store`, `sun-workflow`, `sun-context` |
-| `sun-host` | `sun-core`, `sun-runtime` |
-| `sun-catalog` | `sun-core`, `sun-mod` |
-| `sun-api` | `sun-core`, `sun-engine`, `sun-context`, `sun-catalog` |
-| `sun-cli` | everything |
-| `sun-mod-sdk` (`sdk/rust`) | nothing |
-
-`sun-engine` reaches hosts and mods only through the `HostLink` and `ModLink` traits in `sun-core`. `sun-cli` plugs in the real ones.
-
-The wire formats live in the code: the REST routes in `sun-api`, the host frames in `sun_core::host_protocol` and the mod protocol in `sdk/rust/src/protocol.rs`.
-
-## Project layout
-
-```
-crates/          the eleven engine crates above
-web/             Svelte 5 + Vite UI (Madlabs design system), embedded by sun-api
-catalog/mods.json   registry of first-party and community mods (each in its own repo, madlabs-tech/sun-plugin-*)
-sdk/             mod SDKs: rust/ (sun-mod-sdk) and typescript/ (Apache-2.0)
-templates/       role workflows, plugin/extension/skill/MCP-server scaffolds
-catalog/         curated skills and MCP servers (index.json)
-schema/          workflow JSON Schema
-packaging/       systemd unit and launchd plist
-scripts/         install, e2e, footprint, bench, mem-check, check-deps, cli-matrix
-bench/           footprint stand-in
-tests/           cross-crate fixtures
-```
+More, with diagrams: [`docs/`](docs/README.md).
 
 ## Development
 
-Read [`AGENTS.md`](AGENTS.md) first. It is short and it is binding. Its main rules:
-- **Roles**: a technical manager plans, reviews and merges; subagents write the code, each in its own git worktree and branch. See "Roles" in `AGENTS.md`.
-- **snake_case everywhere**, never camelCase: code, JSON, YAML, DB columns and file names. Types are PascalCase.
-- **Conventional Commits**: `<type>(<scope>): <summary>`, e.g. `feat(engine): resume runs from the step journal after crash`.
-- **DRY, SOLID and ACID.** Every state change is one transaction, side effects go only through the outbox, and migrations are never edited.
-- **Named patterns**: Adapter for runtimes, State machine for runs, Transactional outbox, Repository, Event sourcing + Observer, Strategy / Chain of Responsibility for failover and gates, Plugin for mods, DI in `sun-cli`.
-- **UI** uses the Madlabs design system only: dark, `data-product="orchestrator"`, Lucide icons, no emoji, contrast ≥ 4.5:1, from 360 px up.
+Read [`AGENTS.md`](AGENTS.md) first; its rules are binding. Rust is pinned in `rust-toolchain.toml`. The UI needs Node.
 
-**Before every commit:**
+```sh
+(cd web && npm ci && npm run build)        # the UI the binary embeds
+cargo build --release -p sun-cli --bin sun
+```
+
+Before a commit:
 
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-(cd web && npm run check)        # if web/ changed
+(cd web && npm run check)                  # if web/ changed
 ```
 
-**Resources.** The dev machine is shared, so keep 1 GB of RAM free:
-- Run `scripts/mem-check.sh <need_gb> --wait` before any heavy step: a cargo build or test, Playwright or a VM.
-- Limit parallelism with `CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 CARGO_INCREMENTAL=0`.
+- `bash scripts/dev.sh` builds the UI and the kernel, then runs the kernel on port 7700 and the Vite dev server. Ctrl-C stops both.
+- `bash scripts/e2e.sh` runs the real binary through a whole run, failover, gates, a PR, an approval and `kill -9` crash resumes.
+- `bash scripts/footprint.sh` checks binary size, idle RSS and cold start against the release budget (40 MB binary, 40 MB idle RSS).
+- `bash scripts/check-deps.sh` enforces the crate dependency rule.
+- `dist plan` shows the release artifacts; a pushed `v*` tag builds, signs and publishes a release.
 
-**Run it all locally:** `bash scripts/dev.sh` builds the UI and the kernel, then runs the kernel (port 7700) and the vite dev server; Ctrl-C stops both (`--help` for `--no-web`, `--reset`).
+Crates, the dependency rule and the project layout: [`docs/README.md`](docs/README.md#crates).
 
-**End-to-end checks:**
-- `bash scripts/e2e.sh` runs the real binary through a whole run, then a failover to a second fake runtime, gates, a PR, an approval, and `kill -9` crash resumes.
-- `bash scripts/footprint.sh` gates binary size, idle RSS and cold start.
-- `bash scripts/check-deps.sh` enforces the crate dependency table.
-- `bash scripts/cli-matrix.sh` re-records the CLI fixtures. It needs API keys.
+## Limitations
 
-## Footprint
+- **Platforms:** Linux x86_64 and arm64, and macOS on Apple silicon. Intel Macs and Windows are not supported.
+- **Agent CLIs:** Claude Code, Codex and OpenCode. Bring-your-own-key runtimes run through OpenCode. You install and log in to the CLIs yourself.
+- **Service install** on Linux needs systemd. Without it, use `--no-service` and your own supervisor.
+- **TLS:** `sun serve` speaks plain HTTP. Put your own proxy in front for `https://` and `wss://`.
+- **Extensions:** runtimes and execution environments that an extension adds run only on the kernel's own host (`sun serve --with-host`), not on a joined host.
+- **Cron** schedules are in UTC.
+- **Footprint:** the v0.1.0 release measured a 36.5 MiB binary and about 30 MiB idle RSS on Linux x86_64 (`footprint.json` in the release assets). Each agent CLI session uses its own memory on top of that.
 
-`scripts/footprint.sh` on an Apple M4, macOS arm64, 2026-10-07. Release `sun` with the UI embedded, `serve --with-host`, no sessions:
+## License
 
-| Metric | Measured | Budget |
-|---|---|---|
-| Binary size (with UI) | **25.7 MB** | ≤ 40 MB |
-| Idle RSS | **21.5 MB** | ≤ 40 MB |
-| Cold start to API | **38 ms** | ≤ 300 ms |
-
-The agent CLI dominates memory, not the kernel. One idle `claude -p` session uses about **235 MB RSS**, and sessions share nothing. On a 1 GB VPS that means 1–2 concurrent sessions; 5 sessions want 2 GB or more. Linux and VPS numbers are not measured yet.
-
-## Status and known limits
-
-The code side of every story is done; what follows is still unproven.
-
-**Needs real accounts or hardware (external):**
-- A real quota hit per CLI. The OpenCode limit fixture is synthetic. This is also the M1 exit criterion.
-- A real Xcode Simulator and Android emulator run, including the H.264 live view.
-- A real Lima/QEMU VM with the egress allowlist.
-- A green Linux CI run of the Landlock/seccomp mod sandbox.
-- Real cloud hosting for the control plane, and live Xendit/Stripe payments.
-- A timed install on a fresh Linux VPS, and a VPS benchmark that includes the agent CLIs.
-- The default `on_limit` policy, which waits for user interviews.
-- A legal review before the marketplace (M5).
-
-**Placeholders:**
-- No public release yet: `get-sun.madlabs.tech` redirects to GitHub Releases, which stay empty until the first `v*` tag.
-
-**Never run:**
-- The GitHub Actions workflows (`ci`, `footprint`, `release`, `cli-matrix`). Nothing has been pushed.
-
-**Known limits:**
-- Integrations are tested against mock servers only.
-- Extension runtimes and exec envs reach only the in-process host.
-- Cron runs in UTC.
-- Spend caps count only the cost a runtime reports. Subscriptions report none.
-- Same-provider account rotation is deliberately not shipped.
-
-## Licensing
-
-Sun has two licenses:
-- **The engine** (everything outside `sdk/`): **FSL-1.1-ALv2**. Each release turns Apache-2.0 after two years. You can read, run, self-host and modify it, but not resell it as a competing hosted service.
-- **The mod SDKs** (`sdk/rust`, `sdk/typescript`, each with its `LICENSE`) and **the runtime daemon**: **Apache-2.0**.
-
-The engine's license is in `LICENSE`; each SDK carries its own.
+- The engine (everything outside `sdk/`): [FSL-1.1-ALv2](LICENSE). You can read, run, self-host and modify it, but not offer it as a competing hosted service. Each release becomes Apache-2.0 two years after it is published.
+- The mod SDKs (`sdk/rust`, `sdk/typescript`): Apache-2.0, each with its own `LICENSE`.
