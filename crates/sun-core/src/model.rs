@@ -11,10 +11,10 @@ use serde_json::Value;
 
 use crate::{
     AgentId, ArtifactId, AuditId, BlobHash, ContextPackId, CorrectionId, EcosystemId, EvalRunId,
-    EvalSetId, HandoffPackId, HostId, IdemKey, MemberId, MemoryItemId, NoteId, OutboxId, PinId,
-    ProjectId, PullRequestId, RepoId, RunId, RunStatus, RuntimeId, SessionId, StepId, StepKey,
-    StepStatus, TaskActivityId, TaskId, TaskStatus, Timestamp, VcsConnectionId, WorkflowId,
-    WorkspaceId,
+    EvalSetId, HandoffPackId, HostId, HostRuntimeId, IdemKey, MemberId, MemoryItemId, NoteId,
+    OutboxId, PinId, ProjectId, PullRequestId, RepoId, RunId, RunStatus, RuntimeId, SessionId,
+    StepId, StepKey, StepStatus, TaskActivityId, TaskId, TaskStatus, Timestamp, VcsConnectionId,
+    WorkflowId, WorkspaceId,
 };
 
 /// `repo` — one of a workspace's repositories (`{url, description}`): what
@@ -1148,6 +1148,39 @@ pub struct Host {
     /// They may attach it to their other workspaces.
     #[serde(default)]
     pub enrolled_by: Option<MemberId>,
+}
+
+/// `host_runtime` — one tool (runtime adapter) on one host, projected from
+/// the host's capabilities report ([`Host::capabilities`] stays the raw
+/// report; this is derived from it on every `hello` and `capabilities`
+/// frame, never written by anything else).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRuntime {
+    /// Id; stable for the life of the `(host, tool)` pair, across removals.
+    pub id: HostRuntimeId,
+    /// The host.
+    pub host_id: HostId,
+    /// `RuntimeAdapter::id` (or a profile id), e.g. `claude-code`.
+    pub tool: String,
+    /// Protocol family (`claude_stream`, `codex_exec`, `acp`, ...) when the
+    /// host reports one.
+    pub family: Option<String>,
+    /// The CLI's reported version.
+    pub version: Option<String>,
+    /// The CLI binary was found.
+    pub installed: bool,
+    /// `logged_in`, `logged_out` or `unknown` (not installed, or the probe
+    /// could not tell).
+    pub auth: String,
+    /// Human-readable reason when not ready, with a fix if known.
+    pub detail: Option<String>,
+    /// The host's own cap on sessions of this tool, when it reports one.
+    pub max_sessions: Option<u32>,
+    /// When the kernel last took a report naming this tool.
+    pub probed_at: Timestamp,
+    /// Set when a later report no longer names the tool; cleared when it
+    /// returns. The row is kept for history.
+    pub removed_at: Option<Timestamp>,
 }
 
 /// `session` — an agent session on a host, with its resource use.

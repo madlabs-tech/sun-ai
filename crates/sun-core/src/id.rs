@@ -61,6 +61,8 @@ ulid_id!(
     RuntimeId,
     /// `host.id`
     HostId,
+    /// `host_runtime.id` — one `(host, tool)` the host reported.
+    HostRuntimeId,
     /// `session.id` — Sun's id for one agent session on a host.
     SessionId,
     /// `handoff_pack.id`
