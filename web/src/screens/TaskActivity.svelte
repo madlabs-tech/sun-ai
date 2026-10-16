@@ -1,4 +1,4 @@
-<!-- A task's Activity: comments, moves, priority, assignee and project changes, and runs ("{runner} started
+<!-- A task's Activity: comments (an agent's final message is its reply), moves, priority, assignee and project changes, and runs ("{runner} started
      a run", "{runner} completed a run", "Run 2 failed"), merged by time (the page streams the log live).
      A comment box sticks to the bottom: ⌘↵ / Ctrl+↵ sends, and on an agent's task the comment wakes it. -->
 <script lang="ts">
@@ -40,6 +40,10 @@
     const base = { key: `a${a.seq}`, at: a.created_at, who };
     switch (a.kind) {
       case 'comment':
+        if (b.by_agent) {
+          const agent = app.agents.find((x) => x.id === b.by_agent)?.name ?? runner;
+          return { ...base, who: agent, icon: 'bot', text: 'replied', comment: String(b.text ?? '') };
+        }
         return { ...base, icon: 'message-square', text: 'commented', comment: String(b.text ?? '') };
       case 'created':
         return { ...base, icon: 'circle-plus', text: `created the task in ${status_label(b.status)}` };
