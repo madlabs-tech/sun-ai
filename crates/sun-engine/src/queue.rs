@@ -18,6 +18,8 @@
 //!   pump. A run whose exec env (task override, else workflow `exec_env:`)
 //!   is a container or VM only goes to hosts that report that kind ready;
 //!   a VM's RAM and CPUs count against its host's cap.
+//!   A run a comment queued prefers the host of its task's previous run,
+//!   where the agent's last CLI session is (`conversation`).
 //! - Each active run counts against the runtime of its latest session
 //!   (`session_assigned`, so failover moves it), else the one it was
 //!   placed for.
@@ -385,13 +387,16 @@ struct Want {
     /// The exec env kind it needs (`bare`, `container`, `vm`).
     env: String,
     load: Load,
+    /// The host it goes to when that one may take it.
+    prefer: Option<HostId>,
 }
 
 /// A host a run may go to: its ready exec env kinds and its cap.
 type Candidate = (HostId, Vec<String>, HostCap);
 
-/// Which of the (sorted) `waiting` runs to start now, and where: the least
-/// busy of `hosts` (in preference order) that can run the run's exec env and
+/// Which of the (sorted) `waiting` runs to start now, and where: its
+/// preferred host, else the least busy of `hosts` (in preference order),
+/// that can run the run's exec env and
 /// has room for it (a run slot, and its VM's RAM and CPUs) and whose CLI for
 /// the run's runtime is ready and that may take the run (`runs_on`: attached
 /// to its workspace). `active` holds the slot and load
@@ -440,7 +445,7 @@ fn admit(
             .iter()
             .filter(fits)
             .map(|(h, ..)| *h)
-            .min_by_key(|h| used(h).0)
+            .min_by_key(|h| (want.prefer != Some(*h), used(h).0))
         else {
             continue;
         };
@@ -614,12 +619,20 @@ impl Scheduler {
                     .map(|w| w.exec_env.clone())
                     .unwrap_or_default(),
             };
+            let prefer = match crate::conversation::woken_by_comment(&mut tx, w.run.id).await? {
+                true => match crate::conversation::previous_run(&mut tx, &w.run).await? {
+                    Some(previous) => placed_host(&mut tx, previous.id).await?,
+                    None => None,
+                },
+                false => None,
+            };
             runs.push(Want {
                 run_id: w.run.id,
                 workspace: w.workspace,
                 runtime: runtime.clone(),
                 env: env.kind().to_owned(),
                 load: Load::of(&env),
+                prefer,
             });
         }
         let waiting = runs;
@@ -771,6 +784,7 @@ mod tests {
             runtime: runtime.into(),
             env: env.into(),
             load: Load::default(),
+            prefer: None,
         }
     }
 
@@ -843,6 +857,26 @@ mod tests {
         assert_eq!(unlimited.len(), runs.len());
         assert!(unlimited.iter().all(|(_, host)| *host == h2));
         assert!(admit(&waiting, &[], &active, &Caps::default(), |_| false, any).is_empty());
+    }
+
+    #[test]
+    fn queue_puts_a_run_on_its_preferred_host_while_that_one_has_room() {
+        let (h1, h2) = (HostId::generate(), HostId::generate());
+        let run = RunId::generate();
+        let bare = |h: HostId, cap: HostCap| (h, vec!["bare".to_owned()], cap);
+        let on_h2 = [Want {
+            prefer: Some(h2),
+            ..want(run, "claude", "bare")
+        }];
+        // h2 is busier, but the run's last session is there.
+        let active = [slot("claude", h2)];
+        let hosts = [bare(h1, HostCap::default()), bare(h2, runs_cap(2))];
+        let start = admit(&on_h2, &hosts, &active, &Caps::default(), |_| false, any);
+        assert_eq!(start, [(run, h2)]);
+        // h2 is full: the least busy one instead.
+        let hosts = [bare(h1, HostCap::default()), bare(h2, runs_cap(1))];
+        let start = admit(&on_h2, &hosts, &active, &Caps::default(), |_| false, any);
+        assert_eq!(start, [(run, h1)]);
     }
 
     /// A run goes to a host whose CLI for its own runtime is ready, not

@@ -345,7 +345,7 @@ impl Executor {
             }
             RunAction::Queue => {
                 let trigger = if message.is_some() {
-                    "comment"
+                    crate::conversation::COMMENT
                 } else {
                     "moved"
                 };
@@ -467,19 +467,24 @@ impl Executor {
             .pop()
             .filter(|r| !r.status.is_terminal());
         drop(tx);
+        // A message left for a later session says who wrote it.
+        let left = match &actor {
+            Some(actor) => format!("{}: {text}", crate::conversation::person(&actor.name)),
+            None => text.clone(),
+        };
         match active.map(|r| (r.id, r.status)) {
-            Some((run, RunStatus::Running)) => match self.steer(run, text.clone()).await {
+            Some((run, RunStatus::Running)) => match self.steer(run, text).await {
                 // No live agent session: the next one gets it.
-                Err(Error::InvalidInput(_)) => self.leave(run, &text).await,
+                Err(Error::InvalidInput(_)) => self.leave(run, &left).await,
                 steered => steered.map(drop),
             },
-            Some((run, RunStatus::Queued)) => self.leave(run, &text).await,
+            Some((run, RunStatus::Queued)) => self.leave(run, &left).await,
             _ if matches!(
                 task.status,
                 TaskStatus::Blocked | TaskStatus::NeedsYou | TaskStatus::Failed
             ) =>
             {
-                self.move_task(task_id, TaskStatus::Todo, actor, Some(text))
+                self.move_task(task_id, TaskStatus::Todo, actor, Some(left))
                     .await
             }
             _ => Ok(()),
