@@ -2016,3 +2016,287 @@ async fn the_thread_budget_counts_chars_not_bytes() {
         "Ada's reply, the 10 comments, the waking one"
     );
 }
+
+// BLO-147: BLO-128 part 2 test pass. The mention routing table (who wakes,
+// where, and how often), a mentioned agent's reply on the source thread,
+// and a mention storm.
+
+impl Kernel {
+    /// `agent`'s mention chat on `task`, if it has one.
+    async fn chat_of(&self, task: TaskId, agent: AgentId) -> Option<Task> {
+        let mut tx = self.store.read().await.unwrap();
+        tx.mention_chat(task, agent).await.unwrap()
+    }
+
+    /// An agent task whose first run is over: Needs you, one run. Sessions
+    /// finish as soon as they start from here on.
+    async fn idle_task(&self, agent: AgentId) -> TaskId {
+        self.host.finish.store(true, Ordering::SeqCst);
+        let task = self.task(agent, TaskStatus::Todo).await;
+        self.until(task, TaskStatus::NeedsYou).await;
+        task
+    }
+
+    async fn mention(&self, task: TaskId, text: &str, agents: &[AgentId]) {
+        self.engine
+            .comment(task, text, ana(), agents)
+            .await
+            .unwrap();
+    }
+}
+
+/// The routing table on a task Ada (assignee) has finished: who a person's
+/// comment wakes for each mention list, and how many runs each gets. Bob,
+/// when named, answers from his chat; Ada never gets one.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mention_routing_table_wakes_exactly_who_is_named() {
+    type Pick = fn(AgentId, AgentId) -> Vec<AgentId>;
+    // (row, mentions, Ada's runs on the task, Bob's runs in his chat)
+    let rows: [(&str, Pick, usize, Option<usize>); 5] = [
+        ("no mentions", |_, _| vec![], 2, None),
+        ("[assignee]", |ada, _| vec![ada], 2, None),
+        ("[other]", |_, bob| vec![bob], 1, Some(1)),
+        ("[assignee, other]", |ada, bob| vec![ada, bob], 2, Some(1)),
+        ("[other, assignee]", |ada, bob| vec![bob, ada], 2, Some(1)),
+    ];
+    for (row, pick, ada_runs, bob_runs) in rows {
+        let k = kernel().await;
+        let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+        let task = k.idle_task(ada).await;
+        k.mention(task, "over to you", &pick(ada, bob)).await;
+        eventually(row, || async {
+            let bob_now = match k.chat_of(task, bob).await {
+                Some(chat) => Some(k.runs(chat.id).await.len()),
+                None => None,
+            };
+            k.runs(task).await.len() == ada_runs && bob_now == bob_runs
+        })
+        .await;
+        settle().await;
+        assert_eq!(k.runs(task).await.len(), ada_runs, "{row}: Ada woken once");
+        let chat = k.chat_of(task, bob).await;
+        let bob_now = match &chat {
+            Some(chat) => Some(k.runs(chat.id).await.len()),
+            None => None,
+        };
+        assert_eq!(bob_now, bob_runs, "{row}: Bob");
+        assert!(
+            k.chat_of(task, ada).await.is_none(),
+            "{row}: no chat for the assignee"
+        );
+        assert!(
+            k.host.steers.lock().unwrap().is_empty(),
+            "{row}: nobody steered"
+        );
+        // Every session the row started is accounted for: Ada's first, then one each.
+        let started = 1 + (ada_runs - 1) + bob_runs.unwrap_or(0);
+        assert_eq!(k.host.envelopes().len(), started, "{row}");
+    }
+}
+
+/// [other] while the assignee is working: Ada is not steered and keeps her
+/// one run; [assignee] while she works steers her, and makes no chat.
+#[tokio::test(flavor = "multi_thread")]
+async fn naming_the_working_assignee_steers_her_and_naming_another_does_not() {
+    let k = kernel().await;
+    let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.working(task).await;
+    k.mention(task, "@Bob a second opinion?", &[bob]).await;
+    k.sessions(2).await;
+    assert!(k.host.steers.lock().unwrap().is_empty());
+    k.mention(task, "@Ada use v2", &[ada]).await;
+    assert_eq!(*k.host.steers.lock().unwrap(), ["@Ada use v2"]);
+    assert_eq!(k.runs(task).await.len(), 1);
+    assert!(k.chat_of(task, ada).await.is_none());
+}
+
+/// A second mention of Bob: the same chat (no new row), its second run;
+/// the chat never shows on the board.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_mention_reuses_the_chat_and_queues_its_next_run() {
+    let k = kernel().await;
+    let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+    let task = k.idle_task(ada).await;
+    k.mention(task, "@Bob first?", &[bob]).await;
+    let first = k.chat_of(task, bob).await.unwrap();
+    eventually("Bob's first reply", || async {
+        k.texts(task).await.len() == 3
+    })
+    .await;
+    k.mention(task, "@Bob second?", &[bob]).await;
+    eventually("Bob's second run", || async {
+        k.runs(first.id).await.len() == 2
+    })
+    .await;
+    let again = k.chat_of(task, bob).await.unwrap();
+    assert_eq!((again.id, again.created_at), (first.id, first.created_at));
+    let listed: Vec<TaskId> = k
+        .engine
+        .tasks()
+        .await
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(listed, [task]);
+    // Another task gets its own chat for Bob.
+    let other = k.idle_task(ada).await;
+    k.mention(other, "@Bob here too?", &[bob]).await;
+    let elsewhere = k.chat_of(other, bob).await.unwrap();
+    assert_ne!(elsewhere.id, first.id);
+    assert_eq!(elsewhere.source_task_id, Some(other));
+    settle().await;
+    assert_eq!(k.runs(task).await.len(), 1, "Ada slept through all of it");
+}
+
+/// Case 5: Bob's final message is a comment on the source task with exactly
+/// `{text, by_agent, run_id}` (his chat's run), his chat's own activity has
+/// no comment, and nobody wakes on it. His brief names the task and has no
+/// clone instructions. His next fresh session reads the source thread, his
+/// reply as "(you)".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mentioned_agents_reply_lands_on_the_source_and_wakes_nobody() {
+    let k = kernel().await;
+    let web = "https://github.com/acme/web.git";
+    k.engine
+        .add_workspace_repo(WorkspaceId::MAIN, web, None, "", "http://hook", "user:me")
+        .await
+        .unwrap();
+    let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+    let task = k.idle_task(ada).await;
+    assert!(k.host.envelopes()[0].contains("## Repositories agents can use"));
+    *k.host.claims.lock().unwrap() = vec!["Stable since 2.3.".into()];
+    k.mention(task, "@Bob is v2 stable?", &[bob]).await;
+    let chat = k.chat_of(task, bob).await.unwrap();
+    eventually("Bob's reply", || async { k.texts(task).await.len() == 3 }).await;
+    let run = k.runs(chat.id).await[0].id;
+    let reply = json!({ "text": "Stable since 2.3.", "by_agent": bob, "run_id": run });
+    assert_eq!(k.comments(task).await[2], reply);
+    let on_chat = k.engine.activity(chat.id, 0).await.unwrap();
+    let kinds: Vec<_> = on_chat.iter().map(|a| a.kind).collect();
+    assert!(
+        !kinds.contains(&sun_core::model::ActivityKind::Comment),
+        "{kinds:?}"
+    );
+    let brief = k.host.envelopes()[1].clone();
+    assert!(
+        brief.contains(
+            "You are Bob.\n\nYou were mentioned on task MAIN-1 Fix the login. Your final \
+             message is posted there as your reply.\n\nIt 500s."
+        ),
+        "{brief}"
+    );
+    assert!(!brief.contains("Clone what you need"), "{brief}");
+    assert!(!brief.contains("sun/chat-"), "{brief}");
+    // Nobody wakes on Bob's reply: not Ada, not Bob again.
+    settle().await;
+    assert_eq!(k.runs(task).await.len(), 1);
+    assert_eq!(k.runs(chat.id).await.len(), 1);
+    assert_eq!(k.get(task).await.status, TaskStatus::NeedsYou);
+
+    // Bob again (no native session to resume): his fresh session reads the
+    // source thread, his own reply as his.
+    k.mention(task, "@Bob and v3?", &[bob]).await;
+    k.sessions(3).await;
+    let lines = thread_lines(&k.host.envelopes()[2]);
+    assert!(
+        lines.contains(&"- Bob (you): Stable since 2.3.".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"- Ada: done".to_owned()),
+        "Ada's reply under her name: {lines:?}"
+    );
+}
+
+/// Eight people mention Bob at once on a task he has no chat on yet: one
+/// chat, one run, every message reaches it; Ada stays asleep.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mention_storm_makes_one_chat_and_one_run() {
+    let k = kernel().await;
+    let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+    let task = k.idle_task(ada).await;
+    k.host.finish.store(false, Ordering::SeqCst);
+    let comments: Vec<_> = (0..8)
+        .map(|i| {
+            let engine = k.engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .comment(task, &format!("@Bob q{i}"), ana(), &[bob])
+                    .await
+            })
+        })
+        .collect();
+    for comment in comments {
+        comment.await.unwrap().unwrap();
+    }
+    let chat = k.chat_of(task, bob).await.unwrap();
+    assert_eq!(k.runs(chat.id).await.len(), 1);
+    eventually("every question delivered", || async {
+        let envelope = k.host.envelopes().last().cloned().unwrap_or_default();
+        let steers = k.host.steers.lock().unwrap().clone();
+        (0..8).all(|i| {
+            let text = format!("@Bob q{i}");
+            envelope.contains(&text) || steers.contains(&text)
+        })
+    })
+    .await;
+    assert_eq!(k.runs(task).await.len(), 1);
+    assert_eq!(k.comments(task).await.len(), 9, "Ada's reply and the eight");
+}
+
+/// An unassigned task: a comment with no mentions wakes nobody, a mention
+/// wakes only the named agent, and a later plain comment does not reach
+/// that agent's chat.
+#[tokio::test(flavor = "multi_thread")]
+async fn on_an_unassigned_task_only_a_mention_wakes_anyone() {
+    let k = kernel().await;
+    let bob = k.agent("Bob").await;
+    k.host.finish.store(true, Ordering::SeqCst);
+    let new = NewTask {
+        workspace_id: Some(WorkspaceId::MAIN),
+        title: "Plan the launch".into(),
+        body: String::new(),
+        workflow: WorkflowPick::None,
+        exec_env: None,
+        priority: Priority::None,
+        status: TaskStatus::Todo,
+        project_id: None,
+        actor: None,
+    };
+    let task = k.engine.create_task(new).await.unwrap().id;
+    k.mention(task, "just a note", &[]).await;
+    k.mention(task, "@Bob dates?", &[bob]).await;
+    let chat = k.chat_of(task, bob).await.unwrap();
+    eventually("Bob's reply", || async { k.texts(task).await.len() == 3 }).await;
+    k.mention(task, "thanks all", &[]).await;
+    settle().await;
+    assert_eq!(k.runs(chat.id).await.len(), 1);
+    assert!(k.runs(task).await.is_empty());
+    assert_eq!(k.host.envelopes().len(), 1);
+}
+
+/// Case 5, defect probe: a mention chat's session still gets the
+/// workspace's "Repositories agents can use" section, from its context pack
+/// (`context.rs` lists the workspace's repos for every step), though the
+/// chat answers and never clones. Ada's own session on the task, control,
+/// does get it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "BLO-147 defect: context::compile adds the workspace repos section to a mention chat's envelope (crates/sun-engine/src/context.rs:252 does not skip TaskKind::Chat)"]
+async fn a_mention_chats_session_gets_no_repository_section() {
+    let k = kernel().await;
+    let web = "https://github.com/acme/web.git";
+    k.engine
+        .add_workspace_repo(WorkspaceId::MAIN, web, None, "", "http://hook", "user:me")
+        .await
+        .unwrap();
+    let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+    let task = k.idle_task(ada).await;
+    assert!(k.host.envelopes()[0].contains("## Repositories agents can use"));
+    k.mention(task, "@Bob is v2 stable?", &[bob]).await;
+    k.sessions(2).await;
+    let envelope = k.host.envelopes()[1].clone();
+    assert!(!envelope.contains("## Repositories"), "{envelope}");
+    assert!(!envelope.contains(web), "{envelope}");
+}
