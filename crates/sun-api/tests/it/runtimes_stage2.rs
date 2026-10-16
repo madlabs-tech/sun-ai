@@ -431,6 +431,25 @@ async fn an_offline_host_that_is_also_logged_out_is_offline_not_needs_login() {
     assert_eq!(gone["detail"], "box is offline", "{gone}");
 }
 
+/// After a restart the hub has never seen an offline host, so under `v2`
+/// its `last_seen_at` is the row's last probe, not the enrolment (BLO-149).
+#[tokio::test]
+async fn an_offline_host_after_a_restart_was_last_seen_at_its_last_probe() {
+    let k = kernel().await;
+    let laptop = host_with(&k, claude_code(true)).await;
+    until_state(&k.app, "claude-code", k.host, "idle").await;
+    drop(laptop);
+    let k = common::restarted(k, sun_api::Features::default()).await;
+    let app = sun_api::router(k.api.clone().with_runtimes_model(RuntimesModel::V2));
+    let gone = runtimes_of(&app, "claude-code")
+        .await
+        .remove(&k.host.to_string())
+        .unwrap();
+    assert_eq!(gone["state"], "offline", "{gone}");
+    assert!(gone["probed_at"].is_string(), "{gone}");
+    assert_eq!(gone["last_seen_at"], gone["probed_at"], "{gone}");
+}
+
 // --- Case 5: the kill switch ---------------------------------------------
 
 /// The old list's exact field set (main before item 2).

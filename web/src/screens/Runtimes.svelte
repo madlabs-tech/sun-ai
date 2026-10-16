@@ -24,7 +24,7 @@
     type RuntimeUsage,
   } from '../lib/api/types';
   import { can, current_workspace, error_text, is_owner, toast } from '../lib/app_state.svelte';
-  import { SOURCE_LABEL, clock, money, tokens, tool_label } from '../lib/format';
+  import { SOURCE_LABEL, clock, money, stamp, tokens, tool_label } from '../lib/format';
 
   type Tone = 'success' | 'info' | 'warning' | 'neutral';
   /** The badge per state (TRD §6). Busy also shows its load. */
@@ -245,7 +245,7 @@
           {#if r.host}
             {@const host = r.host.name}
             {#if r.state === 'offline'}
-              <p class="sun-row__meta runtime__meta">{host} hasn’t been seen since {r.last_seen_at ? clock(r.last_seen_at) : 'it joined'}.</p>
+              <p class="sun-row__meta runtime__meta">{host} hasn’t been seen since {r.last_seen_at ? stamp(r.last_seen_at) : 'it joined'}.</p>
             {:else if r.state === 'needs_login'}
               {@const command = login_command(r)}
               <p class="sun-row__meta runtime__meta">
