@@ -1132,7 +1132,8 @@ pub(crate) async fn online_adapters(
     Ok(seen)
 }
 
-/// Query of `GET /runtimes`: `?workspace=` and `?model=v1|v2` (default v2).
+/// Query of `GET /runtimes`: `?workspace=` and `?model=v1|v2` (the response
+/// shape, default `v2`).
 #[derive(serde::Deserialize)]
 pub(crate) struct RuntimesQuery {
     workspace: Option<String>,
@@ -1140,9 +1141,15 @@ pub(crate) struct RuntimesQuery {
 }
 
 /// `GET /api/v1/runtimes?workspace=[&model=v1]`: one entry per `(host,
-/// tool)` with an honest `state` ([`crate::runtime_list`]). `model=v1` is
-/// the old per-adapter list, unchanged, for one release. Only a deployment
-/// owner may leave out `?workspace=` (every workspace's rows).
+/// tool)` with an honest `state` ([`crate::runtime_list`]). Only a
+/// deployment owner may leave out `?workspace=` (every workspace's rows).
+///
+/// - `sun.yaml` `runtimes.model` = data **source** (`v1` capabilities_json,
+///   `v2` host_runtime) for placement and for the §6 list alike.
+/// - `?model=v1` = **legacy response shape** only, deprecated, removed
+///   together with the deprecated aliases one release later. Default (no
+///   flag) returns the §6 per-`(host, tool)` shape, so the page works out of
+///   the box under either yaml value.
 pub(crate) async fn list_runtimes(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,

@@ -2910,3 +2910,53 @@ async fn runtimes_v1_keeps_the_old_per_adapter_list() {
     let (status, body) = call(app, "GET", "/api/v1/runtimes?model=v3", None).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
 }
+
+/// `runtimes.model: v2` reads the list from `host_runtime`: each entry's
+/// `id` is its row id and `probed_at` is set; everything else, and the
+/// legacy `?model=v1` shape, is what the raw report (`v1`) gives.
+#[tokio::test]
+async fn runtimes_model_v2_reads_host_runtime_rows() {
+    use sun_store::HostRepo;
+    let k = kernel().await;
+    let app = &k.app;
+    let mut hello = kernel_host_hello(&k);
+    hello["capabilities"]["runtimes"] = claude_code(true);
+    let _laptop = connect_host(app, k.host, hello).await;
+    let (vps, _socket) = enrol_host(app, "vps-sg-1", claude_code(false)).await;
+    let v2 = sun_api::router(
+        k.api
+            .clone()
+            .with_runtimes_model(sun_api::RuntimesModel::V2),
+    );
+    let rows = k
+        .store
+        .read()
+        .await
+        .unwrap()
+        .host_runtimes(None)
+        .await
+        .unwrap();
+    let mut from_rows = runtimes_of(&v2, "claude-code").await;
+    let mut from_report = runtimes_of(app, "claude-code").await;
+    assert_eq!(from_rows.len(), 2, "{from_rows:?}");
+    for host in [k.host, vps] {
+        let row = rows
+            .iter()
+            .find(|r| r.host_id == host && r.tool == "claude-code")
+            .unwrap();
+        let mut entry = from_rows.remove(&host.to_string()).unwrap();
+        assert_eq!(entry["id"], row.id.to_string());
+        assert_eq!(entry["probed_at"], json!(row.probed_at));
+        let mut raw = from_report.remove(&host.to_string()).unwrap();
+        assert_eq!(raw["id"], format!("{host}:claude-code"));
+        assert_eq!(raw["probed_at"], Value::Null);
+        for field in ["id", "probed_at"] {
+            entry[field] = Value::Null;
+            raw[field] = Value::Null;
+        }
+        assert_eq!(entry, raw, "same facts from either source");
+    }
+    let (_, legacy_rows) = call(&v2, "GET", "/api/v1/runtimes?model=v1", None).await;
+    let (_, legacy_report) = call(app, "GET", "/api/v1/runtimes?model=v1", None).await;
+    assert_eq!(legacy_rows, legacy_report);
+}
