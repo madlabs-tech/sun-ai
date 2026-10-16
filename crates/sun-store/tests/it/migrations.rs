@@ -193,3 +193,56 @@ async fn running_cooldowns_move_to_their_accounts() {
         ]
     );
 }
+
+/// BLO-136 case 3 (cooldown across workspaces): a CLI-login cooldown of
+/// workspace A that 20261106090000 carries over lands only on hosts that
+/// serve A. Workspace B's own host (attached to B alone, never to A) must
+/// not come out cooling: before the migration A's `runtime_state` row was
+/// A's, and after it B's host entries must not be marked or blocked by it.
+#[tokio::test]
+async fn a_carried_login_cooldown_stays_on_its_own_workspaces_hosts() {
+    use sqlx::migrate::Migrate;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    conn.ensure_migrations_table().await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    for migration in migrator.iter().filter(|m| m.version < 20261106090000) {
+        conn.apply(migration).await.unwrap();
+    }
+    let until = "2099-01-01T00:00:00+00:00";
+    for sql in [
+        "INSERT INTO workspace (id, name, created_at, slug, issue_prefix) VALUES
+           ('01K0000000000000000000000B', 'Beta', $1, 'beta', 'BETA')",
+        "INSERT INTO host (id, name) VALUES ('HA', 'alpha-mac'), ('HB', 'beta-vps')",
+        "INSERT INTO workspace_host (workspace_id, host_id) VALUES
+           ('00000000000000000000000001', 'HA'), ('01K0000000000000000000000B', 'HB')",
+        "INSERT INTO runtime (id, workspace_id, name, adapter, source) VALUES
+           ('RA', '00000000000000000000000001', 'claude-code', 'claude-code', 'byo_runtime')",
+        "INSERT INTO runtime_state (runtime_id, status, cooldown_until) VALUES
+           ('RA', 'cooling_down', $1)",
+    ] {
+        sqlx::query(sql)
+            .bind(until)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+    }
+    conn.close().await.unwrap();
+
+    drop(Store::open(dir.path()).await.unwrap());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    let moved: Vec<(String,)> = sqlx::query_as("SELECT account FROM account_cooldown ORDER BY 1")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    let moved: Vec<String> = moved.into_iter().map(|(a,)| a).collect();
+    assert!(
+        moved.contains(&"login:HA:claude-code".to_owned()),
+        "{moved:?}"
+    );
+    assert!(
+        !moved.contains(&"login:HB:claude-code".to_owned()),
+        "workspace Beta's host cools on Main's cooldown: {moved:?}"
+    );
+}
