@@ -463,12 +463,12 @@ fn fix_owner(data_dir: &Path) {
     }
 }
 
-fn uid() -> Result<String> {
+pub(crate) fn uid() -> Result<String> {
     let output = Command::new("id").arg("-u").output()?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn run(command: &mut Command) -> Result<()> {
+pub(crate) fn run(command: &mut Command) -> Result<()> {
     let status = command
         .status()
         .with_context(|| format!("running {command:?}"))?;

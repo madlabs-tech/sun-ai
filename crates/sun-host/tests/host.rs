@@ -292,6 +292,50 @@ async fn enrolment_trades_the_token_for_a_saved_host_key() {
     assert_eq!(mode & 0o777, 0o600);
 }
 
+#[tokio::test]
+async fn status_and_leave_ask_with_the_host_key_and_remove_forgets_it() {
+    let (listener, url) = listen().await;
+    let data_dir = temp_dir("status");
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let host_id = credentials.host_id;
+    let kernel = tokio::spawn(async move {
+        let mut kernel = Kernel::accept(&listener).await;
+        let HostFrame::Status {
+            host_id: id,
+            host_key,
+        } = kernel.recv(false).await
+        else {
+            panic!("expected status")
+        };
+        assert_eq!((id, host_key.as_str()), (host_id, "key-1"));
+        let status = KernelFrame::Status {
+            connected: true,
+            workspaces: vec!["Main".into()],
+        };
+        kernel.send(&status).await;
+        let mut kernel = Kernel::accept(&listener).await;
+        assert!(matches!(kernel.recv(false).await, HostFrame::Leave { .. }));
+        kernel.send(&KernelFrame::Left).await;
+        // A kernel that refuses closes without a word.
+        let kernel = Kernel::accept(&listener).await;
+        drop(kernel);
+    });
+    let status = sun_host::status(&credentials).await.unwrap();
+    assert!(status.connected && status.workspaces == ["Main"]);
+    sun_host::leave(&credentials).await.unwrap();
+    assert!(sun_host::status(&credentials).await.is_err());
+    kernel.await.unwrap();
+
+    std::fs::write(data_dir.join("host.json"), "{}").unwrap();
+    Credentials::remove(&data_dir).unwrap();
+    assert!(!data_dir.join("host.json").exists());
+    Credentials::remove(&data_dir).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn runs_a_session_and_never_loses_an_event_across_reconnects() {
     let (listener, url) = listen().await;

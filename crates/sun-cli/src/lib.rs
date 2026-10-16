@@ -18,6 +18,8 @@
 //! - The data dir (`--data-dir`, `$SUN_DATA_DIR`, `~/.sun`) holds `sun.yaml`
 //!   ([`config::Config`]), `kernel.json` (token + host secret, 0600), the
 //!   store, `host/` and `mods/`.
+//! - [`host_service`] is the runtime host's launchd agent / systemd unit
+//!   (`sun host join`, `start`, `stop`, `leave`).
 //! - [`ops`] runs an installed Sun: `upgrade` (checkpoint wait, backup,
 //!   binary swap, migrate, restart), `rollback`, `backup`, `doctor`.
 //!
@@ -27,6 +29,7 @@ pub mod client;
 pub mod cloud;
 pub mod config;
 pub mod eval;
+pub mod host_service;
 pub mod installer;
 pub mod knowledge;
 pub mod log;

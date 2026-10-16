@@ -1,0 +1,19 @@
+# Sun runtime host dialing a remote kernel (`sun host run`). `sun host
+# join` (crates/sun-cli/src/host_service.rs) fills the placeholders and
+# writes it to ~/.config/systemd/user/sun-host.service (a user unit), or as
+# root to /etc/systemd/system/sun-host.service; `sun host leave` removes it.
+[Unit]
+Description=Sun runtime host (sun host run)
+
+[Service]
+Type=simple
+Environment="SUN_DATA_DIR=@SUN_DATA_DIR@"
+Environment="HOME=@HOME@"
+# Agents need the CLIs the user has (claude, codex, git) on PATH.
+Environment="PATH=@PATH@"
+ExecStart="@SUN_BIN@" host run
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=@WANTED_BY@

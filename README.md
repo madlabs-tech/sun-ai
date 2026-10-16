@@ -139,7 +139,8 @@ sun task list
 | `sun status [--json]` | Show where this install lives, whether its kernel runs, and kernel and session resource use. |
 | `sun doctor` | Check this box: data dir, agent CLIs, git, disk, port, backup freshness (with Litestream), sandbox, service. |
 | `sun user set-password <email>` | Set a member's password (prompt or stdin): lockout recovery. |
-| `sun host join <token> --kernel URL` · `sun host run` | Enrol a machine with a kernel (the token is single use), then run it. |
+| `sun host join --kernel URL <token>` | Enrol a machine with a kernel (the token is single use), install the host as a background service (launchd `dev.sun.host` on macOS, systemd `sun-host` on Linux: a user unit, or a system unit as root) and wait until the kernel sees it connected. `--no-service` enrols only; run `sun host run` under your own supervisor. |
+| `sun host stop` · `start` · `leave` | Stop the host service until the next login/boot; (re)start it; or remove it, take the host out of the kernel's workspaces and delete its credentials. |
 | `sun repo add <url> [--description TEXT] [--workspace WS]` · `sun repo list` · `sun repo remove <id>` | A workspace's git repositories; a workflow run works in the ones the task text names. |
 | `sun task create <title> [--body] [--workflow] [--container IMG \| --vm TPL] [--priority N]` | Create and queue a task. |
 | `sun task list` · `show <id>` · `quality <id>` · `metrics` | Inspect tasks, the data they touched and post-merge quality. |

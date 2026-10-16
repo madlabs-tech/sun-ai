@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sun runtime host dialing a remote kernel (`sun host run`), a per-user
+     launch agent. `sun host join` (crates/sun-cli/src/host_service.rs)
+     fills the placeholders like scripts/install.sh does for
+     dev.sun.kernel.plist and writes it to
+     ~/Library/LaunchAgents/dev.sun.host.plist; `sun host leave` removes it. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.sun.host</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@SUN_BIN@</string>
+    <string>host</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SUN_DATA_DIR</key>
+    <string>@SUN_DATA_DIR@</string>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>PATH</key>
+    <string>@PATH@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>@SUN_DATA_DIR@/host.log</string>
+  <key>StandardErrorPath</key>
+  <string>@SUN_DATA_DIR@/host.log</string>
+</dict>
+</plist>
