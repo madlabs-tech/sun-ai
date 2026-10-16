@@ -63,3 +63,15 @@ jobs:
           got=$("$sun" --version)
           echo "$got"
           [ "$got" = "sun ${TAG#v}" ] || { echo "::error::installed '$got', expected 'sun ${TAG#v}'"; exit 1; }
+      - name: Uninstall keeps data, --purge removes it, rerun is a no-op
+        run: |
+          sudo=""; data="$HOME/Library/Application Support/sun"
+          [ "$RUNNER_OS" != Linux ] || { sudo=sudo; data=/var/lib/sun; }
+          sun=/usr/local/bin/sun
+          [ "$RUNNER_OS" = Linux ] || sun="$HOME/.local/bin/sun"
+          curl -fsSL https://get-sun.madlabs.tech | $sudo sh -s -- --uninstall | tee uninstall.log
+          grep -q "kept $data" uninstall.log
+          [ ! -e "$sun" ] && [ ! -e "$sun-mod-sandbox" ] && [ -d "$data" ]
+          curl -fsSL https://get-sun.madlabs.tech | $sudo sh -s -- --uninstall --purge
+          [ ! -d "$data" ]
+          curl -fsSL https://get-sun.madlabs.tech | $sudo sh -s -- --uninstall | grep -q 'nothing to remove'

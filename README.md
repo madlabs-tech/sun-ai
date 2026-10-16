@@ -96,7 +96,14 @@ curl -fsSL https://get-sun.madlabs.tech | sudo sh   # Linux: writes a systemd un
 curl -fsSL https://get-sun.madlabs.tech | sh        # macOS: writes a launchd agent
 ```
 
-The script detects your OS and architecture and verifies the release signature. It starts `sun serve --with-host` and prints the UI URL and a one-time sign-in link. If anything fails, it undoes every step.
+The script detects your OS and architecture and verifies the release signature. It starts `sun serve --with-host` and prints the UI URL and a one-time sign-in link. If anything fails, it undoes every step. Sun then starts at every login (macOS) or boot (Linux); the installer prints how to stop it.
+
+**Uninstall** (same command with `--uninstall`; keeps the data dir unless you add `--purge`):
+
+```sh
+curl -fsSL https://get-sun.madlabs.tech | sudo sh -s -- --uninstall   # Linux; add --purge to drop /var/lib/sun
+curl -fsSL https://get-sun.madlabs.tech | sh -s -- --uninstall        # macOS; add --purge to drop ~/Library/Application Support/sun
+```
 
 **From source** (Rust is pinned in `rust-toolchain.toml`; the UI needs Node; its design system `@hryer/madlabs-design-system` comes from the public npm registry):
 
