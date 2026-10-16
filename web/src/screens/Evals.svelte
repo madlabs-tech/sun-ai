@@ -6,7 +6,7 @@
   import { api } from '../lib/api/client';
   import type { EvalOutcome, EvalPick, EvalRun, EvalSet, Runtime, Workflow } from '../lib/api/types';
   import { current_workspace, error_text, toast } from '../lib/app_state.svelte';
-  import { CAUSE_BADGE, day } from '../lib/format';
+  import { CAUSE_BADGE, chain_names, day, runtime_name } from '../lib/format';
   import { go, href, route } from '../lib/router.svelte';
 
   let evals = $state<EvalRun[]>([]);
@@ -246,7 +246,7 @@
       </details>
       <Select
         label="Run on"
-        options={[{ value: '', label: 'Recorded transcripts (free, no model runs)' }, ...runtimes.map((r) => ({ value: r.name, label: `${r.name} (real runs, uses quota)` }))]}
+        options={[{ value: '', label: 'Recorded transcripts (free, no model runs)' }, ...chain_names(runtimes).map((name) => ({ value: name, label: `${runtime_name(runtimes, name)} (real runs, uses quota)` }))]}
         bind:value={runtime}
         hint="Pull requests, messages and other side effects are recorded, never sent."
       />
