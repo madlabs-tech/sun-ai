@@ -304,6 +304,27 @@ impl Engine {
         Ok(host)
     }
 
+    /// Saves a host enrolment token (by its hash) with what it `enrols`.
+    pub async fn add_host_token(
+        &self,
+        token_hash: &str,
+        enrols: &Value,
+        expires_at: Timestamp,
+    ) -> Result<()> {
+        let mut tx = self.store.begin().await?;
+        tx.insert_host_token(token_hash, enrols, expires_at).await?;
+        Ok(tx.commit().await?)
+    }
+
+    /// Spends a host enrolment token: what it enrols and when it expires,
+    /// or `None` when it is unknown or already used.
+    pub async fn take_host_token(&self, token_hash: &str) -> Result<Option<(Value, Timestamp)>> {
+        let mut tx = self.store.begin().await?;
+        let found = tx.take_host_token(token_hash).await?;
+        tx.commit().await?;
+        Ok(found)
+    }
+
     /// One host, or `NotFound`.
     pub async fn host(&self, id: HostId) -> Result<Host> {
         Ok(self.store.read().await?.get_host(id).await?)

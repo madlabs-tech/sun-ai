@@ -646,6 +646,66 @@ async fn ask(url: &str, frame: Value) -> Option<Value> {
     answer
 }
 
+/// A refused enrolment says why; a token outlives a kernel restart.
+#[tokio::test]
+async fn host_enrolment_says_why_and_tokens_survive_a_restart() {
+    use sun_store::HostRepo;
+    let k = kernel().await;
+    let main = "/api/v1/workspaces/00000000000000000000000001/hosts/tokens";
+    let (_, issued) = call(&k.app, "POST", main, None).await;
+    let token = issued["token"].as_str().unwrap().to_owned();
+    let k = common::restarted(k, sun_api::Features::default()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/host", listener.local_addr().unwrap());
+    tokio::spawn(axum::serve(listener, k.app.clone()).into_future());
+    let enroll =
+        |token: &str, name: &str| json!({ "type": "enroll", "token": token, "name": name });
+    let refused = |reason: &str| Some(json!({ "type": "enrol_failed", "reason": reason }));
+
+    // A bad name doesn't spend the token.
+    assert_eq!(ask(&url, enroll(&token, " ")).await, refused("bad_name"));
+    assert_eq!(
+        ask(&url, enroll(&token, &"x".repeat(65))).await,
+        refused("bad_name")
+    );
+    let enrolled = ask(&url, enroll(&token, "laptop")).await.unwrap();
+    assert_eq!(enrolled["type"], "enrolled", "{enrolled}");
+    // Used and unknown tokens look the same.
+    assert_eq!(
+        ask(&url, enroll(&token, "laptop")).await,
+        refused("invalid_token")
+    );
+    assert_eq!(
+        ask(&url, enroll("nope", "laptop")).await,
+        refused("invalid_token")
+    );
+
+    let expired = "an-expired-token";
+    let hash: String = Sha256::digest(expired.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let mut tx = k.store.begin().await.unwrap();
+    let an_hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+    tx.insert_host_token(&hash, &json!({ "workspace": [MAIN, null] }), an_hour_ago)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        ask(&url, enroll(expired, "laptop")).await,
+        refused("expired")
+    );
+
+    let (_, issued) = call(&k.app, "POST", main, None).await;
+    let limits = sun_core::entitlement::Limits {
+        hosts: Some(1),
+        ..Default::default()
+    };
+    common::plan(&k, MAIN, limits);
+    let full = enroll(issued["token"].as_str().unwrap(), "spare");
+    assert_eq!(ask(&url, full).await, refused("plan_limit"));
+}
+
 #[tokio::test]
 async fn host_socket_status_and_leave_need_the_host_key() {
     let k = kernel().await;
@@ -739,7 +799,8 @@ async fn host_socket_enrolment_session_sse_and_steer() {
         json!({ "type": "enroll", "token": token, "name": "again" }),
     )
     .await;
-    assert_eq!(recv(&mut socket).await, None);
+    let refused = recv(&mut socket).await.unwrap();
+    assert_eq!(refused["reason"], "invalid_token", "single use");
 
     // A wrong key is closed; the derived key (sha256(secret:host_id)) is accepted.
     let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();

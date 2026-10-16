@@ -203,7 +203,10 @@ impl Host {
                 return;
             }
             // Only valid as the answer on a one-shot connection.
-            KernelFrame::Enrolled { .. } | KernelFrame::Status { .. } | KernelFrame::Left => return,
+            KernelFrame::Enrolled { .. }
+            | KernelFrame::EnrolFailed { .. }
+            | KernelFrame::Status { .. }
+            | KernelFrame::Left => return,
             KernelFrame::WorktreePrepare { id, .. }
             | KernelFrame::WorktreeRemove { id, .. }
             | KernelFrame::SessionStart { id, .. }
@@ -348,6 +351,7 @@ impl Host {
             }
             KernelFrame::Ack { .. }
             | KernelFrame::Enrolled { .. }
+            | KernelFrame::EnrolFailed { .. }
             | KernelFrame::Status { .. }
             | KernelFrame::Left => {
                 return Err(Error::Protocol("not a request".into()));

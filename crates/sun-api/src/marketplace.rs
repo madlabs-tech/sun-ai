@@ -315,9 +315,8 @@ async fn lease_held(
     // names before it ran.
     let repos = api.engine.lease_repos(task_id).await?;
     let network = allowlist(&body.runtime, &repos);
-    let join_token = api
-        .hosts
-        .issue_token(crate::hosts::Enrols::Market(task_id))?;
+    let (join_token, _) =
+        crate::hosts::issue_token(api, crate::hosts::Enrols::Market(task_id)).await?;
     let request = LeaseRequest {
         task_ref: task_id.to_string(),
         runtime: body.runtime,

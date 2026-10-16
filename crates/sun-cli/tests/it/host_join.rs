@@ -72,4 +72,9 @@ fn host_join_with_a_workspace_token_attaches_the_host_there() {
         .output()
         .unwrap();
     assert!(!again.status.success());
+    let said = String::from_utf8_lossy(&again.stderr);
+    assert!(
+        said.contains("enrolment refused: the token is unknown or already used"),
+        "{said}"
+    );
 }
