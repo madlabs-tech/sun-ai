@@ -159,6 +159,10 @@ pub struct Runtimes {
     /// `host_runtime` rows. The kill switch of the runtime model rework.
     #[serde(default)]
     pub model: sun_api::RuntimesModel,
+    /// Sessions of one tool on one host at once, for hosts that report no
+    /// `max_sessions` of their own. Only under `model: v2`. Unset = no cap.
+    #[serde(default)]
+    pub max_sessions: Option<usize>,
 }
 
 impl Default for Runtimes {
@@ -171,6 +175,7 @@ impl Default for Runtimes {
             credits: BTreeMap::new(),
             template_dir: None,
             model: sun_api::RuntimesModel::default(),
+            max_sessions: None,
         }
     }
 }

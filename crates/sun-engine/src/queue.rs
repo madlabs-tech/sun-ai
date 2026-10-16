@@ -20,6 +20,14 @@
 //!   a VM's RAM and CPUs count against its host's cap.
 //!   A run a comment queued prefers the host of its task's previous run,
 //!   where the agent's last CLI session is (`conversation`).
+//! - **`bypass_permissions`** (a runtime's permission mode) runs only in a
+//!   container or VM: outside one, a chain entry with it is passed over, and
+//!   a run whose every usable entry has it fails at once
+//!   (`placement_refused_bypass_bare`); it is never placed with a lower
+//!   mode. The host refuses it again on its side.
+//! - Under `runtimes.model: v2` ([`crate::RUNTIMES_MODEL`]) hosts' runtimes
+//!   come from `host_runtime`, and each host takes at most its reported
+//!   `max_sessions` (else `Caps::max_sessions`) runs of one runtime.
 //! - Each active run counts against the runtime of its latest session
 //!   (`session_assigned`, so failover moves it), else the one it was
 //!   placed for.
@@ -65,6 +73,10 @@ pub struct Caps {
     pub per_host: BTreeMap<String, HostCap>,
     /// Active runs in the ecosystem (one per kernel).
     pub per_ecosystem: Option<usize>,
+    /// Active runs of one runtime on one host, for hosts that report no
+    /// `max_sessions` of their own; only under `runtimes.model: v2`
+    /// ([`crate::RUNTIMES_MODEL`]).
+    pub max_sessions: Option<usize>,
 }
 
 impl Caps {
@@ -310,6 +322,11 @@ fn sort(waiting: &mut [Waiting]) {
 /// Event kind of a run's placement; payload `{host}`.
 pub(crate) const RUN_PLACED: &str = "run_placed";
 
+/// Event kind of a run placement refused because it would run
+/// `bypass_permissions` outside a container or VM; payload
+/// `{runtime, exec_env, reason}`. The run fails; the mode is never lowered.
+pub(crate) const PLACEMENT_REFUSED_BYPASS_BARE: &str = "placement_refused_bypass_bare";
+
 /// Where `run_id` was placed, if the queue placed it. `run_placed` is
 /// written with the run's start, among its first few events.
 /// A run that moved hosts mid-step ([`moved_key`]) is placed on the new one.
@@ -399,7 +416,8 @@ type Candidate = (HostId, Vec<String>, HostCap);
 /// that can run the run's exec env and
 /// has room for it (a run slot, and its VM's RAM and CPUs) and whose CLI for
 /// the run's runtime is ready and that may take the run (`runs_on`: attached
-/// to its workspace). `active` holds the slot and load
+/// to its workspace) and that has room for one more session of that runtime
+/// (`max_sessions`, `v2`). `active` holds the slot and load
 /// of every active run. Runs are skipped, not blocked on: a full or cooling
 /// slot doesn't hold back other work.
 fn admit(
@@ -408,12 +426,15 @@ fn admit(
     active: &[(Slot, Load)],
     caps: &Caps,
     cooling: impl Fn(&str) -> bool,
+    max_sessions: impl Fn(&HostId, &str) -> Option<usize>,
     runs_on: impl Fn(&HostId, &Want) -> bool,
 ) -> Vec<(RunId, HostId)> {
     let mut runtimes: HashMap<&str, usize> = HashMap::new();
     let mut per_host: HashMap<HostId, (usize, Load)> = HashMap::new();
+    let mut sessions: HashMap<(HostId, &str), usize> = HashMap::new();
     for (slot, load) in active {
         *runtimes.entry(&slot.runtime).or_default() += 1;
+        *sessions.entry((slot.host, &slot.runtime)).or_default() += 1;
         let used = per_host.entry(slot.host).or_default();
         used.0 += 1;
         used.1.add(*load);
@@ -433,8 +454,10 @@ fn admit(
         let used = |host: &HostId| per_host.get(host).copied().unwrap_or_default();
         let fits = |(host, envs, cap): &&Candidate| {
             let (runs, load) = used(host);
+            let on_host = sessions.get(&(*host, runtime)).copied().unwrap_or(0);
             envs.contains(&want.env)
                 && runs_on(host, want)
+                && !full(max_sessions(host, runtime).as_ref(), on_host)
                 && !full(cap.runs.as_ref(), runs)
                 && cap
                     .memory_mb
@@ -450,6 +473,7 @@ fn admit(
             continue;
         };
         *runtimes.entry(runtime).or_default() += 1;
+        *sessions.entry((host, runtime)).or_default() += 1;
         let used = per_host.entry(host).or_default();
         used.0 += 1;
         used.1.add(want.load);
@@ -579,6 +603,9 @@ impl Scheduler {
         let mut leased = Vec::new();
         // Runs whose chain reached a `market:` entry.
         let mut to_market = Vec::new();
+        // Runs placement refuses (bypass outside a container or VM).
+        let mut refused = Vec::new();
+        let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
         let capped = crate::budget::ecosystem_over(&mut tx, now).await?.is_some();
         self.held_until = capped.then(|| crate::budget::next_month_start(now));
         for w in &waiting {
@@ -603,14 +630,6 @@ impl Scheduler {
                 .as_ref()
                 .map(|workflow| failover::chain(workflow, &slot.runtime))
                 .unwrap_or_else(|| vec![slot.runtime.clone()]);
-            let runtime = chain
-                .iter()
-                .find(|r| !self.cooling.contains_key(*r))
-                .unwrap_or(&chain[0]);
-            if let Some(adapter) = runtime.strip_prefix(crate::market::MARKET_PREFIX) {
-                to_market.push((w.run.id, adapter.to_owned()));
-                continue;
-            }
             let own = tx.setting(&task_exec_env_key(w.run.task_id)).await?;
             let env = match own.filter(|v| !v.is_null()) {
                 Some(spec) => serde_json::from_value::<ExecEnvSpec>(spec).unwrap_or_default(),
@@ -619,6 +638,44 @@ impl Scheduler {
                     .map(|w| w.exec_env.clone())
                     .unwrap_or_default(),
             };
+            // Bypass runs only in a container or VM: a chain entry that would
+            // get it in any other env is passed over, and a run with no other
+            // entry fails here instead of starting (a container or VM run
+            // already goes only to hosts with that env ready).
+            let mut runtime = None;
+            let mut refusal = None;
+            for name in chain.iter().filter(|r| !self.cooling.contains_key(*r)) {
+                let local = !name.starts_with(crate::market::MARKET_PREFIX);
+                if spends && local {
+                    let adapter = match tx.runtime_by_name(w.workspace, name).await? {
+                        Some(row) => row.adapter,
+                        None => name.clone(),
+                    };
+                    let mode = modes.get(&adapter).map(String::as_str);
+                    if let Some(why) = sun_core::bypass_refusal(mode, &env) {
+                        refusal.get_or_insert((name, why));
+                        continue;
+                    }
+                }
+                runtime = Some(name);
+                break;
+            }
+            let runtime = match (runtime, refusal) {
+                (Some(runtime), _) => runtime,
+                (None, Some((name, why))) => {
+                    let payload = json!({
+                        "runtime": name, "exec_env": env.kind(), "reason": why,
+                    });
+                    refused.push((w.run.id, payload));
+                    continue;
+                }
+                // Every entry is cooling: count it as the first.
+                (None, None) => &chain[0],
+            };
+            if let Some(adapter) = runtime.strip_prefix(crate::market::MARKET_PREFIX) {
+                to_market.push((w.run.id, adapter.to_owned()));
+                continue;
+            }
             let prefer = match crate::conversation::woken_by_comment(&mut tx, w.run.id).await? {
                 true => match crate::conversation::previous_run(&mut tx, &w.run).await? {
                     Some(previous) => placed_host(&mut tx, previous.id).await?,
@@ -658,17 +715,24 @@ impl Scheduler {
         // each one is ready for.
         let mut ready: Vec<(HostId, Vec<String>)> = Vec::new();
         let mut runs_on: HashSet<(HostId, String)> = HashSet::new();
+        // `v2`: each host's cap on sessions of a runtime.
+        let mut max_sessions: HashMap<(HostId, String), usize> = HashMap::new();
+        let default_max = self.config.caps.max_sessions;
         for runtime in runtimes {
-            let hosts = match self.engine.ready_hosts(runtime).await? {
+            let hosts = match self.engine.ready_hosts(runtime, default_max).await? {
                 Ready::Hosts(hosts) => hosts,
                 // Unknown capabilities: try anything, `prepare` says why not.
                 Ready::Unreported => vec![(
                     slot.host,
                     ["bare", "container", "vm"].map(String::from).to_vec(),
+                    None,
                 )],
             };
-            for (id, envs) in hosts {
+            for (id, envs, max) in hosts {
                 runs_on.insert((id, runtime.to_owned()));
+                if let Some(max) = max {
+                    max_sessions.insert((id, runtime.to_owned()), max);
+                }
                 if !ready.iter().any(|(h, _)| *h == id) {
                     ready.push((id, envs));
                 }
@@ -704,6 +768,16 @@ impl Scheduler {
                 tx.commit().await?;
             }
         }
+        for (run_id, payload) in refused {
+            // As for a start: a run cancelled since the read is no error.
+            if let Err(e @ Error::Unavailable(_)) = self
+                .engine
+                .refuse_run(run_id, PLACEMENT_REFUSED_BYPASS_BARE, payload)
+                .await
+            {
+                return Err(e);
+            }
+        }
         let wants: HashMap<RunId, &Want> = waiting.iter().map(|w| (w.run_id, w)).collect();
         let mut start: Vec<(RunId, Placement)> = admit(
             &waiting,
@@ -711,6 +785,7 @@ impl Scheduler {
             &active,
             &self.config.caps,
             |runtime| self.cooling.contains_key(runtime),
+            |host, runtime| max_sessions.get(&(*host, runtime.to_owned())).copied(),
             |host, want| {
                 runs_on.contains(&(*host, want.runtime.clone()))
                     && (attached
@@ -793,6 +868,11 @@ mod tests {
         true
     }
 
+    /// No host caps sessions of a runtime (`v1`).
+    fn no_max(_: &HostId, _: &str) -> Option<usize> {
+        None
+    }
+
     fn runs_cap(cap: usize) -> HostCap {
         HostCap {
             runs: Some(cap),
@@ -847,16 +927,43 @@ mod tests {
         };
         let active = [slot("claude", h1), slot("codex", h2)];
         let hosts = [bare(h1, runs_cap(2)), bare(h2, HostCap::default())];
-        let start = admit(&waiting, &hosts, &active, &caps, |r| r == "opencode", any);
+        let start = admit(
+            &waiting,
+            &hosts,
+            &active,
+            &caps,
+            |r| r == "opencode",
+            no_max,
+            any,
+        );
         // h1 (1 active) and h2 (1 active) tie: h1 first; then h2 is less busy;
         // then h1 is full (cap 2) so h2 takes the rest.
         assert_eq!(start, [(runs[0], h1), (runs[2], h2), (runs[3], h2)]);
 
         let one = [bare(h2, HostCap::default())];
-        let unlimited = admit(&waiting, &one, &active, &Caps::default(), |_| false, any);
+        let unlimited = admit(
+            &waiting,
+            &one,
+            &active,
+            &Caps::default(),
+            |_| false,
+            no_max,
+            any,
+        );
         assert_eq!(unlimited.len(), runs.len());
         assert!(unlimited.iter().all(|(_, host)| *host == h2));
-        assert!(admit(&waiting, &[], &active, &Caps::default(), |_| false, any).is_empty());
+        assert!(
+            admit(
+                &waiting,
+                &[],
+                &active,
+                &Caps::default(),
+                |_| false,
+                no_max,
+                any
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -871,11 +978,27 @@ mod tests {
         // h2 is busier, but the run's last session is there.
         let active = [slot("claude", h2)];
         let hosts = [bare(h1, HostCap::default()), bare(h2, runs_cap(2))];
-        let start = admit(&on_h2, &hosts, &active, &Caps::default(), |_| false, any);
+        let start = admit(
+            &on_h2,
+            &hosts,
+            &active,
+            &Caps::default(),
+            |_| false,
+            no_max,
+            any,
+        );
         assert_eq!(start, [(run, h2)]);
         // h2 is full: the least busy one instead.
         let hosts = [bare(h1, HostCap::default()), bare(h2, runs_cap(1))];
-        let start = admit(&on_h2, &hosts, &active, &Caps::default(), |_| false, any);
+        let start = admit(
+            &on_h2,
+            &hosts,
+            &active,
+            &Caps::default(),
+            |_| false,
+            no_max,
+            any,
+        );
         assert_eq!(start, [(run, h1)]);
     }
 
@@ -896,7 +1019,15 @@ mod tests {
         let runs_on = |h: &HostId, w: &Want| {
             (*h == h1 && w.runtime == "claude") || (*h == h2 && w.runtime == "codex")
         };
-        let start = admit(&waiting, &hosts, &[], &Caps::default(), |_| false, runs_on);
+        let start = admit(
+            &waiting,
+            &hosts,
+            &[],
+            &Caps::default(),
+            |_| false,
+            no_max,
+            runs_on,
+        );
         assert_eq!(start, [(runs[0], h2), (runs[1], h1)]);
     }
 
@@ -930,7 +1061,15 @@ mod tests {
             vm(runs[1], 2048, 2),            // fits exactly
             want(runs[2], "claude", "bare"), // no VM: only the run slot counts
         ];
-        let start = admit(&waiting, &hosts, &active, &Caps::default(), |_| false, any);
+        let start = admit(
+            &waiting,
+            &hosts,
+            &active,
+            &Caps::default(),
+            |_| false,
+            no_max,
+            any,
+        );
         assert_eq!(start, [(runs[1], host), (runs[2], host)]);
         // An unset VM size counts Lima's defaults.
         let spec = ExecEnvSpec::Vm(sun_core::VmSpec {
@@ -973,7 +1112,15 @@ mod tests {
                 HostCap::default(),
             ),
         ];
-        let start = admit(&waiting, &hosts, &[], &Caps::default(), |_| false, any);
+        let start = admit(
+            &waiting,
+            &hosts,
+            &[],
+            &Caps::default(),
+            |_| false,
+            no_max,
+            any,
+        );
         assert_eq!(start, [(runs[0], docker_host), (runs[2], bare_host)]);
     }
 
@@ -1011,6 +1158,7 @@ mod tests {
                 &[],
                 &Caps::default(),
                 |_| false,
+                no_max,
                 runs_on,
             )
         };
@@ -1064,7 +1212,15 @@ mod tests {
                 ..want(RunId::generate(), "claude", "bare")
             },
         ];
-        let start = admit(&waiting, &hosts, &active, &Caps::default(), |_| false, any);
+        let start = admit(
+            &waiting,
+            &hosts,
+            &active,
+            &Caps::default(),
+            |_| false,
+            no_max,
+            any,
+        );
         assert_eq!(
             start,
             [(waiting[0].run_id, h3), (waiting[1].run_id, h2)],
@@ -1187,5 +1343,31 @@ mod tests {
         tx.insert_task(&named).await.unwrap();
         let run = queue_run(&mut tx, named.id, "created").await.unwrap();
         assert_eq!(tx.get_run(run).await.unwrap().repo_ids, vec![web.id]);
+    }
+
+    #[test]
+    fn queue_max_sessions_sends_the_next_run_to_the_next_host() {
+        let (h1, h2) = (HostId::generate(), HostId::generate());
+        let bare = |h: HostId| (h, vec!["bare".to_owned()], HostCap::default());
+        let hosts = [bare(h1), bare(h2)];
+        let runs: Vec<RunId> = (0..3).map(|_| RunId::generate()).collect();
+        let waiting = [
+            want(runs[0], "claude", "bare"),
+            want(runs[1], "claude", "bare"), // h1 has its one claude session
+            want(runs[2], "codex", "bare"),
+        ];
+        // h1 takes one claude session at a time; h2 is busier but uncapped.
+        let max = |h: &HostId, r: &str| (*h == h1 && r == "claude").then_some(1);
+        let active = [slot("codex", h2), slot("codex", h2)];
+        let start = admit(
+            &waiting,
+            &hosts,
+            &active,
+            &Caps::default(),
+            |_| false,
+            max,
+            any,
+        );
+        assert_eq!(start, [(runs[0], h1), (runs[1], h2), (runs[2], h1)]);
     }
 }

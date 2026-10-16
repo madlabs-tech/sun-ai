@@ -26,8 +26,8 @@ use sun_core::{
 use sun_engine::{DecisionClient, Engine, EngineConfig, MarketPolicy, Principal, WatchdogConfig};
 use sun_runtime::FakeRuntime;
 use sun_store::{
-    EventLog, HostRepo, OutboxRepo, RepoRepo, RunRepo, SettingRepo, Store, TaskContext, TaskRepo,
-    WorkflowRepo, WorkspaceRepo,
+    EventLog, HostRepo, OutboxRepo, RepoRepo, RunRepo, RuntimeRepo, SettingRepo, Store,
+    TaskContext, TaskRepo, WorkflowRepo, WorkspaceRepo,
 };
 use sun_workflow::OnLimit;
 use tokio::sync::mpsc;
@@ -176,6 +176,11 @@ impl HostLink for LocalHost {
             spec.worktree.join(sun_context::PACK_PATH).exists(),
             "context files are written before the session starts"
         );
+        // As a real host does (FR8): bypass never starts bare.
+        if let Some(why) = sun_core::bypass_refusal(spec.permission_mode.as_deref(), &spec.exec_env)
+        {
+            return Err(Error::Forbidden(why));
+        }
         {
             let mut offline = self.offline.lock().unwrap();
             if *offline > 0 {
@@ -334,6 +339,10 @@ struct Setup {
     market: Option<MarketPolicy>,
     /// A marketplace seller's host (see [`LocalHost`]).
     seller: bool,
+    /// `sun.yaml` `runtimes.model` (`v1` when unset).
+    runtimes_model: Option<&'static str>,
+    /// Adapters whose permission mode is `bypass_permissions`.
+    bypass: Vec<&'static str>,
 }
 
 impl Harness {
@@ -418,6 +427,17 @@ impl Harness {
             ..TaskContext::default()
         };
         tx.put_task_context(task.id, &pinned).await.unwrap();
+        if let Some(model) = setup.runtimes_model {
+            let model = serde_json::json!(model);
+            tx.put_setting(sun_engine::RUNTIMES_MODEL, &model)
+                .await
+                .unwrap();
+        }
+        for adapter in &setup.bypass {
+            tx.set_permission_mode(adapter, "bypass_permissions")
+                .await
+                .unwrap();
+        }
         tx.commit().await.unwrap();
 
         let worktree = dir.path().join("work").join(run.id.to_string());
@@ -1071,6 +1091,89 @@ async fn failover_skips_unready_runtimes_with_a_reason() {
         skipped.payload["reason"],
         "`fake-limit` is not logged in: run `fake login`"
     );
+}
+
+/// The `runtimes.model` kill switch: `v1` reads the host's raw report, `v2`
+/// its `host_runtime` rows. A report the strict `v1` parse can't read (no
+/// `os`/`cpus`) is trusted there, while `v2` reads the rows projected from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_readiness_follows_the_runtimes_model_switch() {
+    let report = serde_json::json!({"runtimes": [
+        {"adapter": "fake-limit", "readiness": {"installed": true, "logged_in": false}},
+        {"adapter": "fake-ok", "readiness": {"installed": true, "logged_in": true}},
+    ]});
+    for (model, ran) in [("v1", "fake-limit"), ("v2", "fake-ok")] {
+        let setup = Setup {
+            capabilities: Some(report.clone()),
+            runtimes_model: Some(model),
+            ..Setup::default()
+        };
+        let h = Harness::with(
+            "switch",
+            &[
+                ("fake-limit", vec![script(&[TALK, EDIT, DONE, EXIT])]),
+                ("fake-ok", vec![script(&[TALK, EDIT, DONE, EXIT])]),
+            ],
+            setup,
+        )
+        .await;
+        h.wait_for(|s| s.is_terminal()).await;
+        assert_eq!(h.adapters(), [ran], "runtimes.model {model}");
+    }
+}
+
+/// A runtime whose permission mode is bypass is skipped for a bare run, with
+/// the rule as the reason; the next one runs without bypass.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_skips_a_bypass_runtime_for_a_bare_run() {
+    let setup = Setup {
+        bypass: vec!["fake-limit"],
+        ..Setup::default()
+    };
+    let h = Harness::with(
+        "switch",
+        &[
+            ("fake-limit", vec![script(&[TALK, EDIT, DONE, EXIT])]),
+            ("fake-ok", vec![script(&[TALK, EDIT, DONE, EXIT])]),
+        ],
+        setup,
+    )
+    .await;
+    h.wait_for(|s| s.is_terminal()).await;
+    assert_eq!(h.adapters(), ["fake-ok"]);
+    let skipped = first_event(&h, "runtime_skipped").await;
+    assert_eq!(skipped.payload["runtime"], "fake-limit");
+    let reason = skipped.payload["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("bypass_permissions needs a container or vm"),
+        "{reason}"
+    );
+}
+
+/// Every runtime of the chain is bypass on a bare run: the engine still
+/// asks, the host refuses (FR8), and the run fails at once, not after the
+/// unreachable-host retries.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_a_host_refusal_fails_the_run_without_retries() {
+    let setup = Setup {
+        bypass: vec!["fake-ok"],
+        chain: "fake-ok",
+        ..Setup::default()
+    };
+    let h = Harness::with(
+        "switch",
+        &[("fake-ok", vec![script(&[TALK, EDIT, DONE, EXIT])])],
+        setup,
+    )
+    .await;
+    let run = h.wait_for(|s| s.is_terminal()).await;
+    assert_eq!(run.status, RunStatus::Failed);
+    let reason = run.end_reason.unwrap_or_default();
+    assert!(reason.contains("refused the session"), "{reason}");
+    assert!(reason.contains("bypass_permissions"), "{reason}");
+    assert!(h.adapters().is_empty(), "no session started");
+    let events = h.events().await;
+    assert!(!events.iter().any(|e| e.kind == "host_unreachable"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

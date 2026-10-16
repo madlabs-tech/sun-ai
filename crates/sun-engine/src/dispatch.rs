@@ -20,7 +20,9 @@
 //!   `running`. Both are tried again after `dispatch_backoff · 2ⁿ` (at most
 //!   60 s), so a host that (re)connects picks the work up. After
 //!   `dispatch_tries` tries the step fails and the run ends with
-//!   "host `<name>` unreachable after N tries: …".
+//!   "host `<name>` unreachable after N tries: …". A start the host
+//!   refuses by its own rule (`forbidden`: bypass on a bare host) fails
+//!   at once: "host `<name>` refused the session: …".
 //!
 //! **Pattern:** retry with exponential backoff over the step **state
 //! machine**; nothing here holds a transaction across host I/O.
@@ -243,6 +245,10 @@ impl Executor {
         if step.status != StepStatus::Dispatched {
             return Ok(());
         }
+        // A host rule refused it (bypass on a bare host): no retry helps.
+        if let Error::Forbidden(why) = error {
+            return self.give_up(tx, step, why, true, effects).await;
+        }
         // The host answered, so the CLI refused the resume: start fresh.
         if !matches!(error, Error::Unavailable(_))
             && let Some(resume) = start.resume.take()
@@ -257,7 +263,8 @@ impl Executor {
             self.dispatch.starts.insert(step.id, start);
             Ok(())
         } else {
-            self.give_up(tx, step, &error.to_string(), effects).await
+            self.give_up(tx, step, &error.to_string(), false, effects)
+                .await
         }
     }
 
@@ -311,6 +318,7 @@ impl Executor {
         tx: &mut Tx,
         step: &mut Step,
         error: &str,
+        refused: bool,
         effects: &mut Vec<Effect>,
     ) -> Result<()> {
         let tries = self.config.watchdog.dispatch_tries;
@@ -320,9 +328,15 @@ impl Executor {
             Ok(host) => host.name,
             Err(_) => host_id.to_string(),
         };
-        let why = format!("host `{host}` unreachable after {tries} tries: {error}");
-        let payload = json!({ "step_id": step.id, "error": why });
-        append(tx, step, kind::HOST_UNREACHABLE, payload).await?;
+        let why = match refused {
+            true => format!("host `{host}` refused the session: {error}"),
+            false => {
+                let why = format!("host `{host}` unreachable after {tries} tries: {error}");
+                let payload = json!({ "step_id": step.id, "error": why });
+                append(tx, step, kind::HOST_UNREACHABLE, payload).await?;
+                why
+            }
+        };
         self.stop_step_sessions(step.id, effects);
         match step.status {
             StepStatus::Dispatched => move_step(tx, step, StepStatus::Failed, Some(&why)).await?,
@@ -387,7 +401,7 @@ impl Executor {
                     let payload = json!({ "step_id": step.id, "error": e.to_string() });
                     append(tx, step, kind::HOST_UNREACHABLE, payload).await
                 } else {
-                    self.give_up(tx, step, &e.to_string(), effects).await
+                    self.give_up(tx, step, &e.to_string(), false, effects).await
                 }
             }
             Ok(false) => {

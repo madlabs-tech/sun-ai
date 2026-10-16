@@ -182,6 +182,8 @@ pub async fn start(
     let retention = serde_json::json!(config.worktree_retention_hours.unwrap_or(0));
     tx.put_setting(sun_engine::WORKTREE_RETENTION, &retention)
         .await?;
+    let model = serde_json::json!(config.runtimes.model);
+    tx.put_setting(sun_engine::RUNTIMES_MODEL, &model).await?;
     tx.commit().await?;
     let host = placement_host(&store, data_dir, &secrets, options.with_host).await?;
 
@@ -318,6 +320,7 @@ pub async fn start(
                 per_ecosystem: config.max_active_runs,
                 per_runtime: config.caps.per_runtime.clone(),
                 per_host: config.caps.per_host.clone(),
+                max_sessions: config.runtimes.max_sessions,
             },
         },
     );
@@ -416,6 +419,7 @@ pub async fn start(
             let config = options.exec_env_tools.clone().apply(sun_host::HostConfig {
                 skills_dir,
                 mod_envs: Some(mod_envs),
+                permission_mode: Some(config.runtimes.permission_mode.clone()),
                 ..sun_host::HostConfig::new(host_dir(data_dir))
             });
             let local = sun_host::Host::open(config, adapters)?;

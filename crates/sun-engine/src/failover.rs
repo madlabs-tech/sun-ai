@@ -257,23 +257,87 @@ pub(crate) fn chain(workflow: &Workflow, default: &str) -> Vec<String> {
         .map_or_else(|| vec![default.to_owned()], |p| p.chain.clone())
 }
 
-/// Why `adapter` can't run on a host with `capabilities`, if it can't.
-pub(super) fn unready_reason(capabilities: &Capabilities, adapter: &str) -> Option<String> {
-    let Some(runtime) = capabilities.runtimes.iter().find(|r| r.adapter == adapter) else {
-        return Some(format!("`{adapter}` is not on the host"));
-    };
-    let readiness = &runtime.readiness;
-    let problem = if !readiness.installed {
-        "is not installed"
-    } else if !readiness.logged_in {
-        "is not logged in"
-    } else {
-        return None;
-    };
-    Some(match &readiness.detail {
-        Some(detail) => format!("`{adapter}` {problem}: {detail}"),
-        None => format!("`{adapter}` {problem}"),
-    })
+/// What one host reported about its runtimes, read per
+/// [`super::RUNTIMES_MODEL`]: its raw capabilities report (`v1`) or its
+/// `host_runtime` rows (`v2`).
+pub(crate) enum Reported {
+    Caps(Box<Capabilities>),
+    Rows(Vec<model::HostRuntime>),
+}
+
+impl Reported {
+    /// `host`'s report: its rows when `rows` (every host's, `v2`) is given,
+    /// else its parsed capabilities. `None` when it reported nothing usable
+    /// (no rows, or an unparsable report): callers trust such a host.
+    pub(crate) fn of(host: &model::Host, rows: Option<&[model::HostRuntime]>) -> Option<Self> {
+        match rows {
+            Some(rows) => {
+                let own = rows.iter().filter(|r| r.host_id == host.id).cloned();
+                let own: Vec<_> = own.collect();
+                (!own.is_empty()).then_some(Self::Rows(own))
+            }
+            None => serde_json::from_value(host.capabilities.clone())
+                .ok()
+                .map(|caps| Self::Caps(Box::new(caps))),
+        }
+    }
+
+    /// The host reported `adapter` at all.
+    pub(crate) fn has(&self, adapter: &str) -> bool {
+        self.readiness(adapter).is_some()
+    }
+
+    /// Why `adapter` can't run on the host, if it can't.
+    pub(crate) fn unready(&self, adapter: &str) -> Option<String> {
+        let Some((installed, logged_in, detail)) = self.readiness(adapter) else {
+            return Some(format!("`{adapter}` is not on the host"));
+        };
+        let problem = if !installed {
+            "is not installed"
+        } else if !logged_in {
+            "is not logged in"
+        } else {
+            return None;
+        };
+        Some(match detail {
+            Some(detail) => format!("`{adapter}` {problem}: {detail}"),
+            None => format!("`{adapter}` {problem}"),
+        })
+    }
+
+    /// The host's own cap on sessions of `adapter` (`v2` rows only).
+    pub(crate) fn max_sessions(&self, adapter: &str) -> Option<usize> {
+        match self {
+            Self::Rows(rows) => rows
+                .iter()
+                .find(|r| r.tool == adapter)
+                .and_then(|r| r.max_sessions)
+                .map(|max| max as usize),
+            Self::Caps(_) => None,
+        }
+    }
+
+    /// `(installed, logged_in, detail)` of `adapter`, if reported.
+    fn readiness(&self, adapter: &str) -> Option<(bool, bool, Option<&str>)> {
+        match self {
+            Self::Caps(caps) => caps
+                .runtimes
+                .iter()
+                .find(|r| r.adapter == adapter)
+                .map(|r| {
+                    let readiness = &r.readiness;
+                    (
+                        readiness.installed,
+                        readiness.logged_in,
+                        readiness.detail.as_deref(),
+                    )
+                }),
+            Self::Rows(rows) => rows
+                .iter()
+                .find(|r| r.tool == adapter)
+                .map(|r| (r.installed, r.auth == "logged_in", r.detail.as_deref())),
+        }
+    }
 }
 
 impl super::Engine {
@@ -336,11 +400,14 @@ impl Executor {
     }
 
     /// The first runtime of `chain` that is ready on the agent host (its
-    /// adapter installed and logged in, per the host's last `hello`) and not
-    /// cooling down. Each unready runtime passed over is journalled as
-    /// `runtime_skipped {runtime, reason}`. A host that reported no
-    /// capabilities is trusted. A `market:` entry is ready only for a limit
-    /// hit (`market`) whose run may move there ([`crate::market::unmovable`]).
+    /// adapter installed and logged in, per the host's last report read per
+    /// [`super::RUNTIMES_MODEL`]) and not cooling down. Each unready runtime
+    /// passed over is journalled as `runtime_skipped {runtime, reason}`. A
+    /// host that reported no capabilities is trusted. A runtime whose
+    /// permission mode is `bypass_permissions` is unready for a run outside a
+    /// container or VM ([`sun_core::bypass_refusal`]). A `market:` entry is
+    /// ready only for a limit hit (`market`) whose run may move there
+    /// ([`crate::market::unmovable`]).
     async fn pick_ready(
         &mut self,
         tx: &mut Tx,
@@ -348,8 +415,9 @@ impl Executor {
         chain: &[String],
         market: bool,
     ) -> Result<Option<String>> {
-        let capabilities = match tx.get_host(self.host(step.run_id)).await {
-            Ok(host) => serde_json::from_value::<Capabilities>(host.capabilities).ok(),
+        let rows = super::runtime_rows(tx).await?;
+        let reported = match tx.get_host(self.host(step.run_id)).await {
+            Ok(host) => Reported::of(&host, rows.as_deref()),
             Err(_) => None,
         };
         let mut unready = HashMap::new();
@@ -367,17 +435,19 @@ impl Executor {
                 }
             }
         }
-        if let Some(capabilities) = &capabilities {
-            let workspace = tx.workspace_of_run(step.run_id).await?;
-            // A `market:` runtime runs on the seller's host, not this one.
-            for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
-                let adapter = match tx.runtime_by_name(workspace, name).await? {
-                    Some(row) => row.adapter,
-                    None => name.clone(),
-                };
-                if let Some(why) = unready_reason(capabilities, &adapter) {
-                    unready.insert(name.clone(), why);
-                }
+        let workspace = tx.workspace_of_run(step.run_id).await?;
+        let env = self.exec_env(tx, step.run_id).await?;
+        let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
+        // A `market:` runtime runs on the seller's host, not this one.
+        for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
+            let adapter = match tx.runtime_by_name(workspace, name).await? {
+                Some(row) => row.adapter,
+                None => name.clone(),
+            };
+            let mode = modes.get(&adapter).map(String::as_str);
+            let why = reported.as_ref().and_then(|r| r.unready(&adapter));
+            if let Some(why) = why.or_else(|| sun_core::bypass_refusal(mode, &env)) {
+                unready.insert(name.clone(), why);
             }
         }
         let picked = self.failover.pick(chain, Utc::now(), &unready);
@@ -1204,14 +1274,47 @@ mod tests {
             ],
         }))
         .unwrap();
-        assert_eq!(unready_reason(&capabilities, "claude-code"), None);
-        assert_eq!(
-            unready_reason(&capabilities, "codex").as_deref(),
-            Some("`codex` is not logged in: run `codex login`")
-        );
-        assert_eq!(
-            unready_reason(&capabilities, "opencode").as_deref(),
-            Some("`opencode` is not on the host")
-        );
+        let host = model::Host {
+            id: HostId::generate(),
+            name: "mac".into(),
+            capabilities: serde_json::to_value(&capabilities).unwrap(),
+            enrolled_by: None,
+        };
+        let row = |tool: &str, auth: &str, detail: Option<&str>, max_sessions| model::HostRuntime {
+            id: sun_core::HostRuntimeId::generate(),
+            host_id: host.id,
+            tool: tool.into(),
+            family: None,
+            version: None,
+            installed: true,
+            auth: auth.into(),
+            detail: detail.map(Into::into),
+            max_sessions,
+            probed_at: Utc::now(),
+            removed_at: None,
+        };
+        let rows = [
+            row("claude-code", "logged_in", None, Some(2)),
+            row("codex", "logged_out", Some("run `codex login`"), None),
+        ];
+        // `v1` reads the raw report, `v2` the projected rows: same answers;
+        // only rows carry a session cap.
+        let v1 = Reported::of(&host, None).unwrap();
+        let v2 = Reported::of(&host, Some(&rows)).unwrap();
+        for report in [&v1, &v2] {
+            assert_eq!(report.unready("claude-code"), None);
+            assert_eq!(
+                report.unready("codex").as_deref(),
+                Some("`codex` is not logged in: run `codex login`")
+            );
+            assert_eq!(
+                report.unready("opencode").as_deref(),
+                Some("`opencode` is not on the host")
+            );
+        }
+        assert_eq!(v1.max_sessions("claude-code"), None);
+        assert_eq!(v2.max_sessions("claude-code"), Some(2));
+        // A host with no rows reported nothing under `v2`: trusted.
+        assert!(Reported::of(&host, Some(&[])).is_none());
     }
 }

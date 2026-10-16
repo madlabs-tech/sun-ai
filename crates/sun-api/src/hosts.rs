@@ -1084,8 +1084,9 @@ fn adapters(capabilities: &Value) -> Vec<(String, bool, bool)> {
 /// kill switch of the runtime model rework): `v1` parses each host's raw
 /// capabilities report, `v2` reads the `host_runtime` rows projected from
 /// it. Both see the same data; `v1` stays the default until `v2` has run
-/// clean in production.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+/// clean in production. `sun serve` also hands it to the engine's placement
+/// (`sun_engine::RUNTIMES_MODEL`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimesModel {
     /// Read `host.capabilities_json`.

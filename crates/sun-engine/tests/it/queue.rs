@@ -23,7 +23,9 @@ use sun_engine::{
     Caps, Engine, EngineConfig, HostCap, MarketPolicy, Principal, Queue, QueueConfig, Slot,
     TaskLease, WatchdogConfig,
 };
-use sun_store::{EventLog, NewEvent, RunRepo, RuntimeRepo, Store, TaskRepo, WorkflowRepo};
+use sun_store::{
+    EventLog, NewEvent, RunRepo, RuntimeRepo, SettingRepo, Store, TaskRepo, WorkflowRepo,
+};
 
 const WORKFLOW: &str = r#"
 name: gatekept
@@ -1247,4 +1249,219 @@ async fn cooling_runtime_never_starts_a_run_under_random_interleavings() {
         })
         .await;
     }
+}
+
+/// An engine and queue on `link`'s hosts, runtime `fake`.
+async fn kernel_on(
+    store: &Store,
+    link: std::sync::Arc<Online>,
+    fallback: HostId,
+    caps: Caps,
+) -> (Engine, Queue) {
+    let (engine, _engine_task) = Engine::start(
+        store.clone(),
+        link,
+        std::sync::Arc::new(NoMods),
+        EngineConfig {
+            host: fallback,
+            adapter: "fake".into(),
+            delivery_timeout: Duration::from_secs(5),
+            watchdog: WatchdogConfig::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let slot = Slot {
+        runtime: "fake".into(),
+        host: fallback,
+    };
+    let (queue, _queue_task) =
+        Queue::start(store.clone(), engine.clone(), QueueConfig { slot, caps });
+    (engine, queue)
+}
+
+/// `count` backlog tasks on a new workflow of `source`.
+async fn tasks_of(store: &Store, source: &str, count: usize) -> Vec<Task> {
+    let parsed = sun_workflow::parse(source).unwrap();
+    let workflow = Workflow {
+        id: WorkflowId::generate(),
+        workspace_id: sun_core::WorkspaceId::MAIN,
+        name: parsed.name.clone(),
+    };
+    let tasks: Vec<Task> = (0..count)
+        .map(|i| Task {
+            title: format!("t{i}"),
+            workflow_id: Some(workflow.id),
+            status: TaskStatus::Backlog,
+            ..sun_core::model::Task::new(sun_core::WorkspaceId::MAIN, "")
+        })
+        .collect();
+    let mut tx = store.begin().await.unwrap();
+    tx.insert_workflow(&workflow).await.unwrap();
+    tx.save_workflow_version(workflow.id, source, &parsed.hash)
+        .await
+        .unwrap();
+    for task in &tasks {
+        tx.insert_task(task).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    tasks
+}
+
+/// FR7: a run whose runtime is in `bypass_permissions` goes only to a host
+/// with its container ready; a bare run of it is refused, journalled, and
+/// fails without being placed, even with a container host online.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_places_bypass_runs_only_in_a_container_or_vm() {
+    const AGENT: &str = "name: agentic\nsteps:\n  - {id: implement, type: agent, prompt: do it}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let tasks = tasks_of(&store, AGENT, 2).await;
+    let (boxed, bare) = (&tasks[0], &tasks[1]);
+    let mut tx = store.begin().await.unwrap();
+    tx.set_permission_mode("fake", "bypass_permissions")
+        .await
+        .unwrap();
+    let container = serde_json::json!({"kind": "container", "image": "toolchain:1"});
+    tx.put_setting(&format!("task_exec_env.{}", boxed.id), &container)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let bare_host = add_host(&store, "bare", true).await;
+    let docker_host = add_host(&store, "docker", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![bare_host, docker_host])));
+    let (engine, queue) = kernel_on(&store, link, bare_host, Caps::default()).await;
+    let docker_ready = serde_json::json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4,
+        "runtimes": [{"adapter": "fake", "readiness":
+            {"installed": true, "version": "1", "logged_in": true, "detail": null}}],
+        "exec_envs": [{"kind": "container", "ready": true, "version": "27", "detail": null}],
+    });
+    engine
+        .set_host_capabilities(docker_host, &docker_ready)
+        .await
+        .unwrap();
+
+    queue.enqueue(boxed.id).await.unwrap();
+    queue.enqueue(bare.id).await.unwrap();
+    eventually("the container run placed", || async {
+        placed_on(&store, boxed.id).await.is_some()
+    })
+    .await;
+    assert_eq!(placed_on(&store, boxed.id).await, Some(docker_host));
+
+    let failed = || async {
+        let mut read = store.read().await.unwrap();
+        let run = read.runs_of_task(bare.id).await.unwrap().pop();
+        run.filter(|r| r.status == RunStatus::Failed)
+    };
+    eventually("the bare run refused", || async {
+        failed().await.is_some()
+    })
+    .await;
+    let run = failed().await.unwrap();
+    let reason = run.end_reason.unwrap_or_default();
+    assert!(
+        reason.contains("bypass_permissions needs a container or vm"),
+        "{reason}"
+    );
+    let events = store
+        .read()
+        .await
+        .unwrap()
+        .events_after(Some(run.id), 0, 32)
+        .await
+        .unwrap();
+    let refused = events
+        .iter()
+        .find(|e| e.kind == "placement_refused_bypass_bare")
+        .expect("journalled");
+    assert_eq!(refused.payload["exec_env"], "bare");
+    assert_eq!(refused.payload["runtime"], "fake");
+    assert!(
+        !events.iter().any(|e| e.kind == "run_placed"),
+        "never placed"
+    );
+    assert!(
+        !events.iter().any(|e| e.kind == "session_assigned"),
+        "no session"
+    );
+
+    // A chain with an entry not in bypass takes that one instead.
+    const CHAINED: &str = "name: chained\nruntime: {chain: [fake, plain]}\nsteps:\n  \
+                           - {id: implement, type: agent, prompt: do it}\n";
+    let chained = &tasks_of(&store, CHAINED, 1).await[0];
+    queue.enqueue(chained.id).await.unwrap();
+    eventually("the chained run placed", || async {
+        placed_on(&store, chained.id).await.is_some()
+    })
+    .await;
+    let (run, _) = run_of(&store, chained.id).await.unwrap();
+    let events = store
+        .read()
+        .await
+        .unwrap()
+        .events_after(Some(run), 0, 32)
+        .await
+        .unwrap();
+    let placed = events.iter().find(|e| e.kind == "run_placed").unwrap();
+    assert_eq!(placed.payload["runtime"], "plain");
+}
+
+/// `runtimes.model: v2` caps each host at its reported `max_sessions` of a
+/// runtime (else `caps.max_sessions`), so the next run goes to the next
+/// host; flipping back to `v1` (the kill switch) drops the cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_v2_caps_sessions_per_host_and_v1_is_the_kill_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let tasks = tasks_of(&store, WORKFLOW, 3).await;
+    let set_model = |model: &'static str| {
+        let store = store.clone();
+        async move {
+            let mut tx = store.begin().await.unwrap();
+            let model = serde_json::json!(model);
+            tx.put_setting(sun_engine::RUNTIMES_MODEL, &model)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    set_model("v2").await;
+    // h1 reports its own cap of 1; h2 reports none and gets sun.yaml's 1.
+    let h1 = add_host(&store, "h1", true).await;
+    let h2 = add_host(&store, "h2", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![h1, h2])));
+    let caps = Caps {
+        max_sessions: Some(1),
+        ..Caps::default()
+    };
+    let (engine, queue) = kernel_on(&store, link, h1, caps).await;
+    let capped = serde_json::json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4,
+        "runtimes": [{"adapter": "fake", "max_sessions": 1, "readiness":
+            {"installed": true, "version": "1", "logged_in": true, "detail": null}}],
+    });
+    engine.set_host_capabilities(h1, &capped).await.unwrap();
+
+    for task in &tasks {
+        queue.enqueue(task.id).await.unwrap();
+    }
+    let (a, b, c) = (tasks[0].id, tasks[1].id, tasks[2].id);
+    eventually("a and b running", || async {
+        started(&store, a).await && started(&store, b).await
+    })
+    .await;
+    let mut placed = [placed_on(&store, a).await, placed_on(&store, b).await];
+    placed.sort();
+    let mut want = [Some(h1), Some(h2)];
+    want.sort();
+    assert_eq!(placed, want, "one session of `fake` per host");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(task_status(&store, c).await, TaskStatus::Todo, "both full");
+
+    set_model("v1").await;
+    queue.wake();
+    eventually("c running under v1", || async { started(&store, c).await }).await;
 }
