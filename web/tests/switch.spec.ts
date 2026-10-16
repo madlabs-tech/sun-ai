@@ -11,7 +11,7 @@ test('switch runtime moves the running agent step with a hand-off pack; phones f
   await expect(dialog.getByRole('group', { name: 'Continue drafts on' })).toBeVisible();
   // The current runtime isn't offered; each option says who pays and whether it's cooling down.
   await expect(dialog.getByRole('radio', { name: /Codex/ })).toHaveCount(0);
-  await expect(dialog.getByText('Your API key · cooling down until')).toBeVisible();
+  await expect(dialog.getByText('Your subscription · cooling down until')).toBeVisible();
   const confirm = dialog.getByRole('button', { name: 'Switch runtime' });
   await expect(confirm).toBeDisabled();
   await dialog.locator('label', { hasText: 'Claude Code' }).click(); // the DS radio hides its input behind the label
