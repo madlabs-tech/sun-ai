@@ -86,6 +86,10 @@
 //!   `UPDATE`/`DELETE`). Write the audit row in the same `Tx` as the change.
 //!   [`LoginRepo`]: sign-in sessions and one-time login links, stored as
 //!   `sha256(token)` only.
+//! - **Hosts** ([`HostRepo`]): enrolled hosts with their raw capabilities
+//!   report, and `host_runtime`, one row per `(host, tool)` projected from
+//!   that report on every `hello` / `capabilities` write (a tool gone from a
+//!   later report keeps its row with `removed_at`; back again, same row).
 //! - **Git** ([`RepoRepo`], [`VcsRepo`], [`PullRequestRepo`]): a workspace's
 //!   repos, its git-host connections, and the pull requests mirrored from
 //!   them with their task links; `upsert_pull_request` drops stale deliveries.
@@ -326,6 +330,7 @@ pub(crate) const DATA_STEPS: &[(i64, DataStep)] = &[
     (20261102090100, copy_agents),
     (20261102090300, move_secrets),
     (20261103090200, seed_catalog_installs),
+    (20261104090300, backfill_host_runtimes),
 ];
 
 /// `20261022100000_drop_logo_blob`: re-seal what `secret_to_reseal` lists
@@ -370,6 +375,16 @@ fn seed_catalog_installs<'a>(
     data_dir: &'a Path,
 ) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(workspace::seed_main_catalog_installs(conn, data_dir))
+}
+
+/// `20261104090300_host_runtime_backfill`: see [`host::backfill_host_runtimes`].
+fn backfill_host_runtimes<'a>(
+    conn: &'a mut sqlx::SqliteConnection,
+    _: &'a MasterKey,
+    _: &'a BlobStore,
+    _: &'a Path,
+) -> std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
+    Box::pin(host::backfill_host_runtimes(conn))
 }
 
 /// Applies the pending migrations in order. sqlx 0.8's SQLite driver runs

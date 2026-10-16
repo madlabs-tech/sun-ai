@@ -77,7 +77,7 @@ pub use auth::PresetUrls;
 pub use billing::CloudBilling;
 pub use entitlement::CloudPolicy;
 pub use features::Features;
-pub use hosts::{HostHub, host_key_for};
+pub use hosts::{HostHub, RuntimesModel, host_key_for};
 
 /// Settings for the API, supplied by `sun-cli`.
 #[derive(Debug, Clone)]
@@ -123,6 +123,8 @@ pub struct Api {
     previews: preview::Previews,
     /// The operator allows `bypass_permissions` (`sun.yaml` `allow_bypass`).
     allow_bypass: bool,
+    /// Where runtime reads come from (`sun.yaml` `runtimes.model`).
+    runtimes_model: RuntimesModel,
     /// Sun Cloud is connected, so `credits` runtimes can be added (`with_sun_cloud`).
     sun_cloud: bool,
     /// Lists and installs bundled and marketplace mods (`with_mod_installer`).
@@ -166,6 +168,7 @@ impl Api {
             preview_host: None,
             previews: Default::default(),
             allow_bypass: false,
+            runtimes_model: RuntimesModel::default(),
             sun_cloud: false,
             mod_installer: None,
             entitlements: Arc::new(sun_core::entitlement::Community),
@@ -281,6 +284,13 @@ impl Api {
     /// operator's `allow_bypass`); refused otherwise.
     pub fn with_allow_bypass(mut self, allow: bool) -> Self {
         self.allow_bypass = allow;
+        self
+    }
+
+    /// Reads runtimes per `model` (`sun.yaml` `runtimes.model`); `v1` by
+    /// default, see [`RuntimesModel`].
+    pub fn with_runtimes_model(mut self, model: RuntimesModel) -> Self {
+        self.runtimes_model = model;
         self
     }
 

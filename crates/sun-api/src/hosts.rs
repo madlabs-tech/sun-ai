@@ -1051,20 +1051,54 @@ fn adapters(capabilities: &Value) -> Vec<(String, bool, bool)> {
         .collect()
 }
 
+/// Where the runtime reads come from (`sun.yaml` `runtimes.model`, the
+/// kill switch of the runtime model rework): `v1` parses each host's raw
+/// capabilities report, `v2` reads the `host_runtime` rows projected from
+/// it. Both see the same data; `v1` stays the default until `v2` has run
+/// clean in production.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimesModel {
+    /// Read `host.capabilities_json`.
+    #[default]
+    V1,
+    /// Read `host_runtime`.
+    V2,
+}
+
 /// `adapter -> (installed, installed and logged in)` on any online host
 /// attached to `workspace` (`None`: any host), the ones its runs may use.
+/// Read per [`RuntimesModel`].
 pub(crate) async fn online_adapters(
     api: &Api,
     workspace: Option<WorkspaceId>,
 ) -> ApiResult<BTreeMap<String, (bool, bool)>> {
     let mut seen: BTreeMap<String, (bool, bool)> = BTreeMap::new();
-    for host in api.engine.hosts(workspace).await? {
-        let online = api.hosts.is_online(host.id);
-        for (adapter, installed, logged_in) in adapters(&host.capabilities) {
-            let entry = seen.entry(adapter).or_default();
-            entry.0 |= online && installed;
-            entry.1 |= online && installed && logged_in;
-        }
+    let reported: Vec<(HostId, String, bool, bool)> = match api.runtimes_model {
+        RuntimesModel::V1 => api
+            .engine
+            .hosts(workspace)
+            .await?
+            .into_iter()
+            .flat_map(|host| {
+                adapters(&host.capabilities).into_iter().map(
+                    move |(adapter, installed, logged_in)| (host.id, adapter, installed, logged_in),
+                )
+            })
+            .collect(),
+        RuntimesModel::V2 => api
+            .engine
+            .host_runtimes(workspace)
+            .await?
+            .into_iter()
+            .map(|r| (r.host_id, r.tool, r.installed, r.auth == "logged_in"))
+            .collect(),
+    };
+    for (host, adapter, installed, logged_in) in reported {
+        let online = api.hosts.is_online(host);
+        let entry = seen.entry(adapter).or_default();
+        entry.0 |= online && installed;
+        entry.1 |= online && installed && logged_in;
     }
     Ok(seen)
 }
