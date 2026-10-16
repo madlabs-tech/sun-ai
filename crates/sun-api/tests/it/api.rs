@@ -2401,6 +2401,14 @@ async fn a_login_after_hello_shows_after_one_reprobe() {
     hello["capabilities"]["runtimes"] = fake_runtime(false);
     let mut host = connect_host(app, k.host, hello.clone()).await;
     assert_eq!(fake_runtime_status(app).await, "offline", "needs login");
+    // The same kernel read through the `host_runtime` projection
+    // (`runtimes.model: v2`) agrees at every step.
+    let v2 = sun_api::router(
+        k.api
+            .clone()
+            .with_runtimes_model(sun_api::RuntimesModel::V2),
+    );
+    assert_eq!(fake_runtime_status(&v2).await, "offline");
 
     // `fake login` on the machine; "Check again" asks the host to re-probe.
     let main = "00000000000000000000000001";
@@ -2427,6 +2435,7 @@ async fn a_login_after_hello_shows_after_one_reprobe() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     // Stored before the 204: no polling needed.
     assert_eq!(fake_runtime_status(app).await, "ready");
+    assert_eq!(fake_runtime_status(&v2).await, "ready");
 
     // A logout seen by the 5-min re-probe arrives unasked.
     capabilities["runtimes"] = fake_runtime(false);
@@ -2444,6 +2453,7 @@ async fn a_login_after_hello_shows_after_one_reprobe() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(status, "offline");
+    assert_eq!(fake_runtime_status(&v2).await, "offline");
 
     // Not attached to that workspace (or no such host): 404, nothing sent.
     let elsewhere = format!(
