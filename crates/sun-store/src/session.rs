@@ -1,17 +1,18 @@
-//! `runtime`, `runtime_state`, `session` and `handoff_pack`:
-//! which runtime a chain name means in a workspace, its cooldown (survives a restart), the
-//! sessions steps run in, and the hand-off packs between them.
+//! `runtime`, `account_cooldown`, `session` and `handoff_pack`:
+//! which runtime a chain name means in a workspace, the cooldowns of the
+//! accounts that hit a limit (they survive a restart), the sessions steps run
+//! in, and the hand-off packs between them.
 
 use async_trait::async_trait;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
-use sun_core::model::{HandoffPack, Runtime, RuntimeSource, RuntimeStatus};
+use sun_core::model::{HandoffPack, Runtime, RuntimeSource};
 use sun_core::{HostId, RuntimeId, SessionHandle, SessionId, Timestamp, WorkspaceId};
 
 use crate::repo::{json, parse, parse_ts, ts};
 use crate::{Result, StoreError, Tx};
 
-/// **Repository** for `runtime` and `runtime_state` rows. A runtime
+/// **Repository** for `runtime` and `account_cooldown` rows. A runtime
 /// belongs to one workspace; names are unique per workspace.
 #[async_trait]
 pub trait RuntimeRepo {
@@ -41,9 +42,10 @@ pub trait RuntimeRepo {
     async fn update_runtime(&mut self, runtime: &Runtime) -> Result<bool>;
     /// One runtime, or `NotFound`.
     async fn get_runtime(&mut self, id: RuntimeId) -> Result<Runtime>;
-    /// Cools runtime `id` down until `until` (`None`: ready again).
-    async fn set_cooldown(&mut self, id: RuntimeId, until: Option<Timestamp>) -> Result<()>;
-    /// `(runtime name, cooldown_until)` of every runtime cooling down.
+    /// Cools `account` ([`sun_core::model::Account::key`]) down until
+    /// `until` (`None`: ready again).
+    async fn set_cooldown(&mut self, account: &str, until: Option<Timestamp>) -> Result<()>;
+    /// `(account, until)` of every account cooling down, ended ones included.
     async fn cooldowns(&mut self) -> Result<Vec<(String, Timestamp)>>;
     /// Sets the permission mode sessions of `adapter` get (`runtime_policy`).
     async fn set_permission_mode(&mut self, adapter: &str, mode: &str) -> Result<()>;
@@ -159,40 +161,26 @@ impl RuntimeRepo for Tx {
         runtime_from(&row)
     }
 
-    async fn set_cooldown(&mut self, id: RuntimeId, until: Option<Timestamp>) -> Result<()> {
-        let status = match until {
-            Some(_) => RuntimeStatus::CoolingDown,
-            None => RuntimeStatus::Ready,
+    async fn set_cooldown(&mut self, account: &str, until: Option<Timestamp>) -> Result<()> {
+        let query = match until {
+            Some(until) => sqlx::query(
+                "INSERT INTO account_cooldown (account, until) VALUES ($1, $2) \
+                 ON CONFLICT (account) DO UPDATE SET until = excluded.until",
+            )
+            .bind(account)
+            .bind(ts(&until)),
+            None => sqlx::query("DELETE FROM account_cooldown WHERE account = $1").bind(account),
         };
-        sqlx::query(
-            "INSERT INTO runtime_state (runtime_id, status, cooldown_until) VALUES ($1, $2, $3) \
-             ON CONFLICT (runtime_id) DO UPDATE SET status = excluded.status, \
-             cooldown_until = excluded.cooldown_until",
-        )
-        .bind(id.to_string())
-        .bind(status.as_str())
-        .bind(until.as_ref().map(ts))
-        .execute(self.conn())
-        .await?;
+        query.execute(self.conn()).await?;
         Ok(())
     }
 
     async fn cooldowns(&mut self) -> Result<Vec<(String, Timestamp)>> {
-        let rows = sqlx::query(
-            "SELECT r.name, s.cooldown_until FROM runtime_state s \
-             JOIN runtime r ON r.id = s.runtime_id \
-             WHERE s.status = $1 AND s.cooldown_until IS NOT NULL ORDER BY r.name",
-        )
-        .bind(RuntimeStatus::CoolingDown.as_str())
-        .fetch_all(self.conn())
-        .await?;
+        let rows = sqlx::query("SELECT account, until FROM account_cooldown ORDER BY account")
+            .fetch_all(self.conn())
+            .await?;
         rows.iter()
-            .map(|row| {
-                Ok((
-                    row.try_get("name")?,
-                    parse_ts(row.try_get("cooldown_until")?)?,
-                ))
-            })
+            .map(|row| Ok((row.try_get("account")?, parse_ts(row.try_get("until")?)?)))
             .collect()
     }
 

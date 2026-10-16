@@ -18,7 +18,6 @@ use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sun_core::model::RuntimeSource;
 use sun_core::{HostId, ModCall, ModLink, Result, RunId, WorkspaceId};
 use sun_store::{MemberRepo, RuntimeRepo, SecretRepo};
 use tokio::net::TcpStream;
@@ -2846,16 +2845,8 @@ async fn runtimes_list_each_host_and_tool_with_an_honest_state() {
     // logged-out one still needs a login first.
     let until = chrono::Utc::now() + chrono::Duration::minutes(30);
     let mut tx = k.store.begin().await.unwrap();
-    let cooled = tx
-        .upsert_runtime(
-            MAIN,
-            "claude-code",
-            "claude-code",
-            RuntimeSource::ByoRuntime,
-        )
-        .await
-        .unwrap();
-    tx.set_cooldown(cooled.id, Some(until)).await.unwrap();
+    let login = sun_core::model::Account::Login("claude-code".into()).key(k.host);
+    tx.set_cooldown(&login, Some(until)).await.unwrap();
     tx.commit().await.unwrap();
     let claude = runtimes_of(app, "claude-code").await;
     let limited = &claude[&k.host.to_string()];

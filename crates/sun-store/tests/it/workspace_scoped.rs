@@ -450,7 +450,8 @@ async fn each_workspace_keeps_its_own_agents_runtimes_and_memory() {
         .map(|r| r.name)
         .collect();
     assert_eq!(in_ops, ["claude", "credits"]);
-    tx.set_cooldown(other.id, Some(chrono::Utc::now()))
+    let cooled = format!("cred:{}", other.id);
+    tx.set_cooldown(&cooled, Some(chrono::Utc::now()))
         .await
         .unwrap();
 
@@ -464,6 +465,10 @@ async fn each_workspace_keeps_its_own_agents_runtimes_and_memory() {
     tx.delete_workspace(ops).await.unwrap();
     assert!(tx.agents(Some(ops)).await.unwrap().is_empty());
     assert!(tx.runtimes(Some(ops)).await.unwrap().is_empty());
+    assert!(
+        tx.cooldowns().await.unwrap().is_empty(),
+        "its keys' cooldowns"
+    );
     assert!(tx.active_memory(ops).await.unwrap().is_empty());
     assert_eq!(tx.agents(None).await.unwrap(), [ada]);
     assert_eq!(tx.runtimes(None).await.unwrap(), [byo]);

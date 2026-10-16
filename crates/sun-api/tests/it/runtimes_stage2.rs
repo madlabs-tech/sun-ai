@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sun_api::RuntimesModel;
-use sun_core::model::{Role, RuntimeSource};
+use sun_core::model::{Account, Role, Runtime, RuntimeSource};
 use sun_core::{HostId, WorkspaceId};
 use sun_store::{HostRepo, RuntimeRepo};
 use tokio_tungstenite::tungstenite::Message;
@@ -338,16 +338,81 @@ async fn each_state_row_of_the_copy_table() {
     }
 }
 
-/// Marks `name` (a chain name; cooldowns are keyed by it until item 5) as
-/// cooling in Main until `until`.
-async fn cool(k: &common::Kernel, name: &str, until: chrono::DateTime<chrono::Utc>) {
+/// Cools the CLI login of `tool` on the kernel's host until `until`.
+async fn cool(k: &common::Kernel, tool: &str, until: chrono::DateTime<chrono::Utc>) {
+    let account = Account::Login(tool.into()).key(k.host);
     let mut tx = k.store.begin().await.unwrap();
-    let row = tx
-        .upsert_runtime(MAIN, name, name, RuntimeSource::ByoRuntime)
+    tx.set_cooldown(&account, Some(until)).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// Item 5: a cooldown follows the account that hit the limit. A CLI login
+/// cools only its own `(host, tool)`; a key cools every host that would
+/// spend it (and its own entry); an ended cooldown reads `idle` again with
+/// no restart. No entry carries the internal account key.
+#[tokio::test]
+async fn limited_follows_the_account_per_host_and_tool() {
+    let k = kernel().await;
+    let app = &k.app;
+    let _laptop = host_with(&k, claude_code(true)).await;
+    let (vps, _vps) = enrol_host(app, "vps-sg-1", claude_code(true)).await;
+    let both = || async {
+        let claude = runtimes_of(app, "claude-code").await;
+        let state = |host: HostId| claude[&host.to_string()]["state"].clone();
+        (state(k.host), state(vps))
+    };
+    assert_eq!(both().await, (json!("idle"), json!("idle")));
+
+    // The laptop's own login hits its limit: the VPS, logged into another
+    // account, stays idle. Briefly, so it also ends.
+    let until = chrono::Utc::now() + chrono::Duration::milliseconds(1500);
+    cool(&k, "claude-code", until).await;
+    assert_eq!(both().await, (json!("limited"), json!("idle")));
+    let laptop = runtimes_of(app, "claude-code").await[&k.host.to_string()].clone();
+    let back: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(laptop["cooldown_until"].clone()).unwrap();
+    assert!((back - until).num_milliseconds().abs() <= 1, "{laptop}");
+    until_state(app, "claude-code", k.host, "idle").await;
+
+    // A key both hosts would run Claude Code with: both limited, and the
+    // key's own entry carries the cooldown.
+    let key = Runtime {
+        id: sun_core::RuntimeId::generate(),
+        workspace_id: MAIN,
+        name: "claude-credits".into(),
+        adapter: "claude-code".into(),
+        source: RuntimeSource::Credits,
+        byo_key: None,
+        created_by: None,
+    };
+    let until = chrono::Utc::now() + chrono::Duration::minutes(30);
+    let mut tx = k.store.begin().await.unwrap();
+    assert!(tx.insert_runtime(&key).await.unwrap());
+    tx.set_cooldown(&Account::Credential(key.id).key(k.host), Some(until))
         .await
         .unwrap();
-    tx.set_cooldown(row.id, Some(until)).await.unwrap();
     tx.commit().await.unwrap();
+    let (status, list) = call(app, "GET", "/api/v1/runtimes", None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let entries = list.as_array().unwrap();
+    let claude: Vec<&Value> = entries
+        .iter()
+        .filter(|r| r["tool"] == "claude-code")
+        .collect();
+    assert_eq!(claude.len(), 3, "two hosts and the key: {list}");
+    for entry in claude {
+        assert!(entry["cooldown_until"].is_string(), "{entry}");
+        // The key's own entry: credits aren't on this deployment, which
+        // comes first.
+        if !entry["host"].is_null() {
+            assert_eq!(entry["state"], "limited", "{entry}");
+        }
+    }
+    let text = list.to_string();
+    assert!(
+        !text.contains("cred:") && !text.contains("login:"),
+        "no account key in the API: {list}"
+    );
 }
 
 /// busy: one live session on the host's tool; the badge reads its load.

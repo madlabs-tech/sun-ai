@@ -6,13 +6,18 @@
 //! Each host's CLIs come from the source `sun.yaml` `runtimes.model` picks
 //! ([`RuntimesModel`]): `v2` reads the `host_runtime` rows (row `id`,
 //! `probed_at`), `v1` the raw capabilities report (`id` `<host>:<tool>`, no
-//! `probed_at`). Presence, load and cooldowns come from the live hub.
+//! `probed_at`). Presence and load come from the live hub. A `(host, tool)`
+//! is `limited` while an account it would spend cools down: the host's own
+//! login of the tool, or a key on that tool of a workspace the host serves.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
-use sun_core::model::{Host, HostRuntime, Runtime, RuntimeSource};
-use sun_core::{Availability, HostLink, Presence, Readiness, RuntimeState, Timestamp, WorkspaceId};
+use sun_core::model::{Account, Host, HostRuntime, Runtime, RuntimeSource};
+use sun_core::{
+    Availability, HostId, HostLink, Presence, Readiness, RuntimeState, Timestamp, WorkspaceId,
+};
 
 use crate::error::ApiResult;
 use crate::hosts::{online_adapters, runtime_readiness};
@@ -24,6 +29,19 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
     let modes: BTreeMap<String, String> =
         api.engine.permission_modes().await?.into_iter().collect();
     let active = api.hosts.active_sessions();
+    let runtimes = api.engine.runtimes(workspace).await?;
+    let keys: Vec<&Runtime> = runtimes
+        .iter()
+        .filter(|r| r.source != RuntimeSource::ByoRuntime)
+        .collect();
+    // The hosts serving each workspace with a key.
+    let mut serving: HashMap<WorkspaceId, HashSet<HostId>> = HashMap::new();
+    for key in &keys {
+        if let Entry::Vacant(entry) = serving.entry(key.workspace_id) {
+            let hosts = api.engine.hosts(Some(key.workspace_id)).await?;
+            entry.insert(hosts.iter().map(|h| h.id).collect());
+        }
+    }
     let mut projected: BTreeMap<_, Vec<HostRuntime>> = BTreeMap::new();
     if api.runtimes_model == RuntimesModel::V2 {
         for row in api.engine.host_runtimes(workspace).await? {
@@ -57,7 +75,16 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
             probed_at,
         } in reported
         {
-            let cooldown_until = cooling.get(&tool).copied();
+            let spends = keys.iter().filter(|key| {
+                key.adapter == tool
+                    && serving
+                        .get(&key.workspace_id)
+                        .is_some_and(|hosts| hosts.contains(&host.id))
+            });
+            let accounts = spends
+                .map(|key| Account::credential_key(key.id))
+                .chain([Account::Login(tool.clone()).key(host.id)]);
+            let cooldown_until = accounts.filter_map(|a| cooling.get(&a).copied()).max();
             let load = active.get(&(host.id, tool.clone())).copied().unwrap_or(0);
             let observed = Observed {
                 presence,
@@ -86,11 +113,8 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
             .cmp(&(b["tool"].as_str(), b["host"]["name"].as_str()))
     });
     let online = online_adapters(api, workspace).await?;
-    for runtime in api.engine.runtimes(workspace).await? {
-        if runtime.source == RuntimeSource::ByoRuntime {
-            continue;
-        }
-        let entry = keyed(api, &runtime, &online, &cooling, &modes).await?;
+    for runtime in keys {
+        let entry = keyed(api, runtime, &online, &cooling, &modes).await?;
         entries.push(entry);
     }
     Ok(entries)
@@ -210,7 +234,7 @@ async fn keyed(
     modes: &BTreeMap<String, String>,
 ) -> ApiResult<Value> {
     let ready = runtime_readiness(api, runtime, online).await?;
-    let cooldown_until = cooling.get(&runtime.name).copied();
+    let cooldown_until = cooling.get(&Account::credential_key(runtime.id)).copied();
     let presence = if ready.installed {
         Presence::Online
     } else {

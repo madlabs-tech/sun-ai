@@ -140,3 +140,53 @@ async fn duplicate_passkey_credentials_keep_the_oldest() {
         ["01K00000000000000000000001", "01K00000000000000000000002"]
     );
 }
+
+/// Cooldowns running when 20261106090000 lands carry over to
+/// `account_cooldown`: a key's as itself, a CLI login's on every host (how
+/// it cooled before); a runtime that isn't cooling carries nothing.
+#[tokio::test]
+async fn running_cooldowns_move_to_their_accounts() {
+    use sqlx::migrate::Migrate;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    conn.ensure_migrations_table().await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    for migration in migrator.iter().filter(|m| m.version < 20261106090000) {
+        conn.apply(migration).await.unwrap();
+    }
+    let until = "2026-10-16T20:00:00+00:00";
+    for sql in [
+        "INSERT INTO host (id, name) VALUES ('H1', 'mac'), ('H2', 'vps')",
+        "INSERT INTO runtime (id, workspace_id, name, adapter, source) VALUES
+           ('R1', '00000000000000000000000001', 'claude-credits', 'claude-code', 'credits'),
+           ('R2', '00000000000000000000000001', 'claude-code', 'claude-code', 'byo_runtime'),
+           ('R3', '00000000000000000000000001', 'codex', 'codex', 'byo_runtime')",
+        "INSERT INTO runtime_state (runtime_id, status, cooldown_until) VALUES
+           ('R1', 'cooling_down', $1), ('R2', 'cooling_down', $1), ('R3', 'ready', NULL)",
+    ] {
+        sqlx::query(sql)
+            .bind(until)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+    }
+    conn.close().await.unwrap();
+
+    drop(Store::open(dir.path()).await.unwrap());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    let moved: Vec<(String, String)> =
+        sqlx::query_as("SELECT account, until FROM account_cooldown ORDER BY account")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    let at = |account: &str| (account.to_owned(), until.to_owned());
+    assert_eq!(
+        moved,
+        [
+            at("cred:R1"),
+            at("login:H1:claude-code"),
+            at("login:H2:claude-code")
+        ]
+    );
+}

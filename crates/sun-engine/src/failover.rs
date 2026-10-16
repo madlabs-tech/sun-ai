@@ -6,9 +6,11 @@
 //! `executor`, like `watchdog`, so it reuses the executor's private helpers.
 //!
 //! On a `LimitHit` from a running agent step, in the event's transaction:
-//! 1. `running → limit_hit`; the runtime cools down until `reset_at` (or
-//!    [`DEFAULT_COOLDOWN`]), journalled as `runtime_cooling`; the old session
-//!    is stopped and no longer routed.
+//! 1. `running → limit_hit`; the account the runtime spends
+//!    ([`Account`]: its key, or the CLI's login on the run's host) cools down
+//!    until `reset_at` (or [`DEFAULT_COOLDOWN`]), journalled as
+//!    `runtime_cooling {runtime, account, until}`; the old session is stopped
+//!    and no longer routed. Another host's login of the same CLI stays usable.
 //! 2. The policy:
 //!    - `switch`: `limit_hit → handing_off` to the first runtime of the chain
 //!      that is not cooling down. All cooling: wait for the first reset.
@@ -69,7 +71,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sun_context::{GateResult, GitState, HandoffFrom, HandoffInput, HandoffReason, build_handoff};
 use sun_core::host_protocol::{Capabilities, ExecRequest};
-use sun_core::model::{self, EventRecord, RuntimeSource, Step};
+use sun_core::model::{self, Account, EventRecord, Step};
 use sun_core::redact::redact;
 use sun_core::{
     Error, HandoffPackId, HostId, Result, RunId, RunStatus, StepId, StepKey, StepStatus, SunEvent,
@@ -92,7 +94,7 @@ use crate::push::{SECRET_FOUND, SecretScan};
 // ponytail: one fixed value; make it per runtime once limits are profiled.
 pub(super) const DEFAULT_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 
-/// A runtime cools down until `until` (timeline + restart-safe record).
+/// An account cools down until `until` (timeline + restart-safe record).
 const RUNTIME_COOLING: &str = "runtime_cooling";
 /// A hand-off was decided; the payload is a [`Handoff`].
 pub(super) const HANDOFF_STARTED: &str = "handoff_started";
@@ -200,53 +202,40 @@ pub(super) struct Handoff {
     pub reset_at: Option<Timestamp>,
 }
 
-/// Runtime cooldowns, by chain name. A cache of `runtime_state`:
+/// Account cooldowns, by [`Account::key`]. A cache of `account_cooldown`:
 /// written there in the same transaction, loaded at engine start.
 #[derive(Debug, Default)]
 pub(super) struct Failover {
-    // ponytail: keyed by chain name across the deployment (and loaded from
-    // every workspace's `runtime_state` by name), so one workspace's limit hit
-    // cools that name for all; key by (workspace, name) or runtime id when
-    // workspaces bring their own accounts.
     cooling: HashMap<String, Timestamp>,
 }
 
 impl Failover {
-    /// The cooldowns stored in `runtime_state` (they survive a restart).
+    /// The cooldowns stored in `account_cooldown` (they survive a restart).
     pub(super) async fn load(tx: &mut Tx) -> Result<Self> {
         Ok(Self {
             cooling: tx.cooldowns().await?.into_iter().collect(),
         })
     }
 
-    fn cooling_until(&self, runtime: &str, now: Timestamp) -> Option<Timestamp> {
+    fn cooling_until(&self, account: &str, now: Timestamp) -> Option<Timestamp> {
         self.cooling
-            .get(runtime)
+            .get(account)
             .copied()
             .filter(|until| *until > now)
     }
+}
 
-    /// The first runtime of `chain` that is ready (not in `unready`) and not
-    /// cooling down.
-    fn pick(
-        &self,
-        chain: &[String],
-        now: Timestamp,
-        unready: &HashMap<String, String>,
-    ) -> Option<String> {
-        chain
-            .iter()
-            .find(|r| !unready.contains_key(*r) && self.cooling_until(r, now).is_none())
-            .cloned()
-    }
-
-    /// The earliest end of a cooldown in `chain`.
-    fn first_reset(&self, chain: &[String], now: Timestamp) -> Option<Timestamp> {
-        chain
-            .iter()
-            .filter_map(|r| self.cooling_until(r, now))
-            .min()
-    }
+/// The first runtime of `chain` that is ready (not in `unready`) and not
+/// cooling down (in `cooling`: chain name → end of its account's cooldown).
+fn pick(
+    chain: &[String],
+    unready: &HashMap<String, String>,
+    cooling: &HashMap<String, Timestamp>,
+) -> Option<String> {
+    chain
+        .iter()
+        .find(|r| !unready.contains_key(*r) && !cooling.contains_key(*r))
+        .cloned()
 }
 
 /// The runtime chain of a workflow; without `runtime:` the engine default.
@@ -450,7 +439,8 @@ impl Executor {
                 unready.insert(name.clone(), why);
             }
         }
-        let picked = self.failover.pick(chain, Utc::now(), &unready);
+        let cooling = self.cooling(tx, step.run_id, chain).await?;
+        let picked = pick(chain, &unready, &cooling);
         for name in chain.iter().take_while(|n| Some(*n) != picked.as_ref()) {
             if let Some(why) = unready.get(name) {
                 let payload = json!({ "runtime": name, "reason": why });
@@ -458,6 +448,38 @@ impl Executor {
             }
         }
         Ok(picked)
+    }
+
+    /// The account ([`Account::key`]) chain entry `name` spends on the host
+    /// of `run_id`.
+    async fn account(&self, tx: &mut Tx, run_id: RunId, name: &str) -> Result<String> {
+        let workspace = tx.workspace_of_run(run_id).await?;
+        let row = tx.runtime_by_name(workspace, name).await?;
+        Ok(Account::of(row.as_ref(), name).key(self.host(run_id)))
+    }
+
+    /// When chain entry `name`'s account on the host of `run_id` is back,
+    /// while it cools down.
+    async fn reset_of(&self, tx: &mut Tx, run_id: RunId, name: &str) -> Result<Option<Timestamp>> {
+        let account = self.account(tx, run_id, name).await?;
+        Ok(self.failover.cooling_until(&account, Utc::now()))
+    }
+
+    /// The entries of `chain` cooling down on the host of `run_id`, each
+    /// with the end of its account's cooldown.
+    async fn cooling(
+        &self,
+        tx: &mut Tx,
+        run_id: RunId,
+        chain: &[String],
+    ) -> Result<HashMap<String, Timestamp>> {
+        let mut cooling = HashMap::new();
+        for name in chain {
+            if let Some(until) = self.reset_of(tx, run_id, name).await? {
+                cooling.insert(name.clone(), until);
+            }
+        }
+        Ok(cooling)
     }
 
     /// The runtime (chain name) of the step's latest session
@@ -505,19 +527,11 @@ impl Executor {
         let until = reset_at.unwrap_or_else(|| {
             Utc::now() + chrono::Duration::from_std(DEFAULT_COOLDOWN).unwrap_or_default()
         });
-        self.failover.cooling.insert(from.clone(), until);
-        let workspace = tx.workspace_of_run(step.run_id).await?;
-        let runtime = tx
-            .upsert_runtime(workspace, &from, &from, RuntimeSource::ByoRuntime)
-            .await?;
-        tx.set_cooldown(runtime.id, Some(until)).await?;
-        append(
-            tx,
-            step,
-            RUNTIME_COOLING,
-            json!({ "runtime": from, "until": until }),
-        )
-        .await?;
+        let account = self.account(tx, step.run_id, &from).await?;
+        self.failover.cooling.insert(account.clone(), until);
+        tx.set_cooldown(&account, Some(until)).await?;
+        let payload = json!({ "runtime": from, "account": account, "until": until });
+        append(tx, step, RUNTIME_COOLING, payload).await?;
         self.stop_step_sessions(step.id, effects);
         self.limit_policy(tx, step, from, None, effects).await
     }
@@ -550,8 +564,8 @@ impl Executor {
         }
         let workflow = self.workflow(tx, &run).await?;
         let mut chain = chain(&workflow, &self.config.adapter);
-        let now = Utc::now();
-        let reset_at = self.failover.cooling_until(&from, now);
+        let reset_at = self.reset_of(tx, step.run_id, &from).await?;
+        let cooling = self.cooling(tx, step.run_id, &chain).await?;
         let on_limit = resolve_on_limit(tx, &workflow, run.task_id).await?;
         let handoff = |to: String| Handoff {
             step_id: step.id,
@@ -579,7 +593,7 @@ impl Executor {
                 }
                 if judged.is_none()
                     && let Some(client) = self.decisions.get()
-                    && let Some(hook) = self.limit_hook(&chain, &from, reset_at, now)
+                    && let Some(hook) = Self::limit_hook(&chain, &from, reset_at, &cooling)
                 {
                     let step_id = step.id;
                     effects.push(Effect::Ask {
@@ -616,7 +630,8 @@ impl Executor {
             None => {
                 let until = match on_limit {
                     OnLimit::WaitUntilReset => reset_at,
-                    _ => self.failover.first_reset(&chain, now),
+                    // The earliest end of a cooldown in the chain.
+                    _ => cooling.values().min().copied(),
                 };
                 effects.push(Effect::Timer {
                     step_id: step.id,
@@ -630,15 +645,14 @@ impl Executor {
     /// "Which runtime next, or pause?" over the chain's runtimes that are
     /// not cooling down. Rule: the first of them. `None`: none to pick.
     fn limit_hook(
-        &self,
         chain: &[String],
         from: &str,
         reset_at: Option<Timestamp>,
-        now: Timestamp,
+        cooling: &HashMap<String, Timestamp>,
     ) -> Option<Hook> {
         let free: Vec<&String> = chain
             .iter()
-            .filter(|r| *r != from && self.failover.cooling_until(r, now).is_none())
+            .filter(|r| *r != from && !cooling.contains_key(*r))
             .collect();
         let first = free.first()?;
         let mut criteria = serde_json::Map::new();
@@ -745,7 +759,7 @@ impl Executor {
         let from = self.runtime_of(&mut tx, &step).await?;
         let handoff = Handoff {
             step_id: step.id,
-            reset_at: self.failover.cooling_until(&from, Utc::now()),
+            reset_at: self.reset_of(&mut tx, run_id, &from).await?,
             from,
             to,
             reason: HandoffReason::ManualSwitch,
@@ -787,7 +801,8 @@ impl Executor {
         else {
             return Ok(());
         };
-        if !self.failover.cooling.get(preferred).is_some_and(over) {
+        let account = self.account(tx, step.run_id, preferred).await?;
+        if !self.failover.cooling.get(&account).is_some_and(over) {
             return Ok(());
         }
         let from = self.runtime_of(tx, step).await?;
@@ -1146,10 +1161,13 @@ impl Executor {
         })
     }
 
-    /// While `runtime` cools down, arms the step's timer for its reset (the
-    /// hand-off is redone then) and returns true.
+    /// While `runtime`'s account cools down, arms the step's timer for its
+    /// reset (the hand-off is redone then) and returns true.
     async fn wait_for_reset(&mut self, step: &Step, runtime: &str) -> Result<bool> {
-        let Some(until) = self.failover.cooling_until(runtime, Utc::now()) else {
+        let mut read = self.store.read().await?;
+        let reset = self.reset_of(&mut read, step.run_id, runtime).await?;
+        drop(read);
+        let Some(until) = reset else {
             return Ok(false);
         };
         let timer = Effect::Timer {
@@ -1229,37 +1247,39 @@ mod tests {
         let chain: Vec<String> = ["claude-code", "codex", "opencode"]
             .map(String::from)
             .into();
-        let now = Utc::now();
-        let ready = HashMap::new();
-        let mut failover = Failover::default();
+        let soon = Utc::now() + chrono::Duration::minutes(5);
+        let (none, cool_none) = (HashMap::new(), HashMap::new());
         assert_eq!(
-            failover.pick(&chain, now, &ready).as_deref(),
+            pick(&chain, &none, &cool_none).as_deref(),
             Some("claude-code")
         );
-        let soon = now + chrono::Duration::minutes(5);
-        failover.cooling.insert("claude-code".into(), soon);
-        assert_eq!(failover.pick(&chain, now, &ready).as_deref(), Some("codex"));
+        let mut cooling = HashMap::from([("claude-code".to_owned(), soon)]);
+        assert_eq!(pick(&chain, &none, &cooling).as_deref(), Some("codex"));
         let unready = HashMap::from([("codex".to_owned(), "not logged in".to_owned())]);
         assert_eq!(
-            failover.pick(&chain, now, &unready).as_deref(),
+            pick(&chain, &unready, &cooling).as_deref(),
             Some("opencode")
         );
+        cooling.insert("codex".into(), soon);
+        cooling.insert("opencode".into(), soon);
+        assert_eq!(pick(&chain, &none, &cooling), None);
+    }
+
+    /// Only a cooldown still running counts; an ended one is ready again.
+    #[test]
+    fn cooldowns_end_at_their_until() {
+        let now = Utc::now();
+        let mut failover = Failover::default();
+        let (ended, running) = ("login:h:claude-code", "cred:x");
         failover
             .cooling
-            .insert("codex".into(), now + chrono::Duration::minutes(9));
+            .insert(ended.into(), now - chrono::Duration::seconds(1));
         failover
             .cooling
-            .insert("opencode".into(), now + chrono::Duration::minutes(7));
-        assert_eq!(failover.pick(&chain, now, &ready), None);
-        assert_eq!(failover.first_reset(&chain, now), Some(soon));
-        // A cooldown in the past is over: the preferred runtime comes back.
-        failover
-            .cooling
-            .insert("claude-code".into(), now - chrono::Duration::seconds(1));
-        assert_eq!(
-            failover.pick(&chain, now, &ready).as_deref(),
-            Some("claude-code")
-        );
+            .insert(running.into(), now + chrono::Duration::minutes(5));
+        assert_eq!(failover.cooling_until(ended, now), None);
+        assert!(failover.cooling_until(running, now).is_some());
+        assert_eq!(failover.cooling_until("login:other:claude-code", now), None);
     }
 
     #[test]

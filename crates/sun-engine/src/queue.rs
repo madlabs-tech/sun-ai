@@ -31,11 +31,14 @@
 //! - Each active run counts against the runtime of its latest session
 //!   (`session_assigned`, so failover moves it), else the one it was
 //!   placed for.
-//! - A `runtime_cooling` event (failover journals one per limit hit) puts
-//!   that runtime in `cooling_down` until its end; a run waits only while
-//!   every runtime of its workflow's chain is cooling.
-//!   Cooldowns are reloaded from the store at start. A timer re-pumps when
-//!   the cooldown ends.
+//! - A `runtime_cooling` event (failover journals one per limit hit) cools
+//!   its **account** until its end ([`Account`]): a `byo_key`/`credits`
+//!   runtime's key on every host, a CLI's own login only on the host that hit
+//!   the limit. A chain entry is passed over while its account cools on every
+//!   host that may take the run, and a run never goes to a host where its
+//!   entry's account cools; a run waits only while every entry of its
+//!   workflow's chain is cooling. Cooldowns are reloaded from the store at
+//!   start. A timer re-pumps when the cooldown ends.
 //! - While the ecosystem's monthly spend cap is reached (`budget`), runs
 //!   with an agent step stay queued; raising the cap wakes the pump, and so
 //!   does a timer at the next month's start (UTC), when the count resets.
@@ -47,7 +50,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::json;
-use sun_core::model::{ActivityKind, EventRecord, Run};
+use sun_core::model::{Account, ActivityKind, EventRecord, Run};
 use sun_core::{
     Error, ExecEnvSpec, HostId, Result, RunId, RunStatus, StateMachine, TaskId, TaskStatus,
     Timestamp, WorkspaceId,
@@ -401,6 +404,8 @@ struct Want {
     workspace: WorkspaceId,
     /// The runtime it would start on.
     runtime: String,
+    /// What that runtime spends: a host where it cools can't take the run.
+    account: Account,
     /// The exec env kind it needs (`bare`, `container`, `vm`).
     env: String,
     load: Load,
@@ -417,15 +422,15 @@ type Candidate = (HostId, Vec<String>, HostCap);
 /// has room for it (a run slot, and its VM's RAM and CPUs) and whose CLI for
 /// the run's runtime is ready and that may take the run (`runs_on`: attached
 /// to its workspace) and that has room for one more session of that runtime
-/// (`max_sessions`, `v2`). `active` holds the slot and load
-/// of every active run. Runs are skipped, not blocked on: a full or cooling
-/// slot doesn't hold back other work.
+/// (`max_sessions`, `v2`). `runs_on` also says no where the run's account
+/// cools. `active` holds the slot and load of every active run. Runs are
+/// skipped, not blocked on: a full or cooling slot doesn't hold back other
+/// work.
 fn admit(
     waiting: &[Want],
     hosts: &[Candidate],
     active: &[(Slot, Load)],
     caps: &Caps,
-    cooling: impl Fn(&str) -> bool,
     max_sessions: impl Fn(&HostId, &str) -> Option<usize>,
     runs_on: impl Fn(&HostId, &Want) -> bool,
 ) -> Vec<(RunId, HostId)> {
@@ -445,8 +450,7 @@ fn admit(
     for want in waiting {
         let runtime = want.runtime.as_str();
         let runtime_used = runtimes.get(runtime).copied().unwrap_or(0);
-        if cooling(runtime)
-            || full(caps.per_ecosystem.as_ref(), total)
+        if full(caps.per_ecosystem.as_ref(), total)
             || full(caps.per_runtime.get(runtime), runtime_used)
         {
             continue;
@@ -489,11 +493,8 @@ struct Scheduler {
     config: QueueConfig,
     /// The time ([`Queue::start_with_clock`]).
     clock: fn() -> Timestamp,
-    /// `cooling_down` runtimes → end of the cooldown (a cache of
-    /// `runtime_state`, which failover writes).
-    // ponytail: keyed by chain name across the deployment, so one workspace's
-    // limit hit cools that name for every workspace; key by (workspace, name)
-    // or runtime id when workspaces bring their own accounts.
+    /// Cooling accounts ([`Account::key`]) → end of the cooldown (a cache
+    /// of `account_cooldown`, which failover writes).
     cooling: HashMap<String, Timestamp>,
     /// The spend cap holds runs until this month start.
     held_until: Option<Timestamp>,
@@ -534,19 +535,19 @@ impl Scheduler {
         }
     }
 
-    /// Merges the cooldowns stored in `runtime_state` into the cache: at start,
+    /// Merges the cooldowns stored in `account_cooldown` into the cache: at start,
     /// and when the event receiver lagged and may have dropped a
     /// `runtime_cooling` (failover writes both in one transaction).
     async fn reload_cooldowns(&mut self) -> Result<()> {
-        for (runtime, until) in self.store.read().await?.cooldowns().await? {
-            self.cool(runtime, until);
+        for (account, until) in self.store.read().await?.cooldowns().await? {
+            self.cool(account, until);
         }
         Ok(())
     }
 
-    /// `runtime` cools down until `until`, or longer if it already was.
-    fn cool(&mut self, runtime: String, until: Timestamp) {
-        let end = self.cooling.entry(runtime).or_insert(until);
+    /// `account` cools down until `until`, or longer if it already was.
+    fn cool(&mut self, account: String, until: Timestamp) {
+        let end = self.cooling.entry(account).or_insert(until);
         *end = (*end).max(until);
     }
 
@@ -558,7 +559,7 @@ impl Scheduler {
                 let Ok(cooling) = serde_json::from_value::<Cooling>(event.payload.clone()) else {
                     return false;
                 };
-                self.cool(cooling.runtime, cooling.until);
+                self.cool(cooling.account, cooling.until);
                 true
             }
             "session_assigned" => {
@@ -598,6 +599,25 @@ impl Scheduler {
         // cooling (failover picks the same one at dispatch), and goes to a
         // host whose CLI for that runtime is ready.
         let mut tx = self.store.read().await?;
+        let names: HashMap<HostId, String> = tx
+            .hosts()
+            .await?
+            .into_iter()
+            .map(|h| (h.id, h.name))
+            .collect();
+        // The hosts each waiting run's workspace has. The fallback host takes
+        // any run only while it is no enrolled host (tests, before any joined).
+        let mut attached: HashMap<WorkspaceId, HashSet<HostId>> = HashMap::new();
+        let unenrolled_fallback = !names.contains_key(&slot.host);
+        let may_take = |attached: &HashMap<WorkspaceId, HashSet<HostId>>, host, workspace| {
+            attached
+                .get(&workspace)
+                .is_some_and(|a: &HashSet<HostId>| a.contains(&host))
+                || (unenrolled_fallback && host == slot.host)
+        };
+        // The hosts ready for each runtime, read once per pass.
+        let mut ready_for: HashMap<String, Vec<ReadyHost>> = HashMap::new();
+        let default_max = self.config.caps.max_sessions;
         let mut runs = Vec::with_capacity(waiting.len());
         // Leased runs go only to the seller's host that joined for them.
         let mut leased = Vec::new();
@@ -609,6 +629,10 @@ impl Scheduler {
         let capped = crate::budget::ecosystem_over(&mut tx, now).await?.is_some();
         self.held_until = capped.then(|| crate::budget::next_month_start(now));
         for w in &waiting {
+            if let std::collections::hash_map::Entry::Vacant(entry) = attached.entry(w.workspace) {
+                let hosts = tx.hosts_in(w.workspace).await?;
+                entry.insert(hosts.into_iter().map(|h| h.id).collect());
+            }
             if let Some(lease) = crate::market::task_lease(&mut tx, w.run.task_id).await? {
                 leased.push((w.run.id, lease.host_id));
                 continue;
@@ -644,24 +668,47 @@ impl Scheduler {
             // already goes only to hosts with that env ready).
             let mut runtime = None;
             let mut refusal = None;
-            for name in chain.iter().filter(|r| !self.cooling.contains_key(*r)) {
+            for name in &chain {
+                // A `market:` runtime spends the seller's account, not ours.
                 let local = !name.starts_with(crate::market::MARKET_PREFIX);
-                if spends && local {
-                    let adapter = match tx.runtime_by_name(w.workspace, name).await? {
-                        Some(row) => row.adapter,
-                        None => name.clone(),
+                let row = match local {
+                    true => tx.runtime_by_name(w.workspace, name).await?,
+                    false => None,
+                };
+                let account = Account::of(row.as_ref(), name);
+                if local {
+                    // Cooling while its account cools on every host that
+                    // may take the run (a key cools on all of them at once).
+                    let ready =
+                        ready_on(&self.engine, &mut ready_for, name, slot.host, default_max);
+                    let mut usable = ready
+                        .await?
+                        .iter()
+                        .map(|(h, ..)| *h)
+                        .filter(|h| may_take(&attached, *h, w.workspace))
+                        .peekable();
+                    let cooled = |h: HostId| self.cooling.contains_key(&account.key(h));
+                    let cooling = match &account {
+                        Account::Credential(_) => cooled(slot.host),
+                        Account::Login(_) => usable.peek().is_some() && usable.all(cooled),
                     };
+                    if cooling {
+                        continue;
+                    }
+                }
+                if spends && local {
+                    let adapter = row.map_or_else(|| name.clone(), |row| row.adapter);
                     let mode = modes.get(&adapter).map(String::as_str);
                     if let Some(why) = sun_core::mode_refusal(mode, &env) {
                         refusal.get_or_insert((name, why));
                         continue;
                     }
                 }
-                runtime = Some(name);
+                runtime = Some((name, account));
                 break;
             }
-            let runtime = match (runtime, refusal) {
-                (Some(runtime), _) => runtime,
+            let (runtime, account) = match (runtime, refusal) {
+                (Some(picked), _) => picked,
                 (None, Some((name, why))) => {
                     let payload = json!({
                         "runtime": name, "exec_env": env.kind(), "reason": why,
@@ -670,7 +717,10 @@ impl Scheduler {
                     continue;
                 }
                 // Every entry is cooling: count it as the first.
-                (None, None) => &chain[0],
+                (None, None) => {
+                    let row = tx.runtime_by_name(w.workspace, &chain[0]).await?;
+                    (&chain[0], Account::of(row.as_ref(), &chain[0]))
+                }
             };
             if let Some(adapter) = runtime.strip_prefix(crate::market::MARKET_PREFIX) {
                 to_market.push((w.run.id, adapter.to_owned()));
@@ -687,6 +737,7 @@ impl Scheduler {
                 run_id: w.run.id,
                 workspace: w.workspace,
                 runtime: runtime.clone(),
+                account,
                 env: env.kind().to_owned(),
                 load: Load::of(&env),
                 prefer,
@@ -717,43 +768,24 @@ impl Scheduler {
         let mut runs_on: HashSet<(HostId, String)> = HashSet::new();
         // `v2`: each host's cap on sessions of a runtime.
         let mut max_sessions: HashMap<(HostId, String), usize> = HashMap::new();
-        let default_max = self.config.caps.max_sessions;
         for runtime in runtimes {
-            let hosts = match self.engine.ready_hosts(runtime, default_max).await? {
-                Ready::Hosts(hosts) => hosts,
-                // Unknown capabilities: try anything, `prepare` says why not.
-                Ready::Unreported => vec![(
-                    slot.host,
-                    ["bare", "container", "vm"].map(String::from).to_vec(),
-                    None,
-                )],
-            };
-            for (id, envs, max) in hosts {
-                runs_on.insert((id, runtime.to_owned()));
+            let hosts = ready_on(
+                &self.engine,
+                &mut ready_for,
+                runtime,
+                slot.host,
+                default_max,
+            );
+            for (id, envs, max) in hosts.await? {
+                runs_on.insert((*id, runtime.to_owned()));
                 if let Some(max) = max {
-                    max_sessions.insert((id, runtime.to_owned()), max);
+                    max_sessions.insert((*id, runtime.to_owned()), *max);
                 }
-                if !ready.iter().any(|(h, _)| *h == id) {
-                    ready.push((id, envs));
+                if !ready.iter().any(|(h, _)| h == id) {
+                    ready.push((*id, envs.clone()));
                 }
             }
         }
-        let names: HashMap<HostId, String> = tx
-            .hosts()
-            .await?
-            .into_iter()
-            .map(|h| (h.id, h.name))
-            .collect();
-        // The hosts each waiting run's workspace has. The fallback host takes
-        // any run only while it is no enrolled host (tests, before any joined).
-        let mut attached: HashMap<WorkspaceId, HashSet<HostId>> = HashMap::new();
-        for w in &waiting {
-            if let std::collections::hash_map::Entry::Vacant(entry) = attached.entry(w.workspace) {
-                let hosts = tx.hosts_in(w.workspace).await?;
-                entry.insert(hosts.into_iter().map(|h| h.id).collect());
-            }
-        }
-        let unenrolled_fallback = !names.contains_key(&slot.host);
         let mut hosts: Vec<Candidate> = Vec::with_capacity(ready.len());
         for (id, envs) in &ready {
             if !crate::market::is_market_host(&mut tx, *id).await? {
@@ -784,14 +816,11 @@ impl Scheduler {
             &hosts,
             &active,
             &self.config.caps,
-            |runtime| self.cooling.contains_key(runtime),
             |host, runtime| max_sessions.get(&(*host, runtime.to_owned())).copied(),
             |host, want| {
                 runs_on.contains(&(*host, want.runtime.clone()))
-                    && (attached
-                        .get(&want.workspace)
-                        .is_some_and(|a| a.contains(host))
-                        || (unenrolled_fallback && *host == slot.host))
+                    && !self.cooling.contains_key(&want.account.key(*host))
+                    && may_take(&attached, *host, want.workspace)
             },
         )
         .into_iter()
@@ -833,10 +862,36 @@ impl Scheduler {
     }
 }
 
-/// A `runtime_cooling` event: `{runtime, until}`.
+/// A host ready for a runtime: its ready exec env kinds and, under `v2`,
+/// its cap on sessions of that runtime ([`Ready::Hosts`]).
+type ReadyHost = (HostId, Vec<String>, Option<usize>);
+
+/// The hosts ready for `runtime`, read into `cache` once per pass. Unknown
+/// capabilities: `fallback` with every env (`prepare` says why not).
+async fn ready_on<'a>(
+    engine: &Engine,
+    cache: &'a mut HashMap<String, Vec<ReadyHost>>,
+    runtime: &str,
+    fallback: HostId,
+    max_sessions: Option<usize>,
+) -> Result<&'a [ReadyHost]> {
+    if !cache.contains_key(runtime) {
+        let hosts = match engine.ready_hosts(runtime, max_sessions).await? {
+            Ready::Hosts(hosts) => hosts,
+            Ready::Unreported => {
+                let every = ["bare", "container", "vm"].map(String::from).to_vec();
+                vec![(fallback, every, None)]
+            }
+        };
+        cache.insert(runtime.to_owned(), hosts);
+    }
+    Ok(cache.get(runtime).map_or(&[], Vec::as_slice))
+}
+
+/// A `runtime_cooling` event: `{runtime, account, until}`.
 #[derive(serde::Deserialize)]
 struct Cooling {
-    runtime: String,
+    account: String,
     until: Timestamp,
 }
 
@@ -857,6 +912,7 @@ mod tests {
             run_id,
             workspace: WorkspaceId::MAIN,
             runtime: runtime.into(),
+            account: Account::Login(runtime.into()),
             env: env.into(),
             load: Load::default(),
             prefer: None,
@@ -932,38 +988,18 @@ mod tests {
             &hosts,
             &active,
             &caps,
-            |r| r == "opencode",
             no_max,
-            any,
+            |_, w| w.runtime != "opencode", // its account cools everywhere
         );
         // h1 (1 active) and h2 (1 active) tie: h1 first; then h2 is less busy;
         // then h1 is full (cap 2) so h2 takes the rest.
         assert_eq!(start, [(runs[0], h1), (runs[2], h2), (runs[3], h2)]);
 
         let one = [bare(h2, HostCap::default())];
-        let unlimited = admit(
-            &waiting,
-            &one,
-            &active,
-            &Caps::default(),
-            |_| false,
-            no_max,
-            any,
-        );
+        let unlimited = admit(&waiting, &one, &active, &Caps::default(), no_max, any);
         assert_eq!(unlimited.len(), runs.len());
         assert!(unlimited.iter().all(|(_, host)| *host == h2));
-        assert!(
-            admit(
-                &waiting,
-                &[],
-                &active,
-                &Caps::default(),
-                |_| false,
-                no_max,
-                any
-            )
-            .is_empty()
-        );
+        assert!(admit(&waiting, &[], &active, &Caps::default(), no_max, any).is_empty());
     }
 
     #[test]
@@ -978,27 +1014,11 @@ mod tests {
         // h2 is busier, but the run's last session is there.
         let active = [slot("claude", h2)];
         let hosts = [bare(h1, HostCap::default()), bare(h2, runs_cap(2))];
-        let start = admit(
-            &on_h2,
-            &hosts,
-            &active,
-            &Caps::default(),
-            |_| false,
-            no_max,
-            any,
-        );
+        let start = admit(&on_h2, &hosts, &active, &Caps::default(), no_max, any);
         assert_eq!(start, [(run, h2)]);
         // h2 is full: the least busy one instead.
         let hosts = [bare(h1, HostCap::default()), bare(h2, runs_cap(1))];
-        let start = admit(
-            &on_h2,
-            &hosts,
-            &active,
-            &Caps::default(),
-            |_| false,
-            no_max,
-            any,
-        );
+        let start = admit(&on_h2, &hosts, &active, &Caps::default(), no_max, any);
         assert_eq!(start, [(run, h1)]);
     }
 
@@ -1019,15 +1039,7 @@ mod tests {
         let runs_on = |h: &HostId, w: &Want| {
             (*h == h1 && w.runtime == "claude") || (*h == h2 && w.runtime == "codex")
         };
-        let start = admit(
-            &waiting,
-            &hosts,
-            &[],
-            &Caps::default(),
-            |_| false,
-            no_max,
-            runs_on,
-        );
+        let start = admit(&waiting, &hosts, &[], &Caps::default(), no_max, runs_on);
         assert_eq!(start, [(runs[0], h2), (runs[1], h1)]);
     }
 
@@ -1061,15 +1073,7 @@ mod tests {
             vm(runs[1], 2048, 2),            // fits exactly
             want(runs[2], "claude", "bare"), // no VM: only the run slot counts
         ];
-        let start = admit(
-            &waiting,
-            &hosts,
-            &active,
-            &Caps::default(),
-            |_| false,
-            no_max,
-            any,
-        );
+        let start = admit(&waiting, &hosts, &active, &Caps::default(), no_max, any);
         assert_eq!(start, [(runs[1], host), (runs[2], host)]);
         // An unset VM size counts Lima's defaults.
         let spec = ExecEnvSpec::Vm(sun_core::VmSpec {
@@ -1112,15 +1116,7 @@ mod tests {
                 HostCap::default(),
             ),
         ];
-        let start = admit(
-            &waiting,
-            &hosts,
-            &[],
-            &Caps::default(),
-            |_| false,
-            no_max,
-            any,
-        );
+        let start = admit(&waiting, &hosts, &[], &Caps::default(), no_max, any);
         assert_eq!(start, [(runs[0], docker_host), (runs[2], bare_host)]);
     }
 
@@ -1157,7 +1153,6 @@ mod tests {
                 &hosts,
                 &[],
                 &Caps::default(),
-                |_| false,
                 no_max,
                 runs_on,
             )
@@ -1212,15 +1207,7 @@ mod tests {
                 ..want(RunId::generate(), "claude", "bare")
             },
         ];
-        let start = admit(
-            &waiting,
-            &hosts,
-            &active,
-            &Caps::default(),
-            |_| false,
-            no_max,
-            any,
-        );
+        let start = admit(&waiting, &hosts, &active, &Caps::default(), no_max, any);
         assert_eq!(
             start,
             [(waiting[0].run_id, h3), (waiting[1].run_id, h2)],
@@ -1359,15 +1346,7 @@ mod tests {
         // h1 takes one claude session at a time; h2 is busier but uncapped.
         let max = |h: &HostId, r: &str| (*h == h1 && r == "claude").then_some(1);
         let active = [slot("codex", h2), slot("codex", h2)];
-        let start = admit(
-            &waiting,
-            &hosts,
-            &active,
-            &Caps::default(),
-            |_| false,
-            max,
-            any,
-        );
+        let start = admit(&waiting, &hosts, &active, &Caps::default(), max, any);
         assert_eq!(start, [(runs[0], h1), (runs[1], h2), (runs[2], h1)]);
     }
 }

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::Value;
-use sun_core::model::{RuntimeSource, Task, Workflow};
+use sun_core::model::{Account, RuntimeSource, Task, Workflow};
 use sun_core::{
     BoxStream, Error, HostEvent, HostId, HostLink, ModCall, ModLink, Result, RunId, RunStatus,
     SessionHandle, SessionId, SessionSpec, Steer, StepKey, StepStatus, StopMode, TaskId,
@@ -237,7 +237,8 @@ async fn queue_respects_priority_fifo_caps_and_cooldown() {
     eventually("c running", || async { started(&store, c).await }).await;
     let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(1500);
     // What failover journals on a limit hit.
-    let cooling = serde_json::json!({ "runtime": "fake", "until": reset_at });
+    let account = login(host, "fake");
+    let cooling = serde_json::json!({ "runtime": "fake", "account": account, "until": reset_at });
     let mut tx = store.begin().await.unwrap();
     tx.append_event(NewEvent::new(run_c, None, "runtime_cooling", cooling))
         .await
@@ -308,6 +309,11 @@ async fn add_host(store: &Store, name: &str, logged_in: bool) -> HostId {
     .unwrap();
     tx.commit().await.unwrap();
     host.id
+}
+
+/// The account key of `tool`'s own login on `host`, as failover cools it.
+fn login(host: HostId, tool: &str) -> String {
+    Account::Login(tool.into()).key(host)
 }
 
 async fn placed_on(store: &Store, task: TaskId) -> Option<HostId> {
@@ -682,7 +688,8 @@ async fn chain_fails_over_to_market_runtime() {
     })
     .await;
     let until = chrono::Utc::now() + chrono::Duration::minutes(10);
-    let cooling = serde_json::json!({ "runtime": "fake", "until": until });
+    let account = login(buyer, "fake");
+    let cooling = serde_json::json!({ "runtime": "fake", "account": account, "until": until });
     let mut tx = store.begin().await.unwrap();
     tx.append_event(NewEvent::new(run, None, "runtime_cooling", cooling))
         .await
@@ -1062,20 +1069,13 @@ async fn lagged_queue_reloads_cooldowns_from_the_store() {
     })
     .await;
 
-    // The cooldown lands only in `runtime_state`, under more events than the
-    // queue's receiver holds.
+    // The cooldown lands only in `account_cooldown`, under more events than
+    // the queue's receiver holds.
     let mut tx = store.begin().await.unwrap();
-    let fake = tx
-        .upsert_runtime(
-            sun_core::WorkspaceId::MAIN,
-            "fake",
-            "fake",
-            RuntimeSource::ByoRuntime,
-        )
+    let until = chrono::Utc::now() + chrono::Duration::minutes(10);
+    tx.set_cooldown(&login(host, "fake"), Some(until))
         .await
         .unwrap();
-    let until = chrono::Utc::now() + chrono::Duration::minutes(10);
-    tx.set_cooldown(fake.id, Some(until)).await.unwrap();
     for _ in 0..1100 {
         tx.append_event(NewEvent::new(run, None, "filler", Value::Null))
             .await
@@ -1202,19 +1202,11 @@ async fn cooling_runtime_never_starts_a_run_under_random_interleavings() {
             })
         };
         let mut tx = store.begin().await.unwrap();
+        let account = login(host, "fake");
         if in_store {
-            let fake = tx
-                .upsert_runtime(
-                    sun_core::WorkspaceId::MAIN,
-                    "fake",
-                    "fake",
-                    RuntimeSource::ByoRuntime,
-                )
-                .await
-                .unwrap();
-            tx.set_cooldown(fake.id, Some(until)).await.unwrap();
+            tx.set_cooldown(&account, Some(until)).await.unwrap();
         }
-        let cooling = serde_json::json!({ "runtime": "fake", "until": until });
+        let cooling = serde_json::json!({ "runtime": "fake", "account": account, "until": until });
         tx.append_event(NewEvent::new(anchor_run, None, "runtime_cooling", cooling))
             .await
             .unwrap();
@@ -1464,4 +1456,62 @@ async fn queue_v2_caps_sessions_per_host_and_v1_is_the_kill_switch() {
     set_model("v1").await;
     queue.wake();
     eventually("c running under v1", || async { started(&store, c).await }).await;
+}
+
+/// Item 5: a limit cools the account that hit it. Two hosts logged into
+/// their own accounts of the same CLI: the first host's login cooling keeps
+/// runs off it only, so the second still takes them. A key both would
+/// spend cools on both: the next run waits.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_cools_the_account_not_every_host_with_the_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let tasks = tasks_of(&store, WORKFLOW, 3).await;
+    let h1 = add_host(&store, "h1", true).await;
+    let h2 = add_host(&store, "h2", true).await;
+    let until = chrono::Utc::now() + chrono::Duration::minutes(10);
+    let mut tx = store.begin().await.unwrap();
+    tx.set_cooldown(&login(h1, "fake"), Some(until))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![h1, h2])));
+    let (_engine, queue) = kernel_on(&store, link, h1, Caps::default()).await;
+
+    let (a, b, c) = (tasks[0].id, tasks[1].id, tasks[2].id);
+    let run_a = queue.enqueue(a).await.unwrap();
+    queue.enqueue(b).await.unwrap();
+    eventually("a and b running", || async {
+        started(&store, a).await && started(&store, b).await
+    })
+    .await;
+    assert_eq!(placed_on(&store, a).await, Some(h2), "h1's login cools");
+    assert_eq!(placed_on(&store, b).await, Some(h2), "h2's doesn't");
+
+    // `fake` now runs on a key: its cooldown holds on every host.
+    let key = sun_core::model::Runtime {
+        id: sun_core::RuntimeId::generate(),
+        workspace_id: sun_core::WorkspaceId::MAIN,
+        name: "fake".into(),
+        adapter: "fake".into(),
+        source: RuntimeSource::Credits,
+        byo_key: None,
+        created_by: None,
+    };
+    let account = Account::Credential(key.id).key(h1);
+    let cooling = serde_json::json!({ "runtime": "fake", "account": account, "until": until });
+    let mut tx = store.begin().await.unwrap();
+    assert!(tx.insert_runtime(&key).await.unwrap());
+    tx.set_cooldown(&account, Some(until)).await.unwrap();
+    tx.append_event(NewEvent::new(run_a, None, "runtime_cooling", cooling))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let run_c = queue.enqueue(c).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        run_of(&store, c).await,
+        Some((run_c, RunStatus::Queued)),
+        "the key cools on h1 and h2"
+    );
 }

@@ -1146,6 +1146,43 @@ impl Runtime {
     }
 }
 
+/// The account a session of a chain entry spends, so the one a limit hit
+/// cools (`account_cooldown`, TRD BLO-117 §7). Its [`Account::key`] is
+/// internal: never in an API response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Account {
+    /// A `byo_key` or `credits` runtime's key, whatever host runs it.
+    Credential(RuntimeId),
+    /// The CLI's own login on each host (`byo_runtime`, or an entry with no
+    /// runtime row): the tool.
+    Login(String),
+}
+
+impl Account {
+    /// What chain entry `name` spends: its `runtime` row's, if configured.
+    pub fn of(runtime: Option<&Runtime>, name: &str) -> Self {
+        match runtime {
+            Some(r) if r.source != RuntimeSource::ByoRuntime => Self::Credential(r.id),
+            Some(r) => Self::Login(r.adapter.clone()),
+            None => Self::Login(name.to_owned()),
+        }
+    }
+
+    /// Its key for a session on `host`: `login:<host>:<tool>`, or a key's
+    /// [`Self::credential_key`], the same on every host.
+    pub fn key(&self, host: HostId) -> String {
+        match self {
+            Self::Credential(id) => Self::credential_key(*id),
+            Self::Login(tool) => format!("login:{host}:{tool}"),
+        }
+    }
+
+    /// `cred:<runtime id>`.
+    pub fn credential_key(id: RuntimeId) -> String {
+        format!("cred:{id}")
+    }
+}
+
 string_enum! {
     /// Availability of a runtime (`runtime_state.status`).
     pub enum RuntimeStatus {

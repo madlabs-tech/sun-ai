@@ -244,6 +244,10 @@ impl WorkspaceRepo for Tx {
             "DELETE FROM agent WHERE workspace_id = $1".to_owned(),
             format!("DELETE FROM runtime_state WHERE runtime_id IN ({runtimes})"),
             format!(
+                "DELETE FROM account_cooldown \
+                 WHERE account IN (SELECT 'cred:' || id FROM ({runtimes}))"
+            ),
+            format!(
                 "DELETE FROM kernel_setting \
                  WHERE key IN (SELECT 'credits_model:' || id FROM ({runtimes}))"
             ),
