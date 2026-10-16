@@ -655,6 +655,8 @@ async fn host_socket_status_and_leave_need_the_host_key() {
     tokio::spawn(axum::serve(listener, app.clone()).into_future());
     let main = "/api/v1/workspaces/00000000000000000000000001/hosts/tokens";
     let (_, issued) = call(app, "POST", main, None).await;
+    // The UI renders `sun host join --kernel <kernel_url>` from it.
+    assert_eq!(issued["kernel_url"], "http://localhost");
     let enroll = json!({ "type": "enroll", "token": issued["token"], "name": "laptop" });
     let enrolled = ask(&url, enroll).await.unwrap();
     let host: HostId = serde_json::from_value(enrolled["host_id"].clone()).unwrap();

@@ -683,8 +683,8 @@ async fn within_hosts(api: &Api, workspace: WorkspaceId) -> ApiResult<()> {
 }
 
 /// `POST /api/v1/workspaces/{id}/hosts/tokens` (`manage_runtimes` there): a
-/// single-use token for `sun host join`; the host it enrols is attached to
-/// the workspace. Hosts count against its plan (`limits.hosts`).
+/// single-use token for `sun host join`, with the `kernel_url` it joins; the
+/// host it enrols is attached to the workspace. Hosts count against its plan (`limits.hosts`).
 pub(crate) async fn create_token(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,
@@ -698,7 +698,11 @@ pub(crate) async fn create_token(
     let expires_at = chrono::Utc::now() + TOKEN_TTL;
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "token": token, "expires_at": expires_at })),
+        Json(json!({
+            "token": token,
+            "expires_at": expires_at,
+            "kernel_url": api.config.public_url.trim_end_matches('/'),
+        })),
     ))
 }
 
