@@ -193,6 +193,20 @@ pub struct Envelope {
 /// `bypass_permissions` needs the operator's `allow_bypass`.
 pub const PERMISSION_MODES: [&str; 4] = ["default", "accept_edits", "plan", "bypass_permissions"];
 
+/// Why a session in permission `mode` may not run in `env`, if it may not:
+/// `bypass_permissions` runs only in a `container` or `vm`, never bare or in
+/// an extension env. The one owner of the rule, checked at placement (the
+/// engine) and again by the host before it starts the CLI.
+pub fn bypass_refusal(mode: Option<&str>, env: &ExecEnvSpec) -> Option<String> {
+    let isolated = matches!(env, ExecEnvSpec::Container(_) | ExecEnvSpec::Vm(_));
+    (mode == Some("bypass_permissions") && !isolated).then(|| {
+        format!(
+            "bypass_permissions needs a container or vm exec env, and this session's is `{}`",
+            env.kind()
+        )
+    })
+}
+
 /// The env var that carries a `byo_key` runtime's key value into the session
 /// (`SessionSpec::env`, so it is redacted from every event).
 pub const BYO_KEY_ENV: &str = "SUN_BYO_KEY";
@@ -521,4 +535,26 @@ pub struct Transcript {
     pub events: Vec<SunEvent>,
     /// The CLI's native transcript bytes, when the CLI can resume from them.
     pub native: Option<Vec<u8>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bypass_runs_only_in_a_container_or_vm() {
+        let container = ExecEnvSpec::Container(ContainerSpec {
+            image: "img".into(),
+            memory_mb: None,
+            cpu_millis: None,
+            network: None,
+        });
+        let bypass = Some("bypass_permissions");
+        assert_eq!(bypass_refusal(bypass, &container), None);
+        let bare = bypass_refusal(bypass, &ExecEnvSpec::Bare).unwrap();
+        assert!(bare.contains("`bare`"), "{bare}");
+        for mode in [None, Some("accept_edits"), Some("plan"), Some("default")] {
+            assert_eq!(bypass_refusal(mode, &ExecEnvSpec::Bare), None);
+        }
+    }
 }

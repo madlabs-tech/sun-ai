@@ -873,7 +873,9 @@ pub enum ReplyBody {
     },
     /// Any request failed.
     Error {
-        /// `invalid_input`, `not_found`, `unavailable` or `protocol`.
+        /// `invalid_input`, `forbidden` (a host rule refused it, e.g.
+        /// `bypass_permissions` on a bare host), `not_found`, `unavailable`
+        /// or `protocol`. An older kernel reads `forbidden` as `protocol`.
         code: String,
         /// Redacted message.
         message: String,
@@ -883,10 +885,9 @@ pub enum ReplyBody {
 impl From<&Error> for ReplyBody {
     fn from(error: &Error) -> Self {
         let (code, message) = match error {
-            // The protocol has no `forbidden` code; hosts never authorize.
-            Error::InvalidInput(m) | Error::Forbidden(m) | Error::PlanLimit(m) => {
-                ("invalid_input", m.clone())
-            }
+            Error::InvalidInput(m) | Error::PlanLimit(m) => ("invalid_input", m.clone()),
+            // A host refused on its own rule (bypass on bare): never retried.
+            Error::Forbidden(m) => ("forbidden", m.clone()),
             Error::Refused { message, .. } => ("invalid_input", message.clone()),
             Error::NotFound(m) => ("not_found", m.clone()),
             Error::Unavailable(m) => ("unavailable", m.clone()),
@@ -907,6 +908,7 @@ impl ReplyBody {
         match self {
             Self::Error { code, message } => Err(match code.as_str() {
                 "invalid_input" => Error::InvalidInput(message),
+                "forbidden" => Error::Forbidden(message),
                 "not_found" => Error::NotFound(message),
                 "unavailable" => Error::Unavailable(message),
                 _ => Error::Protocol(message),
@@ -1089,5 +1091,7 @@ mod tests {
         );
         assert_eq!(body.into_result(), Err(Error::NotFound("session x".into())));
         assert_eq!(ReplyBody::Done.into_result(), Ok(ReplyBody::Done));
+        let refused = Error::Forbidden("bypass on bare".into());
+        assert_eq!(ReplyBody::from(&refused).into_result(), Err(refused));
     }
 }
