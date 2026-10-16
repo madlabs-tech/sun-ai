@@ -44,7 +44,7 @@ impl Credentials {
         let path = Self::path(data_dir);
         let text = std::fs::read_to_string(&path).map_err(|e| {
             Error::NotFound(format!(
-                "{}: {e} (enrol first: sun host join <token>)",
+                "{}: {e} (enrol first: sun host join --kernel <kernel-url> <token>)",
                 path.display()
             ))
         })?;

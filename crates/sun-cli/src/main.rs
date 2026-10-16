@@ -226,12 +226,21 @@ enum HostCommand {
     /// "Add host" (single use), then install and start the host service
     /// (launchd agent `dev.sun.host` / systemd unit `sun-host`) and wait for
     /// the kernel to see it connected.
+    #[command(
+        override_usage = "sun host join --kernel <KERNEL_URL> [OPTIONS] <TOKEN>\n       \
+                                sun host join --marketplace [OPTIONS]"
+    )]
     Join {
         /// The enrolment token.
         #[arg(required_unless_present = "marketplace")]
         token: Option<String>,
-        /// The kernel's URL, e.g. https://sun.example.com.
-        #[arg(long, env = "SUN_URL", required_unless_present = "marketplace")]
+        /// URL of the kernel to join, e.g. https://sun.example.com.
+        #[arg(
+            long,
+            env = "SUN_URL",
+            value_name = "KERNEL_URL",
+            required_unless_present = "marketplace"
+        )]
         kernel: Option<String>,
         /// The name shown in the UI. Default: the hostname.
         #[arg(long)]
