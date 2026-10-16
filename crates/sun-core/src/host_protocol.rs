@@ -97,6 +97,21 @@ pub enum HostFrame {
     },
 }
 
+/// Why the kernel refused an enrolment ([`KernelFrame::EnrolFailed`]). An
+/// unknown and a used token are one reason, so a token can't be probed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnrolFailure {
+    /// The token is unknown or already used.
+    InvalidToken,
+    /// The token expired.
+    Expired,
+    /// The workspace's plan has no room for another host.
+    PlanLimit,
+    /// The host name is empty, longer than 64 bytes or has control characters.
+    BadName,
+}
+
 /// A frame the kernel sends to the host.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -108,6 +123,12 @@ pub enum KernelFrame {
         host_id: HostId,
         /// The host's secret key; sent in every later `hello`.
         host_key: String,
+    },
+    /// Answer to [`HostFrame::Enroll`] when the kernel refuses it.
+    #[serde(rename = "enrol_failed")]
+    EnrolFailed {
+        /// Why.
+        reason: EnrolFailure,
     },
     /// Answer to [`HostFrame::Status`].
     #[serde(rename = "status")]

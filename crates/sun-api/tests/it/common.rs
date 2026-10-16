@@ -114,7 +114,12 @@ pub async fn kernel_with(presets: Option<PresetUrls>) -> Kernel {
 
 /// A kernel with only `features` on (sun.yaml `features:`).
 pub async fn kernel_with_features(features: sun_api::Features) -> Kernel {
-    let k = kernel().await;
+    restarted(kernel().await, features).await
+}
+
+/// `k`'s store behind a new API (with only `features` on), as after a
+/// kernel restart.
+pub async fn restarted(k: Kernel, features: sun_api::Features) -> Kernel {
     let (app, api) = app_with(
         k.store.clone(),
         k.host,

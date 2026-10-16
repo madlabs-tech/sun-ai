@@ -1,14 +1,17 @@
 //! `host`: enrolled runtime hosts, deployment rows a workspace attaches
-//! (`workspace_host`, [`crate::WorkspaceItem::Host`]). No host secret is
-//! stored here; the API derives and checks host keys itself.
+//! (`workspace_host`, [`crate::WorkspaceItem::Host`]), and `host_token`, the
+//! unused enrolment tokens by hash. No host secret is stored here; the API
+//! derives and checks host keys itself.
 
 use async_trait::async_trait;
+use serde_json::Value;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 use sun_core::model::Host;
-use sun_core::{HostId, WorkspaceId};
+use sun_core::{HostId, Timestamp, WorkspaceId};
 
-use crate::repo::{json, parse, parse_opt};
+use crate::member::second;
+use crate::repo::{json, parse, parse_opt, parse_ts};
 use crate::{Result, StoreError, Tx};
 
 /// **Repository** for `host` rows.
@@ -28,6 +31,17 @@ pub trait HostRepo {
         id: HostId,
         capabilities: &serde_json::Value,
     ) -> Result<()>;
+    /// Saves an enrolment token by its hash, with what it `enrols`, and
+    /// prunes the ones expired over a day ago.
+    async fn insert_host_token(
+        &mut self,
+        token_hash: &str,
+        enrols: &Value,
+        expires_at: Timestamp,
+    ) -> Result<()>;
+    /// Deletes the token: what it enrols and when it expires, or `None`
+    /// when it is unknown or already used.
+    async fn take_host_token(&mut self, token_hash: &str) -> Result<Option<(Value, Timestamp)>>;
 }
 
 #[async_trait]
@@ -90,6 +104,44 @@ impl HostRepo for Tx {
             return Err(StoreError::not_found("host", id));
         }
         Ok(())
+    }
+
+    async fn insert_host_token(
+        &mut self,
+        token_hash: &str,
+        enrols: &Value,
+        expires_at: Timestamp,
+    ) -> Result<()> {
+        let prune_before = chrono::Utc::now() - chrono::Duration::days(1);
+        sqlx::query("DELETE FROM host_token WHERE expires_at <= $1")
+            .bind(second(&prune_before))
+            .execute(self.conn())
+            .await?;
+        sqlx::query(
+            "INSERT INTO host_token (token_hash, enrols_json, expires_at) VALUES ($1, $2, $3)",
+        )
+        .bind(token_hash)
+        .bind(serde_json::to_string(enrols)?)
+        .bind(second(&expires_at))
+        .execute(self.conn())
+        .await?;
+        Ok(())
+    }
+
+    async fn take_host_token(&mut self, token_hash: &str) -> Result<Option<(Value, Timestamp)>> {
+        let row = sqlx::query(
+            "DELETE FROM host_token WHERE token_hash = $1 RETURNING enrols_json, expires_at",
+        )
+        .bind(token_hash)
+        .fetch_optional(self.conn())
+        .await?;
+        row.map(|row| {
+            Ok((
+                json(row.try_get("enrols_json")?)?,
+                parse_ts(row.try_get("expires_at")?)?,
+            ))
+        })
+        .transpose()
     }
 }
 

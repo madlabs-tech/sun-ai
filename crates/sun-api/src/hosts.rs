@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sun_core::host_protocol::{
     DeviceCapabilities, DeviceFlowRequest, DeviceInput, DeviceRequest, DeviceResult, DeviceScreen,
-    ExecOutput, ExecRequest, HOST_PROTOCOL_VERSION, HostFrame, KernelFrame, ReplyBody,
-    ScreenshotRequest, SessionFile, SessionStats, Worktree,
+    EnrolFailure, ExecOutput, ExecRequest, HOST_PROTOCOL_VERSION, HostFrame, KernelFrame,
+    ReplyBody, ScreenshotRequest, SessionFile, SessionStats, Worktree,
 };
 use sun_core::model::{Runtime, RuntimeSource};
 use sun_core::{
@@ -86,13 +86,12 @@ struct HubState {
     disk: HashMap<HostId, Vec<(TaskId, u64)>>,
     last_seen: HashMap<HostId, Timestamp>,
     subscribers: Vec<mpsc::Sender<HostEvent>>,
-    /// Unused enrolment tokens: when they expire, and what they enrol.
-    tokens: HashMap<String, (Instant, Enrols)>,
     generation: u64,
 }
 
 /// What an enrolment token enrols.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Enrols {
     /// A host attached to the workspace, enrolled by who minted the token.
     Workspace(WorkspaceId, Option<MemberId>),
@@ -115,34 +114,6 @@ impl HostHub {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// A new single-use enrolment token for what it `enrols`, valid for an
-    /// hour.
-    pub(crate) fn issue_token(&self, enrols: Enrols) -> Result<String> {
-        let token = random_hex()?;
-        let mut state = self.state();
-        let now = Instant::now();
-        state.tokens.retain(|_, (expires, _)| *expires > now);
-        state
-            .tokens
-            .insert(token.clone(), (now + TOKEN_TTL, enrols));
-        Ok(token)
-    }
-
-    /// Consumes `token`: what it enrols, once, if it was issued and has not
-    /// expired.
-    fn take_token(&self, token: &str) -> Option<Enrols> {
-        let mut state = self.state();
-        let found = state
-            .tokens
-            .keys()
-            .find(|t| auth::same(t.as_bytes(), token.as_bytes()))
-            .cloned();
-        found
-            .and_then(|t| state.tokens.remove(&t))
-            .filter(|(expires, _)| *expires > Instant::now())
-            .map(|(_, enrols)| enrols)
     }
 
     fn attach(&self, host: HostId, out: mpsc::UnboundedSender<KernelFrame>, protocol: &str) -> u64 {
@@ -691,23 +662,48 @@ async fn leave(api: &Api, host: HostId) -> Result<()> {
     Ok(())
 }
 
-/// Trades a valid token for a new host and its key; `None` closes silently.
+/// A new single-use enrolment token for what it `enrols`, and when it
+/// expires (in an hour). Stored by hash, so it outlives a kernel restart.
+pub(crate) async fn issue_token(api: &Api, enrols: Enrols) -> Result<(String, Timestamp)> {
+    let token = random_hex()?;
+    let expires_at = chrono::Utc::now() + TOKEN_TTL;
+    let enrols = serde_json::to_value(enrols).map_err(|e| Error::Unavailable(e.to_string()))?;
+    api.engine
+        .add_host_token(&sha256_hex(&token), &enrols, expires_at)
+        .await?;
+    Ok((token, expires_at))
+}
+
+/// Trades a valid token for a new host and its key, or says why not
+/// (`enrol_failed`); `None` closes silently (a kernel error).
 async fn enroll(api: &Api, token: &str, name: &str) -> Option<KernelFrame> {
+    let refuse = |reason| Some(KernelFrame::EnrolFailed { reason });
     let name = name.trim();
     if name.is_empty() || name.len() > 64 || name.chars().any(char::is_control) {
-        return None;
+        return refuse(EnrolFailure::BadName);
     }
-    let enrols = api.hosts.take_token(token)?;
+    let Some((enrols, expires_at)) = api.engine.take_host_token(&sha256_hex(token)).await.ok()?
+    else {
+        return refuse(EnrolFailure::InvalidToken);
+    };
+    if expires_at <= chrono::Utc::now() {
+        return refuse(EnrolFailure::Expired);
+    }
     // A token minted before the plan filled up still can't pass it. A
     // leased seller host is paid capacity, not one of the plan's own hosts.
-    let host = match enrols {
+    let host = match serde_json::from_value(enrols).ok()? {
         Enrols::Workspace(workspace, by) => {
             let plan = api.entitlements.for_workspace(workspace).await;
             let name = name.to_string();
-            api.engine
+            match api
+                .engine
                 .add_host(name, Some((workspace, &plan)), by)
                 .await
-                .ok()?
+            {
+                Ok(host) => host,
+                Err(Error::PlanLimit(_)) => return refuse(EnrolFailure::PlanLimit),
+                Err(_) => return None,
+            }
         }
         Enrols::Market(task) => {
             let host = api
@@ -732,7 +728,11 @@ fn text(frame: &KernelFrame) -> Message {
 /// `hex(sha256(secret ‖ ":" ‖ host_id))`: nothing per host to store or leak.
 /// Public so `sun serve --with-host` can credential its own host up front.
 pub fn host_key_for(secret: &str, host: HostId) -> String {
-    let digest = Sha256::digest(format!("{secret}:{host}").as_bytes());
+    sha256_hex(&format!("{secret}:{host}"))
+}
+
+fn sha256_hex(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -759,10 +759,8 @@ pub(crate) async fn create_token(
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let workspace = crate::routes::id(&workspace, "workspace")?;
     within_hosts(&api, workspace).await?;
-    let token = api
-        .hosts
-        .issue_token(Enrols::Workspace(workspace, caller.member_id))?;
-    let expires_at = chrono::Utc::now() + TOKEN_TTL;
+    let (token, expires_at) =
+        issue_token(&api, Enrols::Workspace(workspace, caller.member_id)).await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({
@@ -1371,17 +1369,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tokens_are_single_use_and_keys_depend_on_secret_and_host() {
-        let hub = HostHub::default();
-        let ops = Enrols::Workspace(WorkspaceId::generate(), None);
-        let token = hub.issue_token(ops).unwrap();
-        assert_eq!(token.len(), 64);
-        assert_eq!(hub.take_token("nope"), None);
-        assert_eq!(hub.take_token(&token), Some(ops));
-        assert_eq!(hub.take_token(&token), None);
-        let task = TaskId::generate();
-        let leased = hub.issue_token(Enrols::Market(task)).unwrap();
-        assert_eq!(hub.take_token(&leased), Some(Enrols::Market(task)));
+    fn keys_depend_on_secret_and_host() {
         let host = HostId::generate();
         assert_eq!(host_key_for("s", host), host_key_for("s", host));
         assert_ne!(host_key_for("s", host), host_key_for("t", host));

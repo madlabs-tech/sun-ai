@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use sun_core::host_protocol::{HOST_PROTOCOL_VERSION, HostFrame, KernelFrame};
+use sun_core::host_protocol::{EnrolFailure, HOST_PROTOCOL_VERSION, HostFrame, KernelFrame};
 use sun_core::{Error, HostId, Result};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -92,11 +92,19 @@ pub async fn enroll(
         token: token.into(),
         name: name.into(),
     };
-    let answer = ask(kernel_url, &enroll, "the enrolment").await?;
-    let KernelFrame::Enrolled { host_id, host_key } = answer else {
-        return Err(Error::Protocol(format!(
-            "expected `enrolled`, got {answer:?}"
-        )));
+    let (host_id, host_key) = match ask(kernel_url, &enroll, "the enrolment").await? {
+        KernelFrame::Enrolled { host_id, host_key } => (host_id, host_key),
+        KernelFrame::EnrolFailed { reason } => {
+            return Err(Error::Forbidden(format!(
+                "enrolment refused: {}",
+                refusal(reason)
+            )));
+        }
+        other => {
+            return Err(Error::Protocol(format!(
+                "expected `enrolled`, got {other:?}"
+            )));
+        }
     };
     let credentials = Credentials {
         kernel_url: kernel_url.into(),
@@ -105,6 +113,21 @@ pub async fn enroll(
     };
     credentials.save(data_dir)?;
     Ok(credentials)
+}
+
+fn refusal(reason: EnrolFailure) -> &'static str {
+    match reason {
+        EnrolFailure::InvalidToken => {
+            "the token is unknown or already used; mint a new one on the workspace's Hosts page"
+        }
+        EnrolFailure::Expired => "the token expired; mint a new one on the workspace's Hosts page",
+        EnrolFailure::PlanLimit => {
+            "the workspace's plan has no room for another host; detach one or upgrade the plan"
+        }
+        EnrolFailure::BadName => {
+            "the host name must be 1 to 64 characters without control characters; pass another --name"
+        }
+    }
 }
 
 /// What the kernel says about an enrolled host.
