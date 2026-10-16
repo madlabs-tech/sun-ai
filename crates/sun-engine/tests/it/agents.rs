@@ -1306,7 +1306,10 @@ impl Kernel {
     }
 
     async fn say(&self, task: TaskId, who: &str, text: &str) {
-        self.engine.comment(task, text, actor(who)).await.unwrap();
+        self.engine
+            .comment(task, text, actor(who), &[])
+            .await
+            .unwrap();
     }
 
     /// The `n`th session's `(resumed native id, host)`.
