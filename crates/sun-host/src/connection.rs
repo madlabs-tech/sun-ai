@@ -214,8 +214,13 @@ impl Host {
     /// connection that said `hello` ends.
     async fn serve(self: &Arc<Self>, credentials: &Credentials) -> Result<()> {
         let capabilities = self.hello_capabilities(credentials.host_id).await;
-        let (ws, _) = tokio_tungstenite::connect_async(credentials.kernel_url.as_str())
+        // A socket that accepts TCP but never finishes the handshake (an LB
+        // with a dead backend) would otherwise hang this dial forever.
+        let liveness = self.config.liveness;
+        let dial = tokio_tungstenite::connect_async(credentials.kernel_url.as_str());
+        let (ws, _) = tokio::time::timeout(liveness, dial)
             .await
+            .map_err(|_| Error::Unavailable(format!("kernel handshake took over {liveness:?}")))?
             .map_err(unavailable)?;
         let (mut sink, mut stream) = ws.split();
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -247,7 +252,6 @@ impl Host {
             }
             Ok::<_, Error>(())
         };
-        let liveness = self.config.liveness;
         let reader = async {
             // Silence past `liveness` (no frame, no pong): a dead socket.
             while let Some(msg) = tokio::time::timeout(liveness, stream.next())
