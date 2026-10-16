@@ -2,7 +2,8 @@
 //! agent sessions keep working until the test lets them finish. Covers the
 //! triggers (create, Backlog, comments, reassignment), a comment storm, the
 //! hidden system workflow, and the conversation on a task's thread (the
-//! agent's reply as a comment, a comment resuming its session).
+//! agent's reply as a comment, a comment resuming its session, @mentions
+//! and their chats).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use sun_core::model::{Assignee, Host, Priority, Run, Task};
+use sun_core::model::{Assignee, Host, Priority, Run, Task, TaskKind};
 use sun_core::{
     AgentId, BoxStream, EngineHandle, Error, HostEvent, HostId, HostLink, ModCall, ModLink, Result,
     Role, RunStatus, SessionHandle, SessionId, SessionSpec, Steer, StepStatus, StopMode, SunEvent,
@@ -365,7 +366,7 @@ impl Kernel {
     }
 
     async fn comment(&self, task: TaskId, text: &str) {
-        self.engine.comment(task, text, None).await.unwrap();
+        self.engine.comment(task, text, None, &[]).await.unwrap();
     }
 
     /// The bodies of the task's comments, oldest first.
@@ -450,7 +451,7 @@ async fn a_comment_storm_on_a_stopped_agent_task_queues_one_run() {
     k.host.finish.store(false, Ordering::SeqCst);
     let comments = (0..8).map(|i| {
         let engine = k.engine.clone();
-        tokio::spawn(async move { engine.comment(task, &format!("more {i}"), None).await })
+        tokio::spawn(async move { engine.comment(task, &format!("more {i}"), None, &[]).await })
     });
     for comment in comments.collect::<Vec<_>>() {
         comment.await.unwrap().unwrap();
@@ -793,7 +794,7 @@ async fn a_comment_resumes_the_agents_last_session_or_a_fresh_one_reads_the_thre
     // A comment: the next run resumes the last session with the new message.
     k.host.finish.store(false, Ordering::SeqCst);
     k.engine
-        .comment(task, "Also fix signup", ana())
+        .comment(task, "Also fix signup", ana(), &[])
         .await
         .unwrap();
     eventually("the resumed session", || async {
@@ -814,7 +815,7 @@ async fn a_comment_resumes_the_agents_last_session_or_a_fresh_one_reads_the_thre
     k.host.finish.store(false, Ordering::SeqCst);
     k.host.refuse_resume.store(true, Ordering::SeqCst);
     k.engine
-        .comment(task, "And the logout", ana())
+        .comment(task, "And the logout", ana(), &[])
         .await
         .unwrap();
     eventually("a fresh session", || async {
@@ -835,6 +836,145 @@ async fn a_comment_resumes_the_agents_last_session_or_a_fresh_one_reads_the_thre
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mention_wakes_only_the_named_agents_and_their_replies_land_on_the_task() {
+    let k = kernel().await;
+    let web = "https://github.com/acme/web.git";
+    k.engine
+        .add_workspace_repo(WorkspaceId::MAIN, web, None, "", "http://hook", "user:me")
+        .await
+        .unwrap();
+    let (ada, bob) = (k.agent("Ada").await, k.agent("Bob").await);
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::InProgress).await;
+    k.working(task).await;
+
+    // Bob is mentioned: Ada isn't steered; Bob answers from his own chat.
+    let ask = "@Bob is the v2 API stable?";
+    k.engine
+        .comment(task, ask, ana(), &[bob, bob])
+        .await
+        .unwrap();
+    eventually("Bob's session", || async { k.host.envelopes().len() == 2 }).await;
+    assert!(k.host.steers.lock().unwrap().is_empty());
+    let asked = k.host.envelopes()[1].clone();
+    let brief = "You are Bob.\n\nYou were mentioned on task MAIN-1 Fix the login.";
+    assert!(asked.contains(brief), "{asked}");
+    assert!(asked.contains("It 500s."), "{asked}");
+    assert!(asked.contains(&format!("- ana: {ask}")), "{asked}");
+    assert!(
+        !asked.contains("Clone what you need"),
+        "a chat clones nothing: {asked}"
+    );
+    assert_eq!(k.comments(task).await[0]["mentions"], json!([bob]));
+    let mut tx = k.store.read().await.unwrap();
+    let chat = tx.mention_chat(task, bob).await.unwrap().unwrap();
+    drop(tx);
+    assert_eq!(
+        (chat.kind, chat.number, chat.source_task_id),
+        (TaskKind::Chat, None, Some(task))
+    );
+    // Hidden: in no task list, no "tasks assigned" count.
+    let listed: Vec<TaskId> = k
+        .engine
+        .tasks()
+        .await
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(listed, [task]);
+    let counts = k.engine.agent_task_counts(|_| true).await.unwrap();
+    assert_eq!((counts.get(&ada), counts.get(&bob)), (Some(&1), None));
+
+    // Both finish; Bob's reply is on the task, by Bob.
+    k.host.finish.store(true, Ordering::SeqCst);
+    k.until(task, TaskStatus::NeedsYou).await;
+    eventually("Bob's reply", || async {
+        let comments = k.comments(task).await;
+        comments.iter().any(|c| c["by_agent"] == json!(bob))
+    })
+    .await;
+    assert!(k.comments(chat.id).await.is_empty());
+
+    // Bob again: the same chat, its next run; Ada sleeps on.
+    k.host.finish.store(false, Ordering::SeqCst);
+    let again = "@Bob and v3?";
+    k.engine.comment(task, again, ana(), &[bob]).await.unwrap();
+    eventually("Bob's second run", || async {
+        k.runs(chat.id).await.len() == 2
+    })
+    .await;
+    assert_eq!(k.runs(task).await.len(), 1);
+
+    // Naming the assignee wakes her on the task itself.
+    k.engine
+        .comment(task, "@Ada over to you", ana(), &[ada])
+        .await
+        .unwrap();
+    eventually("Ada's second run", || async {
+        k.runs(task).await.len() == 2
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mentions_name_up_to_five_active_agents_of_the_workspace_and_never_in_a_chat() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    let task = k.task(ada, TaskStatus::Backlog).await;
+    let refused =
+        |r: Result<sun_core::model::TaskActivity>| matches!(r, Err(Error::InvalidInput(_)));
+    let unknown = AgentId::generate();
+    assert!(refused(
+        k.engine.comment(task, "hi", ana(), &[unknown]).await
+    ));
+    let mut six = Vec::new();
+    for i in 0..6 {
+        six.push(k.agent(&format!("Helper {i}")).await);
+    }
+    assert!(refused(k.engine.comment(task, "all", ana(), &six).await));
+    let gone = k.agent("Gone").await;
+    k.engine.archive_agent(gone, "user:me").await.unwrap();
+    assert!(refused(k.engine.comment(task, "hi", ana(), &[gone]).await));
+    let policy = sun_core::model::SignupPolicy::default();
+    let ops = k
+        .engine
+        .create_workspace("Ops", None, None, &policy, "user:me")
+        .await
+        .unwrap()
+        .id;
+    let fields = AgentFields {
+        name: Some("Opsie".into()),
+        runtime_chain: Some(vec!["fake".into()]),
+        ..AgentFields::default()
+    };
+    let elsewhere = k
+        .engine
+        .create_agent(ops, fields, "user:me", &crate::support::unlimited())
+        .await
+        .unwrap()
+        .id;
+    assert!(refused(
+        k.engine.comment(task, "hi", ana(), &[elsewhere]).await
+    ));
+
+    // A chat takes no mentions.
+    let bob = six[0];
+    k.engine
+        .comment(task, "@Helper 0?", ana(), &[bob])
+        .await
+        .unwrap();
+    let mut tx = k.store.read().await.unwrap();
+    let chat = tx.mention_chat(task, bob).await.unwrap().unwrap();
+    drop(tx);
+    assert!(refused(
+        k.engine.comment(chat.id, "@Ada", ana(), &[ada]).await
+    ));
+    // Only the accepted comment was written.
+    assert_eq!(k.comments(task).await.len(), 1);
+}
+
 /// Runs of `task` still going (queued, running or paused).
 async fn live_runs(k: &Kernel, task: TaskId) -> usize {
     use sun_core::StateMachine;
@@ -851,7 +991,7 @@ async fn storm(k: &Kernel, task: TaskId, what: &str) {
         .map(|i| {
             let engine = k.engine.clone();
             let text = format!("{what} {i}");
-            tokio::spawn(async move { engine.comment(task, &text, None).await })
+            tokio::spawn(async move { engine.comment(task, &text, None, &[]).await })
         })
         .collect();
     for comment in comments {

@@ -34,8 +34,10 @@ export const find_agent = (id: string) => agents.find((a) => a.id === id);
 /** The agent with its readiness read now. */
 function view(a: Agent): Agent {
   const reasons = a.runtime_chain.map((id) => {
-    const r = RUNTIMES.find((x) => x.id === id);
-    return r ? (r.status === 'offline' ? `${id}: log in to ${id} on a host` : null) : `${id}: no host reports it`;
+    const of_name = RUNTIMES.filter((x) => x.name === id);
+    // Logged in on an online host; a limit doesn't log it out.
+    const ready = of_name.some((x) => ['idle', 'busy', 'limited'].includes(x.state));
+    return of_name.length ? (ready ? null : `${id}: log in to ${id} on a host`) : `${id}: no host reports it`;
   });
   const ready = reasons.some((r) => r === null);
   return clone({ ...a, ready, ready_reason: ready ? null : reasons.join('; ') });

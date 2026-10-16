@@ -103,10 +103,10 @@ async fn workspace_crud_scopes_workflows_and_tasks() {
             ..Task::new(workspace_id, "fix")
         };
         let number = tx.insert_task(&task).await.unwrap();
-        assert_eq!(number, 1, "numbers count per workspace");
+        assert_eq!(number, Some(1), "numbers count per workspace");
         let task = Task {
             number,
-            position: number.into(),
+            position: 1.0,
             ..task
         };
         tasks.push((workflow, task));

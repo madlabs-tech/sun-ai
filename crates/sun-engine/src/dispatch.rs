@@ -178,7 +178,8 @@ impl Executor {
         }
         let run = tx.get_run(step.run_id).await?;
         let me = tx.get_task(run.task_id).await?.assignee_agent_id;
-        let fresh = match conversation::thread(tx, run.task_id, me).await?.as_str() {
+        let on = conversation::thread_of(tx, run.task_id).await?;
+        let fresh = match conversation::thread(tx, on, me).await?.as_str() {
             "" => prompt,
             thread => format!("{prompt}\n\n{thread}"),
         };

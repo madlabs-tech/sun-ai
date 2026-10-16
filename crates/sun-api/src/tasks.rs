@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use serde::Deserialize;
 use sun_core::model::{TaskActivity, TaskKey};
-use sun_core::{Error, RunStatus, TaskId, TaskStatus};
+use sun_core::{AgentId, Error, RunStatus, TaskId, TaskStatus};
 use sun_engine::{Actor, TaskChange};
 
 use crate::Api;
@@ -134,9 +134,13 @@ pub(crate) async fn update(
 #[serde(deny_unknown_fields)]
 pub(crate) struct NewComment {
     body: String,
+    #[serde(default)]
+    mentions: Vec<AgentId>,
 }
 
-/// `POST /tasks/{id}/comments {body}` (1–10 000 characters).
+/// `POST /tasks/{id}/comments {body, mentions?}` (1–10 000 characters;
+/// `mentions`: at most five active agents of the task's workspace, which
+/// then wake instead of the assignee).
 pub(crate) async fn comment(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -146,7 +150,12 @@ pub(crate) async fn comment(
     let task = routes::id(&task, "task")?;
     let activity = api
         .engine
-        .comment(task, &input.body, Some(caller.task_actor()))
+        .comment(
+            task,
+            &input.body,
+            Some(caller.task_actor()),
+            &input.mentions,
+        )
         .await?;
     Ok((StatusCode::CREATED, Json(activity)))
 }

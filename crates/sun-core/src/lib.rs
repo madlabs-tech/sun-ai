@@ -84,6 +84,7 @@ pub mod model;
 pub mod procfs;
 pub mod redact;
 mod runtime;
+mod runtime_state;
 pub mod sso;
 mod status;
 
@@ -102,6 +103,7 @@ pub use runtime::{
     Readiness, RuntimeAdapter, SKILL_RUNTIMES_FILE, SessionHandle, SessionSpec, Steer, StopMode,
     Transcript, VmSpec, repo_skill_dirs, skill_folders,
 };
+pub use runtime_state::{Availability, Presence, RuntimeState};
 pub use status::{RunStatus, StateMachine, StepStatus, TaskStatus};
 
 /// UTC timestamp used everywhere.
