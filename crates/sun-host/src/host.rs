@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -13,7 +13,7 @@ use sun_core::host_protocol::{
 };
 use sun_core::{
     Error, ExecEnvSpec, HostCtx, HostId, Result, RuntimeAdapter, SessionHandle, SessionId,
-    SessionSpec, Steer, StopMode,
+    SessionSpec, Steer, StopMode, SunEvent,
 };
 
 use crate::buffer::{self, Buffer};
@@ -57,10 +57,19 @@ pub struct HostConfig {
     /// Extension exec envs (`kind: extension`); only a host in the kernel's
     /// process reaches mods. `None`: none.
     pub mod_envs: Option<exec_env::ModEnvs>,
+    /// How often runtime readiness is probed again; a change goes to the
+    /// kernel as a `capabilities` frame.
+    pub reprobe_every: Duration,
+    /// How often the host pings the kernel.
+    pub ping_every: Duration,
+    /// A connection that hears nothing (not even a pong) for this long is
+    /// dead: the host reconnects.
+    pub liveness: Duration,
 }
 
 impl HostConfig {
-    /// Defaults: 256 MB buffer, stats every 5 s, back-off 1 s → 60 s.
+    /// Defaults: 256 MB buffer, stats every 5 s, back-off 1 s → 60 s,
+    /// re-probe every 5 min, ping every 10 s, dead after 30 s of silence.
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
         let data_dir: PathBuf = data_dir.into();
         Self {
@@ -76,6 +85,9 @@ impl HostConfig {
             env_linger: Duration::from_secs(600),
             marketplace: false,
             mod_envs: None,
+            reprobe_every: Duration::from_secs(5 * 60),
+            ping_every: Duration::from_secs(10),
+            liveness: Duration::from_secs(30),
         }
     }
 }
@@ -89,6 +101,11 @@ pub struct Host {
     devices: Devices,
     previews: Previews,
     sessions: Mutex<HashMap<SessionId, Live>>,
+    /// This host's id, once [`Host::run`] knows it (for readiness checks).
+    pub(crate) host_id: OnceLock<HostId>,
+    /// The capabilities last reported on this connection; held while a
+    /// probe runs, so reports never go out of order.
+    reported: tokio::sync::Mutex<Option<Capabilities>>,
 }
 
 struct Live {
@@ -118,6 +135,8 @@ impl Host {
                 .map(|a| (a.id().to_owned(), a))
                 .collect(),
             sessions: Mutex::new(HashMap::new()),
+            host_id: OnceLock::new(),
+            reported: tokio::sync::Mutex::new(None),
             config,
         }))
     }
@@ -126,16 +145,20 @@ impl Host {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// What this host can run, for `hello`.
-    pub(crate) async fn capabilities(&self, host_id: HostId) -> Capabilities {
+    /// What this host can run. Every adapter is probed at once.
+    async fn capabilities(&self, host_id: HostId) -> Capabilities {
         let ctx = HostCtx { host_id };
-        let mut runtimes = Vec::new();
-        for (id, adapter) in &self.adapters {
-            runtimes.push(RuntimeCapability {
-                adapter: id.clone(),
-                readiness: adapter.readiness(&ctx).await,
-            });
-        }
+        let runtimes =
+            futures_util::future::join_all(self.adapters.iter().map(|(id, adapter)| async {
+                let (readiness, effort) =
+                    tokio::join!(adapter.readiness(&ctx), adapter.effort(&ctx));
+                RuntimeCapability {
+                    adapter: id.clone(),
+                    readiness,
+                    effort,
+                }
+            }))
+            .await;
         Capabilities {
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
@@ -143,6 +166,29 @@ impl Host {
             runtimes,
             devices: self.devices.detect().await,
             exec_envs: exec_env::detect(&self.config).await,
+        }
+    }
+
+    /// The capabilities for a new connection's `hello`; later re-probes
+    /// report against them.
+    pub(crate) async fn hello_capabilities(&self, host_id: HostId) -> Capabilities {
+        let mut reported = self.reported.lock().await;
+        let capabilities = self.capabilities(host_id).await;
+        *reported = Some(capabilities.clone());
+        capabilities
+    }
+
+    /// Probes again and sends a `capabilities` frame if anything changed
+    /// since the last report. A no-op before the first `hello`.
+    pub(crate) async fn reprobe(&self) {
+        let Some(&host_id) = self.host_id.get() else {
+            return;
+        };
+        let mut reported = self.reported.lock().await;
+        let capabilities = self.capabilities(host_id).await;
+        if reported.as_ref().is_some_and(|r| *r != capabilities) {
+            *reported = Some(capabilities.clone());
+            self.buffer.send(HostFrame::Capabilities { capabilities });
         }
     }
 
@@ -174,7 +220,8 @@ impl Host {
             | KernelFrame::PreviewStart { id, .. }
             | KernelFrame::PreviewHttp { id, .. }
             | KernelFrame::PreviewScreenshot { id, .. }
-            | KernelFrame::PreviewStop { id, .. } => *id,
+            | KernelFrame::PreviewStop { id, .. }
+            | KernelFrame::Reprobe { id } => *id,
         };
         let host = Arc::clone(self);
         tokio::spawn(async move {
@@ -286,6 +333,10 @@ impl Host {
             },
             KernelFrame::PreviewStop { task_id, .. } => {
                 self.previews.stop(task_id).await;
+                ReplyBody::Done
+            }
+            KernelFrame::Reprobe { .. } => {
+                self.reprobe().await;
                 ReplyBody::Done
             }
             KernelFrame::DeviceFlow { mut request, .. } => {
@@ -434,12 +485,21 @@ impl Host {
         );
         let host = Arc::clone(self);
         tokio::spawn(async move {
+            let mut auth_failed = false;
             while let Some(event) = events.next().await {
+                if let SunEvent::Error { message } = &event {
+                    auth_failed |= sun_runtime::auth_error::is_auth_error(message);
+                }
                 if let Err(e) = host.buffer.append(id, event) {
                     eprintln!("sun-host: buffer {id}: {e}");
                 }
             }
             host.buffer.finish(id);
+            // The login went bad: show it now, not at the next 5-min probe.
+            if auth_failed {
+                let host = Arc::clone(&host);
+                tokio::spawn(async move { host.reprobe().await });
+            }
             let worktree = host.sessions().get_mut(&id).map(|live| {
                 live.alive = false;
                 live.env_used = Instant::now();

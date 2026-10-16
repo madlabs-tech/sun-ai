@@ -172,6 +172,10 @@ pub(crate) fn router(api: Api) -> Router {
             "/workspaces/{id}/hosts/{host}",
             put(crate::hosts::attach_host).delete(crate::hosts::detach_host),
         )
+        .route(
+            "/workspaces/{id}/hosts/{host}/reprobe",
+            post(crate::hosts::reprobe_host),
+        )
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::ManageRuntimes,
         ])));

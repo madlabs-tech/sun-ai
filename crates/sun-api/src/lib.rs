@@ -143,6 +143,9 @@ pub struct Api {
     mail_url: Option<String>,
     /// Who may sign up and create workspaces (`with_signup_policy`).
     signup: Arc<sun_core::model::SignupPolicy>,
+    /// How often host connections are pinged, and the silence after which
+    /// one is dropped (`with_host_liveness`).
+    host_liveness: (std::time::Duration, std::time::Duration),
 }
 
 impl Api {
@@ -173,6 +176,7 @@ impl Api {
             mailer: None,
             mail_url: None,
             signup: Arc::default(),
+            host_liveness: (hosts::PING_EVERY, hosts::LIVENESS),
         }
     }
 
@@ -259,6 +263,17 @@ impl Api {
     /// preview routes answer 503.
     pub fn with_preview_host(mut self, host: HostId) -> Self {
         self.preview_host = Some(host);
+        self
+    }
+
+    /// Pings host connections every `ping_every` and drops one silent for
+    /// `liveness` (default 10 s / 30 s); tests shorten both.
+    pub fn with_host_liveness(
+        mut self,
+        ping_every: std::time::Duration,
+        liveness: std::time::Duration,
+    ) -> Self {
+        self.host_liveness = (ping_every, liveness);
         self
     }
 

@@ -1,5 +1,6 @@
 //! The WebSocket to the kernel: enrolment, the reconnect loop with
-//! jittered exponential back-off, `hello` + resend, and frame pumping.
+//! jittered exponential back-off, `hello` + resend, frame pumping, liveness
+//! pings and the periodic readiness re-probe.
 
 use std::hash::{BuildHasher, RandomState};
 use std::path::{Path, PathBuf};
@@ -169,9 +170,19 @@ async fn ask(kernel_url: &str, frame: &HostFrame, what: &str) -> Result<KernelFr
 
 impl Host {
     /// Runs the host until the task is dropped: keeps a connection to the
-    /// kernel open (reconnecting with jittered back-off) and samples session
-    /// resources every `stats_every`.
+    /// kernel open (reconnecting with jittered back-off), samples session
+    /// resources every `stats_every` and re-probes runtimes every
+    /// `reprobe_every`.
     pub async fn run(self: Arc<Self>, credentials: Credentials) {
+        let _ = self.host_id.set(credentials.host_id);
+        let reprobe = async {
+            let mut tick = tokio::time::interval(self.config.reprobe_every);
+            tick.tick().await; // `hello` just probed
+            loop {
+                tick.tick().await;
+                self.reprobe().await;
+            }
+        };
         let stats = async {
             let mut tick = tokio::time::interval(self.config.stats_every);
             let mut last_disk: Option<tokio::time::Instant> = None;
@@ -196,13 +207,13 @@ impl Host {
                 attempt = attempt.saturating_add(1);
             }
         };
-        tokio::join!(stats, connect);
+        tokio::join!(stats, connect, reprobe);
     }
 
     /// One connection. `Err` if it never got as far as `hello`; `Ok` once a
     /// connection that said `hello` ends.
     async fn serve(self: &Arc<Self>, credentials: &Credentials) -> Result<()> {
-        let capabilities = self.capabilities(credentials.host_id).await;
+        let capabilities = self.hello_capabilities(credentials.host_id).await;
         let (ws, _) = tokio_tungstenite::connect_async(credentials.kernel_url.as_str())
             .await
             .map_err(unavailable)?;
@@ -222,20 +233,34 @@ impl Host {
             for frame in resend {
                 sink.send(text(&frame)?).await.map_err(unavailable)?;
             }
-            while let Some(frame) = rx.recv().await {
-                sink.send(text(&frame)?).await.map_err(unavailable)?;
+            let every = self.config.ping_every;
+            let mut ping = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            loop {
+                let message = tokio::select! {
+                    frame = rx.recv() => match frame {
+                        Some(frame) => text(&frame)?,
+                        None => break,
+                    },
+                    _ = ping.tick() => Message::Ping(Default::default()),
+                };
+                sink.send(message).await.map_err(unavailable)?;
             }
             Ok::<_, Error>(())
         };
+        let liveness = self.config.liveness;
         let reader = async {
-            while let Some(msg) = stream.next().await {
+            // Silence past `liveness` (no frame, no pong): a dead socket.
+            while let Some(msg) = tokio::time::timeout(liveness, stream.next())
+                .await
+                .map_err(|_| Error::Unavailable(format!("kernel silent for {liveness:?}")))?
+            {
                 match msg.map_err(unavailable)? {
                     Message::Text(t) => match parse(&t) {
                         Ok(frame) => self.dispatch(frame),
                         Err(e) => eprintln!("sun-host: bad kernel frame: {e}"),
                     },
                     Message::Close(_) => break,
-                    _ => {} // pings are answered by tungstenite
+                    _ => {} // pings are answered by tungstenite; pongs only count as heard
                 }
             }
             Ok::<_, Error>(())

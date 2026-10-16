@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,6 +32,10 @@ const WAIT: Duration = Duration::from_secs(10);
 struct Fake {
     sessions: Mutex<HashMap<SessionId, FakeSession>>,
     specs: Mutex<Vec<SessionSpec>>,
+    /// The login went away: readiness says so.
+    logged_out: AtomicBool,
+    /// Sessions end at once on a rejected key.
+    auth_fails: AtomicBool,
 }
 
 struct FakeSession {
@@ -49,7 +54,7 @@ impl RuntimeAdapter for Fake {
         Readiness {
             installed: true,
             version: Some("1.0".into()),
-            logged_in: true,
+            logged_in: !self.logged_out.load(Ordering::SeqCst),
             detail: None,
         }
     }
@@ -70,6 +75,14 @@ impl RuntimeAdapter for Fake {
             })
             .unwrap();
         }
+        let tx = if self.auth_fails.load(Ordering::SeqCst) {
+            let message = "Invalid API key · Please run /login".into();
+            tx.send(SunEvent::Error { message }).unwrap();
+            tx.send(SunEvent::Exited { code: Some(1) }).unwrap();
+            None // the stream ends: the session is over
+        } else {
+            Some(tx)
+        };
         let handle = SessionHandle {
             session_id: spec.session_id,
             native_id: None,
@@ -79,7 +92,7 @@ impl RuntimeAdapter for Fake {
             spec.session_id,
             FakeSession {
                 child,
-                tx: Some(tx),
+                tx,
                 rx: Some(rx),
             },
         );
@@ -812,4 +825,180 @@ async fn vm_step(kernel: &mut Kernel, worktree: &Path) -> String {
     };
     assert_eq!(output.output, "gate-ran\n");
     format!("sun-{}", session_id.to_string().to_lowercase())
+}
+
+/// The host's `fake` readiness in a `hello` or `capabilities` report.
+fn fake_logged_in(capabilities: &sun_core::host_protocol::Capabilities) -> bool {
+    capabilities.runtimes[0].readiness.logged_in
+}
+
+/// The next `capabilities` frame, skipping session events.
+async fn next_capabilities(kernel: &mut Kernel) -> sun_core::host_protocol::Capabilities {
+    loop {
+        match kernel.recv(false).await {
+            HostFrame::Capabilities { capabilities } => return capabilities,
+            HostFrame::Event(_) | HostFrame::Disk(_) => {}
+            other => panic!("expected capabilities, got {other:?}"),
+        }
+    }
+}
+
+/// Sends `reprobe`; the `capabilities` frame that came before its reply, if any.
+async fn reprobe(kernel: &mut Kernel) -> Option<sun_core::host_protocol::Capabilities> {
+    kernel.next_id += 1;
+    let id = kernel.next_id;
+    kernel.send(&KernelFrame::Reprobe { id }).await;
+    let mut changed = None;
+    loop {
+        match kernel.recv(false).await {
+            HostFrame::Capabilities { capabilities } => changed = Some(capabilities),
+            HostFrame::Reply { id: got, body } if got == id => {
+                assert_eq!(body, ReplyBody::Done);
+                return changed;
+            }
+            HostFrame::Disk(_) => {}
+            other => panic!("expected the reprobe reply, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reprobe_reports_a_changed_login_only_and_after_an_auth_error() {
+    let (listener, url) = listen().await;
+    let data_dir = temp_dir("reprobe");
+    let mut config = HostConfig::new(&data_dir);
+    config.reprobe_every = Duration::from_secs(3600);
+    let fake = Arc::new(Fake::default());
+    let host = Host::open(config, vec![fake.clone()]).unwrap();
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let running = tokio::spawn(Arc::clone(&host).run(credentials));
+    let mut kernel = Kernel::accept(&listener).await;
+    kernel.hello().await;
+
+    // "Check again" with nothing changed: just the reply.
+    assert_eq!(reprobe(&mut kernel).await, None);
+
+    // Logged out since `hello`: the change comes first, then the reply.
+    fake.logged_out.store(true, Ordering::SeqCst);
+    assert!(!fake_logged_in(&reprobe(&mut kernel).await.unwrap()));
+    assert_eq!(reprobe(&mut kernel).await, None, "reported once");
+
+    // Logged in again; then a session ends on a rejected key and the host
+    // re-probes on its own, without waiting for the 5-min tick.
+    fake.logged_out.store(false, Ordering::SeqCst);
+    assert!(fake_logged_in(&reprobe(&mut kernel).await.unwrap()));
+    let task_id = TaskId::generate();
+    let ReplyBody::Worktree { path } = kernel
+        .request(|id| KernelFrame::WorktreePrepare {
+            id,
+            worktree: Worktree::Folder { task_id },
+        })
+        .await
+    else {
+        panic!()
+    };
+    // Re-probe in the CLI shows the bad login, as `claude auth status` would.
+    fake.auth_fails.store(true, Ordering::SeqCst);
+    fake.logged_out.store(true, Ordering::SeqCst);
+    let spec = SessionSpec {
+        skills: None,
+        session_id: SessionId::generate(),
+        run_id: RunId::generate(),
+        step_key: StepKey::new("implement").unwrap(),
+        worktree: path,
+        envelope: "do it".into(),
+        envelope_parts: None,
+        model: None,
+        mcp_config: None,
+        env: BTreeMap::new(),
+        exec_env: Default::default(),
+        resume: None,
+        permission_mode: None,
+        byo_key: None,
+    };
+    kernel.next_id += 1;
+    let start = kernel.next_id;
+    kernel
+        .send(&KernelFrame::SessionStart {
+            id: start,
+            adapter: "fake".into(),
+            spec: Box::new(spec),
+        })
+        .await;
+    let capabilities = loop {
+        match kernel.recv(false).await {
+            HostFrame::Capabilities { capabilities } => break capabilities,
+            HostFrame::Reply { id, .. } if id == start => {}
+            HostFrame::Event(_) | HostFrame::Disk(_) => {}
+            other => panic!("expected capabilities, got {other:?}"),
+        }
+    };
+    assert!(!fake_logged_in(&capabilities));
+    running.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_periodic_reprobe_sends_a_change_once() {
+    let (listener, url) = listen().await;
+    let data_dir = temp_dir("reprobe-tick");
+    let mut config = HostConfig::new(&data_dir);
+    config.reprobe_every = Duration::from_millis(50);
+    let fake = Arc::new(Fake::default());
+    let host = Host::open(config, vec![fake.clone()]).unwrap();
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let running = tokio::spawn(Arc::clone(&host).run(credentials));
+    let mut kernel = Kernel::accept(&listener).await;
+    kernel.hello().await;
+    // `claude login` on the machine after the host started.
+    fake.logged_out.store(true, Ordering::SeqCst);
+    assert!(!fake_logged_in(&next_capabilities(&mut kernel).await));
+    fake.logged_out.store(false, Ordering::SeqCst);
+    assert!(fake_logged_in(&next_capabilities(&mut kernel).await));
+    // Ten more probes see no change: nothing more is sent.
+    let quiet = tokio::time::timeout(Duration::from_millis(500), kernel.recv(false)).await;
+    assert!(
+        matches!(quiet, Err(_) | Ok(HostFrame::Disk(_))),
+        "{quiet:?}"
+    );
+    running.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kernel_that_stops_answering_pings_is_redialled() {
+    let (listener, url) = listen().await;
+    let data_dir = temp_dir("liveness");
+    let mut config = HostConfig::new(&data_dir);
+    config.ping_every = Duration::from_millis(50);
+    config.liveness = Duration::from_millis(300);
+    config.backoff_min = Duration::from_millis(20);
+    config.backoff_max = Duration::from_millis(50);
+    let host = Host::open(config, vec![Arc::new(Fake::default())]).unwrap();
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let running = tokio::spawn(Arc::clone(&host).run(credentials));
+    let mut kernel = Kernel::accept(&listener).await;
+    kernel.hello().await;
+    // A half-open socket: the kernel side stays up but never reads again, so
+    // the host's pings go unanswered. The host gives up and dials again.
+    let started = std::time::Instant::now();
+    let mut again = Kernel::accept(&listener).await;
+    again.hello().await;
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(kernel);
+    running.abort();
 }
