@@ -36,7 +36,7 @@ steps:
     who: [role:admin]
 ";
 
-const AGENT: &str = "
+pub(crate) const AGENT: &str = "
 name: agentic
 steps:
   - id: work
@@ -73,7 +73,7 @@ async fn until(app: &Router, task: &str, status: &str) -> Value {
     panic!("task {task} never reached {status}");
 }
 
-async fn until_online(app: &Router, host: HostId) {
+pub(crate) async fn until_online(app: &Router, host: HostId) {
     for _ in 0..500 {
         let (_, hosts) = call(app, "GET", "/api/v1/hosts", None).await;
         if hosts
@@ -89,7 +89,7 @@ async fn until_online(app: &Router, host: HostId) {
     panic!("host {host} never came online");
 }
 
-async fn new_task(app: &Router, yaml: &str) -> Value {
+pub(crate) async fn new_task(app: &Router, yaml: &str) -> Value {
     let (status, workflow) = call(
         app,
         "POST",
@@ -598,9 +598,9 @@ async fn rest_auth_validation_approve_cancel_bump() {
     );
 }
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+pub(crate) type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-async fn send(socket: &mut Socket, frame: Value) {
+pub(crate) async fn send(socket: &mut Socket, frame: Value) {
     socket
         .send(Message::Text(frame.to_string().into()))
         .await
@@ -608,7 +608,7 @@ async fn send(socket: &mut Socket, frame: Value) {
 }
 
 /// The next kernel frame, or `None` once the kernel closed the socket.
-async fn recv(socket: &mut Socket) -> Option<Value> {
+pub(crate) async fn recv(socket: &mut Socket) -> Option<Value> {
     loop {
         let message = tokio::time::timeout(Duration::from_secs(10), socket.next())
             .await
@@ -621,7 +621,7 @@ async fn recv(socket: &mut Socket) -> Option<Value> {
     }
 }
 
-fn hello(host: HostId, key: &str) -> Value {
+pub(crate) fn hello(host: HostId, key: &str) -> Value {
     json!({
         "type": "hello", "host_id": host, "host_key": key, "protocol": "2.0",
         "capabilities": { "os": "linux", "arch": "x86_64", "cpus": 4, "runtimes": [
@@ -637,7 +637,7 @@ fn hello(host: HostId, key: &str) -> Value {
 
 /// One `status`/`leave` connection: the kernel's answer, or `None` when it
 /// closed without one.
-async fn ask(url: &str, frame: Value) -> Option<Value> {
+pub(crate) async fn ask(url: &str, frame: Value) -> Option<Value> {
     let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
     send(&mut socket, frame).await;
     let answer = recv(&mut socket).await;
@@ -2408,7 +2408,7 @@ async fn device_screenshots_are_served_only_for_their_run() {
 
 /// Serves `k`, connects a scripted host (`hello`, with `capabilities`
 /// fields merged in) and waits until it is online.
-async fn scripted_host(k: &common::Kernel, capabilities: Value) -> Socket {
+pub(crate) async fn scripted_host(k: &common::Kernel, capabilities: Value) -> Socket {
     let mut hello = kernel_host_hello(k);
     for (field, value) in capabilities.as_object().unwrap() {
         hello["capabilities"][field] = value.clone();
@@ -2417,7 +2417,7 @@ async fn scripted_host(k: &common::Kernel, capabilities: Value) -> Socket {
 }
 
 /// A protocol 2.0 `hello` of `k`'s own host, with its real key.
-fn kernel_host_hello(k: &common::Kernel) -> Value {
+pub(crate) fn kernel_host_hello(k: &common::Kernel) -> Value {
     let key: String = Sha256::digest(format!("{SECRET}:{}", k.host).as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -2426,7 +2426,7 @@ fn kernel_host_hello(k: &common::Kernel) -> Value {
 }
 
 /// Serves `app`, connects as `host` with `hello` and waits until it is online.
-async fn connect_host(app: &Router, host: HostId, hello: Value) -> Socket {
+pub(crate) async fn connect_host(app: &Router, host: HostId, hello: Value) -> Socket {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/host", listener.local_addr().unwrap());
     tokio::spawn(axum::serve(listener, app.clone()).into_future());
@@ -2587,7 +2587,7 @@ async fn a_host_that_stops_answering_pings_goes_offline() {
 
 /// Plays the host's side of starting an agent session in `path`; the
 /// session id.
-async fn host_starts_session(host: &mut Socket, path: &str) -> Value {
+pub(crate) async fn host_starts_session(host: &mut Socket, path: &str) -> Value {
     let prepare = recv(host).await.unwrap();
     assert_eq!(prepare["type"], "worktree.prepare");
     let body = json!({ "kind": "worktree", "path": path });
@@ -2752,7 +2752,7 @@ async fn per_host_cap_queues_the_second_task() {
 
 /// A host's `runtimes` report: Claude Code installed, logged in or not, and
 /// Codex not installed (no binary: not a runtime).
-fn claude_code(logged_in: bool) -> Value {
+pub(crate) fn claude_code(logged_in: bool) -> Value {
     let detail = if logged_in {
         Value::Null
     } else {
@@ -2767,7 +2767,7 @@ fn claude_code(logged_in: bool) -> Value {
 }
 
 /// Enrols a host named `name` into Main and connects it with `runtimes`.
-async fn enrol_host(app: &Router, name: &str, runtimes: Value) -> (HostId, Socket) {
+pub(crate) async fn enrol_host(app: &Router, name: &str, runtimes: Value) -> (HostId, Socket) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}/host", listener.local_addr().unwrap());
     tokio::spawn(axum::serve(listener, app.clone()).into_future());
@@ -2782,7 +2782,10 @@ async fn enrol_host(app: &Router, name: &str, runtimes: Value) -> (HostId, Socke
 }
 
 /// `GET /runtimes` entries of `tool`, keyed by host id.
-async fn runtimes_of(app: &Router, tool: &str) -> std::collections::HashMap<String, Value> {
+pub(crate) async fn runtimes_of(
+    app: &Router,
+    tool: &str,
+) -> std::collections::HashMap<String, Value> {
     let (status, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
     assert_eq!(status, StatusCode::OK, "{runtimes}");
     runtimes
@@ -2795,7 +2798,7 @@ async fn runtimes_of(app: &Router, tool: &str) -> std::collections::HashMap<Stri
 }
 
 /// Polls until `host`'s `tool` entry is in `state`.
-async fn until_state(app: &Router, tool: &str, host: HostId, state: &str) -> Value {
+pub(crate) async fn until_state(app: &Router, tool: &str, host: HostId, state: &str) -> Value {
     for _ in 0..500 {
         if let Some(entry) = runtimes_of(app, tool).await.remove(&host.to_string())
             && entry["state"] == state
