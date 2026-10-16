@@ -87,13 +87,23 @@
     acting = '';
   }
 
+  const INSTALL = 'curl -fsSL https://get-sun.madlabs.tech | sh -s -- --no-service';
   let enrol = $state<HostToken | null>(null);
   let enrol_open = $state(false);
-  const command = $derived(enrol ? `sun host join ${enrol.token}` : '');
+  let host_name = $state('');
+  /** Single-quoted for the shell unless it is plainly safe. */
+  const shell_word = (word: string) => (/^[\w.@-]+$/.test(word) ? word : `'${word.replaceAll("'", `'\\''`)}'`);
+  const command = $derived.by(() => {
+    if (!enrol) return '';
+    const name = host_name.trim() ? ` --name ${shell_word(host_name.trim())}` : '';
+    return `sun host join --kernel ${enrol.kernel_url}${name} ${enrol.token}`;
+  });
+  const valid_for = (h: HostToken) => Math.max(0, Math.round((new Date(h.expires_at).getTime() - Date.now()) / 60_000));
 
   async function add_host() {
     try {
       enrol = await api.create_host_token(workspace);
+      host_name = '';
       enrol_open = true;
     } catch (e) {
       toast('danger', 'Couldn’t create a join token', error_text(e));
@@ -101,6 +111,7 @@
   }
 
   const copy = () => copy_text(command, 'Command copied');
+  const copy_install = () => copy_text(INSTALL, 'Command copied');
 
   const TOOL_NAMES: Record<string, string> = { ios_simulator: 'iOS Simulator', android_emulator: 'Android emulator', maestro: 'Maestro' };
   /** Device tools that aren't ready, with the fix the host reported. */
@@ -147,9 +158,15 @@
 </PageHeader>
 
 <Dialog bind:open={enrol_open} onclose={() => (enrol_open = false)} title="Add a host">
-  <Input label="Run this on the machine" mono readonly value={command} hint="Works once, until {enrol ? clock(enrol.expires_at) : ''}. The host serves {here}.">
-    {#snippet trailing()}<IconButton icon="copy" label="Copy command" variant="ghost" size="sm" onclick={copy} />{/snippet}
-  </Input>
+  <div class="sun-hosts__enrol">
+    <Input label="Host name" bind:value={host_name} placeholder="The machine’s hostname" hint="Shown in the host list. Leave it empty for the hostname." />
+    <Input label="Run this on the machine" mono readonly value={command} hint={enrol ? `Works once, for ${valid_for(enrol)} min (until ${clock(enrol.expires_at)}). The host serves ${here}.` : ''}>
+      {#snippet trailing()}<IconButton icon="copy" label="Copy command" variant="ghost" size="sm" onclick={copy} />{/snippet}
+    </Input>
+    <Input label="No sun on the machine yet? Install it first" mono readonly value={INSTALL}>
+      {#snippet trailing()}<IconButton icon="copy" label="Copy install command" variant="ghost" size="sm" onclick={copy_install} />{/snippet}
+    </Input>
+  </div>
   {#snippet footer()}<Button variant="secondary" onclick={() => (enrol_open = false)}>Done</Button>{/snippet}
 </Dialog>
 
@@ -274,6 +291,11 @@
   }
   .sun-hosts__others > .sun-row__meta {
     margin: 0;
+  }
+  .sun-hosts__enrol {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
   }
   .sun-kill__lede {
     margin: 0 0 var(--space-3);

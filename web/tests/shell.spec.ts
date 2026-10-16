@@ -117,7 +117,11 @@ test('cancel asks first', async ({ page }) => {
 test('add host shows a single-use join command', async ({ page }) => {
   await open(page, 'hosts');
   await page.getByRole('button', { name: 'Add host' }).click();
-  await expect(page.getByLabel('Run this on the machine')).toHaveValue(/^sun host join sun_enrol_/);
+  const command = page.getByLabel('Run this on the machine');
+  await expect(command).toHaveValue(/^sun host join --kernel http:\/\/\S+ sun_enrol_\w+$/);
+  await expect(page.getByText(/Works once, for (59|60) min/)).toBeVisible();
+  await page.getByLabel('Host name').fill("harry's mac");
+  await expect(command).toHaveValue(/ --name 'harry'\\''s mac' sun_enrol_/);
 });
 
 test('360 px: bottom tabs, no page overflow, task opens full screen', async ({ page }) => {

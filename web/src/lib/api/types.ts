@@ -871,6 +871,8 @@ export interface Features {
 export interface HostToken {
   token: string;
   expires_at: Timestamp;
+  /** The kernel's public URL: `sun host join --kernel` */
+  kernel_url: string;
 }
 
 /** GET /api/v1/workflows/{id} — the latest version with its file (the builder loads this) */

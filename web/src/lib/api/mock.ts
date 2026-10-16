@@ -1226,7 +1226,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
     // enrolled the host; anyone else gets 404) and detach (404 when it isn't attached), all with manage_runtimes there.
     case 'POST /workspaces/:id/hosts': // /workspaces/{id}/hosts/tokens
       need('manage_runtimes', find_workspace(parts[1]).id, 'manage runtimes');
-      return { token: 'sun_enrol_' + Math.random().toString(36).slice(2, 14), expires_at: new Date(Date.now() + 3600_000).toISOString() };
+      return { token: 'sun_enrol_' + Math.random().toString(36).slice(2, 14), expires_at: new Date(Date.now() + 3600_000).toISOString(), kernel_url: location.origin };
     case 'PUT /workspaces/:id/hosts':
     case 'DELETE /workspaces/:id/hosts': {
       const workspace = find_workspace(parts[1]).id;
