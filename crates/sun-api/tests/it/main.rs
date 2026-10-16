@@ -15,6 +15,7 @@ mod knowledge;
 mod marketplace;
 mod mcp_servers;
 mod membership;
+mod mentions;
 mod mod_install;
 mod no_secret_leaks;
 mod payments;
