@@ -516,9 +516,12 @@ export interface RunEvent {
 }
 
 export type RuntimeSource = 'byo_runtime' | 'byo_key' | 'credits';
-export type RuntimeStatus = 'ready' | 'busy' | 'cooling_down' | 'offline';
+/** What a runtime is doing, derived with precedence offline > unsupported > needs_login > limited > busy > idle.
+ *  Public API vocabulary (TRD §6/§7, a one-way door): don't add, rename or alias a value. */
+export type RuntimeState = 'offline' | 'unsupported' | 'needs_login' | 'limited' | 'busy' | 'idle';
+/** `outdated` and `auth_unknown` are badges on idle/busy, not states. */
+export type RuntimeAvailability = 'ready' | 'needs_login' | 'limited' | 'outdated' | 'unsupported' | 'auth_unknown';
 
-/** GET /api/v1/runtimes */
 /** GET /api/v1/agents: an ecosystem-wide agent. A task assigned to it runs a hidden one-step workflow
  *  with its instructions, runtime chain and skills on the task's workspace. */
 export interface Agent {
@@ -551,25 +554,40 @@ export interface AgentFields {
   skill_ids?: string[];
 }
 
+/** GET /api/v1/runtimes: one per (host, tool), then the workspace's key-backed runtimes (`host: null`). */
 export interface Runtime {
+  /** `<host id>:<tool>` for a host's CLI; the name for a key-backed one */
   id: string;
-  /** The workspace whose chains it serves; `null`/absent for one a host reports (every workspace's). */
-  workspace_id?: Ulid | null;
+  /** What chains name: the tool id for a host's CLI */
   name: string;
+  tool: string;
+  /** Same as `tool` (kept for older screens) */
   adapter: string;
-  source: RuntimeSource;
-  status: RuntimeStatus;
+  family: string | null;
+  version: string | null;
+  /** The host that reported the CLI; `null` for a key-backed runtime (any online host with its CLI) */
+  host: { id: Ulid; name: string } | null;
+  presence: 'online' | 'offline';
+  availability: RuntimeAvailability;
+  /** Live sessions; `max` is `null` until hosts report their cap. `null` for a key-backed runtime. */
+  load: { active: number; max: number | null } | null;
+  state: RuntimeState;
+  /** What to do about the state, e.g. "Run `claude auth login` on vps-sg-1" */
+  detail: string | null;
   cooldown_until: Timestamp | null;
-  sessions: number;
-  max_sessions: number;
-  /** Sent with every new session of this runtime; `null` = the host's sun.yaml default */
+  probed_at: Timestamp | null;
+  last_seen_at: Timestamp | null;
+  /** The workspace whose chains it serves; `null` for a host's CLI (every workspace's). */
+  workspace_id: Ulid | null;
+  source: RuntimeSource;
+  /** Sent with every new session of this tool, on every host; `null` = the host's sun.yaml default */
   permission_mode: PermissionMode | null;
   /** The operator allows `bypass_permissions` (sun.yaml `runtimes.allow_bypass`) */
   allow_bypass: boolean;
-  /** A stored `byo_key` runtime's source; absent/`null` for the others */
-  config?: ByoKeyConfig | null;
-  /** A `credits` runtime's gateway model (OpenCode only); absent/`null` for the others */
-  model?: string | null;
+  /** A stored `byo_key` runtime's source; `null` for the others */
+  config: ByoKeyConfig | null;
+  /** A `credits` runtime's gateway model (OpenCode only); `null` for the others */
+  model: string | null;
 }
 
 /** Claude Code's permission modes; every adapter maps them. */
