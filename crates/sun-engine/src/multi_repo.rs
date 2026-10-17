@@ -701,7 +701,17 @@ mod tests {
         // Reopened and retried: waiting for the merge again; the merge passes it.
         engine.record_pr_state(&state("open")).await.unwrap();
         let step = StepKey::new("merged").unwrap();
-        engine.retry_step(run, step, "ana".into()).await.unwrap();
+        engine
+            .retry_step(
+                run,
+                step,
+                crate::Actor {
+                    member_id: None,
+                    name: "user:ana".into(),
+                },
+            )
+            .await
+            .unwrap();
         until_waits(2).await;
         append(
             crate::quality::MERGED_TRIGGER,

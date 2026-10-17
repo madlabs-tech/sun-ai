@@ -12,20 +12,23 @@
 //! 4. The exec env is a container or VM, at placement.
 //! 5. The host refuses bypass on bare metal.
 //!
-//! The person is whoever made the run go: the commenter, mover or assigner
-//! (each queue path's actor), the retry's caller, or the webhook's caller.
-//! A run no person queued (a cron schedule, a mod event, an eval) acts for
-//! the deployment: it runs what was saved, which only the bypass gate's
-//! holders could save. The check is per run: a step retried, resumed or
-//! steered later still acts for whoever queued the run.
+//! The person is whoever last made the run go: the commenter, mover or
+//! assigner (each queue path's actor), the retry's caller, the webhook's
+//! caller, or the latest person to retry one of its steps (`acts_for` on
+//! `step_retry`; a `retry:` policy's retry changes nothing). A run no person
+//! queued (a cron schedule, a mod event, an eval) acts for the deployment:
+//! it runs what was saved, which only the bypass gate's holders could save.
+//! Known gap (BLO-169): a resume, runtime switch or steer still acts for
+//! whoever made the run go before it.
 
 use serde_json::{Value, json};
 use sun_core::model::{ActivityKind, AuditAction, BypassPolicy, OWNER_ISSUER, Run};
 use sun_core::{Error, MemberId, PermissionMode, Result, StepKey};
-use sun_store::{AuditRepo, EventLog, MemberRepo, RunRepo, SettingRepo, Tx};
+use sun_store::{AuditRepo, EventLog, EventQuery, MemberRepo, RunRepo, SettingRepo, Tx};
 
 use crate::Engine;
 use crate::executor::Actor;
+use crate::executor::retry::STEP_RETRY;
 
 /// `kernel_setting` key of the [`BypassPolicy`].
 const POLICY: &str = "bypass_policy";
@@ -33,11 +36,14 @@ const POLICY: &str = "bypass_policy";
 pub(crate) const BYPASS_CAPPED: &str = "bypass_capped";
 /// Its key in the first `run_status` event: who queued the run.
 const BY: &str = "by";
+/// Its key in a person's `step_retry` event: whom the run acts for from there.
+pub(crate) const ACTS_FOR: &str = "acts_for";
 /// What a capped session runs as.
 const CAPPED_TO: PermissionMode = PermissionMode::AcceptEdits;
 
-/// The `by` of a run's first `run_status` event for `actor`: their member
-/// id, the token holder's [`OWNER_ISSUER`], nothing for the engine.
+/// The `by` of a run's first `run_status` event (or a `step_retry`'s
+/// [`ACTS_FOR`]) for `actor`: their member id, the token holder's
+/// [`OWNER_ISSUER`], nothing for the engine.
 pub(crate) fn by_of(actor: Option<&Actor>) -> Option<Value> {
     let actor = actor?;
     Some(match actor.member_id {
@@ -46,11 +52,20 @@ pub(crate) fn by_of(actor: Option<&Actor>) -> Option<Value> {
     })
 }
 
-/// Who `run` acts for: `None` for the deployment (the token holder, or no
+/// Who `run` acts for: the latest person to retry one of its steps, else
+/// whoever queued it. `None` for the deployment (the token holder, or no
 /// person); else the member.
 async fn trigger(tx: &mut Tx, run: &Run) -> Result<Option<MemberId>> {
-    let first = tx.events_after(Some(run.id), 0, 1).await?;
-    let by = first.first().and_then(|e| e.payload.get(BY)).cloned();
+    let retries = tx
+        .search_events(run.id, Some(STEP_RETRY), None, 0, u32::MAX)
+        .await?;
+    let by = match retries.iter().rev().find_map(|e| e.payload.get(ACTS_FOR)) {
+        Some(by) => Some(by.clone()),
+        None => {
+            let first = tx.events_after(Some(run.id), 0, 1).await?;
+            first.first().and_then(|e| e.payload.get(BY)).cloned()
+        }
+    };
     match by.as_ref().and_then(Value::as_str) {
         None | Some(OWNER_ISSUER) => Ok(None),
         Some(id) => id
@@ -420,6 +435,68 @@ steps:
                 }
                 false => assert!(capped.is_empty() && thread.is_empty() && audit.is_empty()),
             }
+        }
+    }
+
+    /// A step retry makes the run act for its retrier: under `off` a member
+    /// retrying the failed gate of the owner's run gets the bypass step
+    /// capped, and the owner retrying a member's run gets it uncapped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_step_retry_acts_for_its_retrier() {
+        const FLAKY: &str = "name: flaky
+exec_env: { kind: container, image: 'node:22' }
+steps:
+  - id: check
+    type: gate
+    gates: [{test: {command: \"test -f ok || { touch ok; false; }\"}}]
+  - id: implement
+    type: agent
+    prompt: fix it
+    permission_mode: bypass_permissions
+    needs: [check]
+";
+        for (owner_queues, want) in [(true, "accept_edits"), (false, "bypass_permissions")] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path()).await.unwrap();
+            let (engine, local) = start(&store, dir.path(), true).await;
+            let mut tx = store.begin().await.unwrap();
+            let ana = tx
+                .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+                .await
+                .unwrap();
+            let olu = tx
+                .upsert_member("local", "olu@sun.test", "olu", Some("olu@sun.test"), true)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let actor = |member_id: MemberId, name: &str| Actor {
+                member_id: Some(member_id),
+                name: format!("user:{name}"),
+            };
+            let (queuer, retrier) = match owner_queues {
+                true => (actor(olu.id, "olu"), actor(ana.id, "ana")),
+                false => (actor(ana.id, "ana"), actor(olu.id, "olu")),
+            };
+            let run_id = seed(&store, FLAKY).await;
+            let mut queued = json!({ "from": null, "to": "queued", "reason": "created" });
+            queued["by"] = by_of(Some(&queuer)).unwrap();
+            let mut tx = store.begin().await.unwrap();
+            tx.append_event(NewEvent::new(run_id, None, "run_status", queued))
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+
+            engine.start_run(run_id).await.unwrap();
+            let run = until_run_ends(&store, run_id).await;
+            assert_eq!(run.status, RunStatus::Failed, "the gate fails once");
+            let check = StepKey::new("check").unwrap();
+            engine.retry_step(run_id, check, retrier).await.unwrap();
+            let run = until_run_ends(&store, run_id).await;
+            assert_eq!(run.status, RunStatus::Succeeded);
+            let got = local.modes.lock().unwrap().clone();
+            assert_eq!(modes(&got), [Some(want)], "owner queued: {owner_queues}");
+            let capped = events(&store, run_id, BYPASS_CAPPED).await;
+            assert_eq!(capped.len(), usize::from(owner_queues), "{capped:?}");
         }
     }
 

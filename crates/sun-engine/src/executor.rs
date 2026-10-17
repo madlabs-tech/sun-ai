@@ -408,7 +408,7 @@ enum Command {
     RetryStep {
         run_id: RunId,
         step_key: StepKey,
-        by: String,
+        by: tasks::Actor,
         reply: retry::Reply,
     },
     /// A human decides an `unknown` outbox row (`resolve`).

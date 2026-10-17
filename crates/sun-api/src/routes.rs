@@ -1131,7 +1131,7 @@ async fn retry_step(
         .map_err(|_| ApiError::invalid(format!("`{key}` is not a valid step key.")))?;
     let run = api.engine.run(run_id).await?;
     api.engine
-        .retry_step(run_id, step_key, by.principal.user)
+        .retry_step(run_id, step_key, by.task_actor())
         .await?;
     summary(&api, run.task_id).await
 }

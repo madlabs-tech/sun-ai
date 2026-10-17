@@ -30,10 +30,13 @@ use tokio::sync::oneshot;
 
 use super::failover::{HANDOFF_STARTED, Handoff};
 use super::{Command, Effect, Engine, Executor, append, kind, move_run, status_payload};
+use crate::executor::Actor;
 use crate::{queue, state};
 
-/// A retry was asked for; payload `{step_id, attempt, by}` (`by`: a user,
-/// or `retry_policy`). `step_id` is the new attempt.
+/// A retry was asked for; payload `{step_id, attempt, by, acts_for}` (`by`:
+/// the audit actor, or `retry_policy`; `acts_for`, a person's retry only:
+/// whom the run acts for from here, see [`crate::bypass`]). `step_id` is the
+/// new attempt.
 pub(crate) const STEP_RETRY: &str = "step_retry";
 /// A `retry:` policy will retry a failed attempt; `{step_id, attempt, after_secs}`.
 const RETRY_SCHEDULED: &str = "retry_scheduled";
@@ -54,12 +57,13 @@ fn retryable(status: StepStatus) -> bool {
 }
 
 impl Engine {
-    /// Retries step `step_key` of `run_id` now, as user `by`: a new
+    /// Retries step `step_key` of `run_id` now, as `by`: a new
     /// attempt in the same worktree; succeeded steps never run again. A run
     /// that ended `failed`/`stalled`/`looping`/`budget_exceeded` reopens.
     /// `InvalidInput` when the step's latest attempt didn't end badly or
     /// the run can't reopen (succeeded, cancelled, or a newer run exists).
-    pub async fn retry_step(&self, run_id: RunId, step_key: StepKey, by: String) -> Result<()> {
+    /// From here the run acts for `by` (its bypass cap, [`crate::bypass`]).
+    pub async fn retry_step(&self, run_id: RunId, step_key: StepKey, by: Actor) -> Result<()> {
         self.request(|reply| Command::RetryStep {
             run_id,
             step_key,
@@ -75,7 +79,7 @@ impl Executor {
         &mut self,
         run_id: RunId,
         step_key: StepKey,
-        by: String,
+        by: Actor,
     ) -> Result<()> {
         let mut tx = self.store.begin().await?;
         let run = tx.get_run(run_id).await?;
@@ -112,7 +116,7 @@ impl Executor {
         }
         for previous in again {
             let def = definition(&workflow, &previous.step_key)?;
-            self.new_attempt(&mut tx, def, &previous, &by, &mut effects)
+            self.new_attempt(&mut tx, def, &previous, Some(&by), &mut effects)
                 .await?;
         }
         self.advance(&mut tx, run_id, &mut effects).await?;
@@ -144,7 +148,7 @@ impl Executor {
     }
 
     /// Inserts attempt `previous.attempt + 1` of the step and journals
-    /// `step_retry`. An agent attempt starts `interrupted` with a pending
+    /// `step_retry`, by `by` (`None`: the step's `retry:` policy). An agent attempt starts `interrupted` with a pending
     /// hand-off to its runtime (resumed by `resume` after a crash); any
     /// other starts `queued` for `advance`.
     async fn new_attempt(
@@ -152,7 +156,7 @@ impl Executor {
         tx: &mut Tx,
         def: &StepDef,
         previous: &Step,
-        by: &str,
+        by: Option<&Actor>,
         effects: &mut Vec<Effect>,
     ) -> Result<()> {
         let agent = matches!(def.kind, StepKind::Agent { .. });
@@ -175,7 +179,11 @@ impl Executor {
         let why = format!("retry of attempt {}", previous.attempt);
         let payload = status_payload(&step, None, Some(&why));
         append(tx, &step, kind::STEP_STATUS, payload).await?;
-        let payload = json!({ "step_id": step.id, "attempt": step.attempt, "by": by });
+        let mut payload = json!({ "step_id": step.id, "attempt": step.attempt });
+        payload["by"] = json!(by.map_or(BY_POLICY, |a| a.name.as_str()));
+        if let Some(acts_for) = crate::bypass::by_of(by) {
+            payload[crate::bypass::ACTS_FOR] = acts_for;
+        }
         append(tx, &step, STEP_RETRY, payload).await?;
         if agent {
             let runtime = self.runtime_of(tx, &step).await?;
@@ -250,7 +258,7 @@ impl Executor {
         }
         let workflow = self.workflow(tx, &run).await?;
         let def = definition(&workflow, &step.step_key)?;
-        self.new_attempt(tx, def, step, BY_POLICY, effects).await?;
+        self.new_attempt(tx, def, step, None, effects).await?;
         self.advance(tx, run.id, effects).await
     }
 }
