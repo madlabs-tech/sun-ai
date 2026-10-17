@@ -186,6 +186,8 @@ case " $* " in
      done ;;
 esac
 printf '%s\n' "$*" >> "$SUN_OUT.args"
+[ -r /proc/$$/cmdline ] && tr '\0' ' ' < /proc/$$/cmdline >> "$SUN_OUT.cmdline"
+printf '%s\n' "${SUN_MCP_TOKEN-}" >> "$SUN_OUT.token"
 thread='{"type":"thread.started","thread_id":"t-1"}'
 case "$*" in
   *" resume "*)
@@ -312,6 +314,40 @@ async fn repo_task_keeps_the_git_repo_check() {
     collect(adapter.events(&handle)).await;
     let args = std::fs::read_to_string(dir.join("out.args")).unwrap();
     assert!(!args.contains("--skip-git-repo-check"), "{args}");
+}
+
+/// The session's MCP token reaches Codex through its env and `env_vars`,
+/// never argv (`ps` and `/proc/<pid>/cmdline` are readable by every user).
+#[tokio::test]
+async fn mcp_token_stays_off_argv() {
+    const CANARY: &str = "canary-7f3c1e0b9d24";
+    let dir = repo_sandbox("mcp");
+    let server = |args: &[&str]| json!({"command": "/bin/sun", "args": args, "env": {"SUN_MCP_TOKEN": CANARY}});
+    let config = json!({"mcpServers": {
+        "sun": server(&["mcp"]),
+        "docs": server(&["mcp", "relay", "{}"]),
+    }});
+    std::fs::write(dir.join("mcp.json"), config.to_string()).unwrap();
+    let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
+    let mut spec = spec(&dir, &[("SUN_FIXTURE", &fixture)]);
+    spec.mcp_config = Some(dir.join("mcp.json"));
+    let adapter = Codex::new(dir.join("codex"));
+    let handle = adapter.start(spec).await.unwrap();
+    collect(adapter.events(&handle)).await;
+
+    let args = std::fs::read_to_string(dir.join("out.args")).unwrap();
+    assert!(!args.contains(CANARY), "{args}");
+    for name in ["sun", "docs"] {
+        let names = format!(r#"-c mcp_servers.{name}.env_vars=["SUN_MCP_TOKEN"]"#);
+        assert!(args.contains(&names), "{args}");
+    }
+    if cfg!(target_os = "linux") {
+        let cmdline = std::fs::read_to_string(dir.join("out.cmdline")).unwrap();
+        assert!(cmdline.contains("exec --json"), "{cmdline}");
+        assert!(!cmdline.contains(CANARY), "{cmdline}");
+    }
+    let token = std::fs::read_to_string(dir.join("out.token")).unwrap();
+    assert_eq!(token, format!("{CANARY}\n"));
 }
 
 #[tokio::test]

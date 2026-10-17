@@ -99,6 +99,7 @@ impl Launch {
                 .arg(format!("model_reasoning_effort={effort}"));
         }
         // Codex reads MCP servers from config.toml; override per session.
+        // Their env (the session token) rides in `spec.env`, never argv.
         if let Some(path) = &self.spec.mcp_config {
             for server in crate::mcp::read_mcp_config(path)? {
                 cmd.args(server.codex_args());
@@ -258,6 +259,7 @@ impl RuntimeAdapter for Codex {
 
     async fn start(&self, mut spec: SessionSpec) -> Result<SessionHandle> {
         crate::byo_key::native_env(&mut spec, ID)?;
+        crate::mcp::native_env(&mut spec, ID)?;
         let session_id = spec.session_id;
         let envelope = envelope::first_prompt(ID, self.template_dir.as_deref(), &spec)?;
         let launch = Launch {

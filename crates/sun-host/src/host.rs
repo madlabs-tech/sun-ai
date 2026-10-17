@@ -476,6 +476,7 @@ impl Host {
         }
         // Before `prepare`, so a container or VM gets the provider vars too.
         sun_runtime::byo_key::native_env(&mut spec, adapter_id)?;
+        sun_runtime::mcp::native_env(&mut spec, adapter_id)?;
         let bare = spec.exec_env == ExecEnvSpec::Bare;
         let env = exec_env::open(&spec.exec_env, id, &self.config)?;
         let worktree = spec.worktree.clone();
