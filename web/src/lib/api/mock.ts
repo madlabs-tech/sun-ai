@@ -18,7 +18,6 @@ import type { OutboxItem, Agent, Chat, MemoryItem,
   McpServerAdded,
   McpTool,
   ModInstall,
-  PermissionMode,
   Pin,
   PinTarget,
   Design,
@@ -260,13 +259,13 @@ const on_host = (host: number, host_name: string, tool: string, r: Partial<Runti
   id: `${fake_id('H', host)}:${tool}`, name: tool, tool, adapter: tool, family: null, version: '1.0.0',
   host: { id: fake_id('H', host), name: host_name }, presence: 'online', availability: 'ready', load: { active: 0, max: null },
   state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: today('10:12'),
-  workspace_id: null, source: 'byo_runtime', permission_mode: null, allow_bypass: true, config: null, model: null,
+  workspace_id: null, source: 'byo_runtime', allow_bypass: true, config: null, model: null,
   effort_options: [], models: [], ...r,
 });
 const keyed = (name: string, r: Partial<Runtime>): Runtime => ({
   id: name, name, tool: 'opencode', adapter: 'opencode', family: null, version: null, host: null, presence: 'online',
   availability: 'ready', load: null, state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: null,
-  workspace_id: MAIN_WORKSPACE, source: 'byo_key', permission_mode: 'plan', allow_bypass: true, config: null, model: null,
+  workspace_id: MAIN_WORKSPACE, source: 'byo_key', allow_bypass: true, config: null, model: null,
   effort_options: [], models: [], ...r,
 });
 /** Effort catalogs as the CLIs report them (BLO-119): Claude Code one list per session, Codex per model. */
@@ -281,15 +280,15 @@ const codex_effort = (newest: boolean) => ({
   ],
 });
 export const RUNTIMES: Runtime[] = [
-  on_host(1, 'hery-mbp', 'claude-code', { version: '2.1.291', state: 'busy', load: { active: 2, max: 3 }, permission_mode: 'accept_edits', ...CLAUDE_EFFORT }),
-  on_host(3, 'rina-laptop', 'claude-code', { version: '2.1.291', presence: 'offline', state: 'offline', detail: 'rina-laptop is offline', last_seen_at: today('06:40'), permission_mode: 'accept_edits', ...CLAUDE_EFFORT }),
-  on_host(2, 'build-box-01', 'claude-code', { version: '2.1.291', availability: 'needs_login', state: 'needs_login', detail: 'Run `claude auth login` on build-box-01', permission_mode: 'accept_edits', ...CLAUDE_EFFORT }),
+  on_host(1, 'hery-mbp', 'claude-code', { version: '2.1.291', state: 'busy', load: { active: 2, max: 3 }, ...CLAUDE_EFFORT }),
+  on_host(3, 'rina-laptop', 'claude-code', { version: '2.1.291', presence: 'offline', state: 'offline', detail: 'rina-laptop is offline', last_seen_at: today('06:40'), ...CLAUDE_EFFORT }),
+  on_host(2, 'build-box-01', 'claude-code', { version: '2.1.291', availability: 'needs_login', state: 'needs_login', detail: 'Run `claude auth login` on build-box-01', ...CLAUDE_EFFORT }),
   on_host(2, 'build-box-01', 'codex', { availability: 'needs_login', state: 'needs_login', detail: 'Run `codex login` on build-box-01', ...codex_effort(false) }),
   on_host(1, 'hery-mbp', 'codex', { version: '0.161.0', availability: 'outdated', detail: 'Codex 0.161.0 is untested. If it misbehaves, install the known-good version: npm install -g @openai/codex@0.160.0', ...codex_effort(true) }),
-  on_host(2, 'build-box-01', 'opencode', { availability: 'limited', state: 'limited', cooldown_until: today('14:00'), permission_mode: 'plan' }),
+  on_host(2, 'build-box-01', 'opencode', { availability: 'limited', state: 'limited', cooldown_until: today('14:00') }),
   on_host(2, 'build-box-01', 'kiro-cli', { version: '1.4', availability: 'unsupported', state: 'unsupported' }),
   keyed('lan-qwen', { config: { kind: 'openai_compatible', endpoint: 'http://localhost:11434/v1', model: 'qwen2.5-coder:7b', key_secret: null } }),
-  keyed('credits', { source: 'credits', permission_mode: null, model: 'qwen3-coder' }),
+  keyed('credits', { source: 'credits', model: 'qwen3-coder' }),
 ];
 /** A chain name as the mock's events say it: a host CLI by its product name. */
 const runtime_label = (name: string | null) => (name === null ? null : runtime_name(RUNTIMES, name));
@@ -1374,15 +1373,6 @@ function route(method: string, full_path: string, body: unknown): unknown {
     }
     case 'GET /runtimes':
       return clone(RUNTIMES);
-    case 'PUT /runtimes/:id/policy': {
-      // Per tool (adapter), on every host.
-      const of_tool = RUNTIMES.filter((x) => x.tool === parts[1]);
-      if (!of_tool.length) throw not_found('Runtime');
-      const mode = (body as { permission_mode: PermissionMode }).permission_mode;
-      if (mode === 'bypass_permissions' && !of_tool[0].allow_bypass) throw new MockError(422, { error: { code: 'invalid_input', message: 'bypass_permissions needs runtimes.allow_bypass in sun.yaml.' } });
-      for (const r of of_tool) r.permission_mode = mode;
-      return { id: parts[1], permission_mode: mode };
-    }
     case 'GET /hosts': {
       // Each names only the workspaces the caller sees.
       const [workspace, seen] = [listed(), mock_me()];
@@ -1444,7 +1434,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
       if (endpoint.trim() && !/^https?:\/\/[^/@\s]+(\/\S*)?$/.test(endpoint.trim())) throw invalid('endpoint: must be an http(s) URL without credentials');
       if (!model.trim() || /\s/.test(model)) throw invalid('model: needs a model id without spaces, e.g. qwen2.5-coder:7b');
       if (key_secret !== null && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key_secret)) throw invalid('key_secret: a secret name is 1–64 letters, digits or _, not starting with a digit');
-      const r = keyed(name, { tool: adapter, adapter, permission_mode: null, config: { kind, endpoint, model, key_secret } });
+      const r = keyed(name, { tool: adapter, adapter, config: { kind, endpoint, model, key_secret } });
       const ready = mock_readiness(r);
       if (!ready.logged_in) Object.assign(r, { availability: 'needs_login', state: 'needs_login', detail: ready.detail });
       RUNTIMES.push(r);

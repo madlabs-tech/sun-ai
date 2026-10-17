@@ -247,41 +247,85 @@ async fn a_carried_login_cooldown_stays_on_its_own_workspaces_hosts() {
     );
 }
 
-/// Item 9: an agent from before `agent.permission_mode` comes out
-/// inheriting (NULL), and the `runtime_policy` row it inherits stays, so it
-/// keeps the mode it ran in.
+/// Item 14: each inheriting agent gets the most restrictive `runtime_policy`
+/// row among its chain's tools (resolved as placement does), an explicit
+/// mode stays, an agent with no row keeps NULL (the host's default), and
+/// the table is gone.
 #[tokio::test]
-async fn existing_agents_inherit_their_runtime_policy_after_the_migration() {
+async fn runtime_policy_fans_out_to_agents_most_restrictive_first() {
     use sqlx::migrate::Migrate;
-    use sun_store::{AgentRepo, RuntimeRepo};
+    use sun_core::PermissionMode as M;
+    use sun_store::AgentRepo;
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
     let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
     conn.ensure_migrations_table().await.unwrap();
     let migrator = sqlx::migrate!("./migrations");
-    for migration in migrator.iter().filter(|m| m.version < 20261107090000) {
+    for migration in migrator.iter().filter(|m| m.version < 20261108090000) {
         conn.apply(migration).await.unwrap();
     }
-    let agent = sun_core::AgentId::generate().to_string();
     for sql in [
-        "INSERT INTO agent (id, workspace_id, name, runtime_chain, created_at) VALUES
-           ($1, '00000000000000000000000001', 'Ada', '[\"claude-code\"]', '2026-10-16T20:00:00+00:00')",
-        "INSERT INTO runtime_policy (adapter, permission_mode) VALUES ('claude-code', 'plan')",
+        "INSERT INTO runtime_policy (adapter, permission_mode) VALUES
+           ('claude-code', 'accept_edits'), ('codex', 'bypass_permissions'),
+           ('opencode', 'default'), ('gemini', 'plan')",
+        "INSERT INTO runtime (id, workspace_id, name, adapter, source) VALUES
+           ('R1', '00000000000000000000000001', 'my-key', 'opencode', 'byo_key'),
+           ('R2', '00000000000000000000000001', 'team-key', 'codex', 'byo_key')",
     ] {
-        sqlx::query(sql)
-            .bind(&agent)
-            .execute(&mut conn)
-            .await
-            .unwrap();
+        sqlx::query(sql).execute(&mut conn).await.unwrap();
+    }
+    let agents = [
+        // (chain, saved mode, mode after)
+        (r#"["claude-code"]"#, None, Some(M::AcceptEdits)),
+        (
+            r#"["codex", {"tool": "claude-code"}]"#,
+            None,
+            Some(M::AcceptEdits),
+        ),
+        (r#"["my-key", "codex"]"#, None, Some(M::Default)),
+        (
+            r#"[{"tool": "opencode", "credential": "team-key"}]"#,
+            None,
+            Some(M::BypassPermissions),
+        ),
+        (
+            r#"["codex", "gemini"]"#,
+            Some("bypass_permissions"),
+            Some(M::BypassPermissions),
+        ),
+        (r#"["market:gemini", "unknown-cli"]"#, None, None),
+        (r#"["market:gemini", "gemini"]"#, None, Some(M::Plan)),
+    ];
+    let mut ids = Vec::new();
+    for (i, (chain, mode, _)) in agents.iter().enumerate() {
+        let id = sun_core::AgentId::generate().to_string();
+        sqlx::query(
+            "INSERT INTO agent (id, workspace_id, name, runtime_chain, permission_mode, created_at)
+             VALUES ($1, '00000000000000000000000001', $2, $3, $4, '2026-10-17T10:00:00+00:00')",
+        )
+        .bind(&id)
+        .bind(format!("agent-{i}"))
+        .bind(chain)
+        .bind(mode)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        ids.push(id);
     }
     conn.close().await.unwrap();
 
     let store = Store::open(dir.path()).await.unwrap();
     let mut tx = store.read().await.unwrap();
-    let ada = tx.get_agent(agent.parse().unwrap()).await.unwrap();
-    assert_eq!(ada.permission_mode, None);
-    assert_eq!(
-        tx.permission_modes().await.unwrap(),
-        [("claude-code".to_owned(), "plan".to_owned())]
-    );
+    for (id, (chain, _, after)) in ids.iter().zip(agents) {
+        let agent = tx.get_agent(id.parse().unwrap()).await.unwrap();
+        assert_eq!(agent.permission_mode, after, "{chain}");
+    }
+    drop(tx);
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    let left: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name = 'runtime_policy'")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+    assert_eq!(left, 0);
 }

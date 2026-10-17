@@ -282,7 +282,7 @@ impl Api {
         self
     }
 
-    /// Lets `PUT /runtimes/{id}/policy` set `bypass_permissions` (the
+    /// Lets agents and workflow steps save `bypass_permissions` (the
     /// operator's `allow_bypass`); refused otherwise.
     pub fn with_allow_bypass(mut self, allow: bool) -> Self {
         self.allow_bypass = allow;

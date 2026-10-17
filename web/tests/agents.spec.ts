@@ -65,20 +65,19 @@ test('agents: ready or why not, create, edit, archive', async ({ page }) => {
   await expect(row(page, 'Night Owl')).toHaveCount(0);
 });
 
-test('an agent’s permission mode: inherited until set, set from the edit dialog', async ({ page }) => {
+test('an agent’s permission mode: the host default until set, set from the edit dialog', async ({ page }) => {
   await open(page);
-  await expect(row(page, 'Ada')).toContainText('Edit files (inherited)');
+  await expect(row(page, 'Ada')).not.toContainText('Edit files');
   await row(page, 'Ada').getByRole('button', { name: 'Edit Ada' }).click();
   const edit = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Edit Ada' }) });
   const mode = edit.getByLabel('Permissions');
   await expect(mode).toHaveValue('');
-  await expect(edit).toContainText('Inherited: Edit files.');
+  await expect(edit).toContainText('Each host’s sun.yaml default.');
   await mode.selectOption({ label: 'Plan only' });
   await expect(edit).toContainText('Reads and plans; changes nothing.');
   await edit.getByRole('button', { name: 'Save' }).click();
   await expect(edit).toBeHidden();
   await expect(row(page, 'Ada')).toContainText('Plan only');
-  await expect(row(page, 'Ada')).not.toContainText('(inherited)');
 
   // Bypass is offered (the deployment allows it) and a container host is online: no warning.
   await row(page, 'Ada').getByRole('button', { name: 'Edit Ada' }).click();
@@ -86,9 +85,10 @@ test('an agent’s permission mode: inherited until set, set from the edit dialo
   await mode.selectOption({ label: 'Anything' });
   await expect(edit).toContainText('Runs any command without asking.');
   await expect(edit).not.toContainText('No online host has a container or VM ready');
-  await mode.selectOption({ label: 'Inherit from the runtime' });
+  await mode.selectOption({ label: 'Host default' });
   await edit.getByRole('button', { name: 'Save' }).click();
-  await expect(row(page, 'Ada')).toContainText('Edit files (inherited)');
+  await expect(edit).toBeHidden();
+  await expect(row(page, 'Ada')).not.toContainText('Plan only');
 });
 
 test('a member sees agents but no write controls', async ({ page }) => {

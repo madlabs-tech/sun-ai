@@ -234,7 +234,7 @@ impl PermissionMode {
         }
     }
 
-    /// Parses an optional mode (a `SessionSpec`'s, a `runtime_policy` row's):
+    /// Parses an optional mode (a `SessionSpec`'s):
     /// `None` stays `None`, anything else must be an exact name.
     pub fn parse_opt(mode: Option<&str>) -> std::result::Result<Option<Self>, String> {
         mode.map(str::parse).transpose()
@@ -278,7 +278,7 @@ pub fn bypass_refusal(mode: Option<PermissionMode>, env: &ExecEnvSpec) -> Option
     })
 }
 
-/// [`bypass_refusal`] for a mode not parsed yet (a `runtime_policy` row): a
+/// [`bypass_refusal`] for a mode not parsed yet (a session's): a
 /// spelling outside [`PERMISSION_MODES`] is refused too, whatever the env.
 pub fn mode_refusal(mode: Option<&str>, env: &ExecEnvSpec) -> Option<String> {
     match PermissionMode::parse_opt(mode) {

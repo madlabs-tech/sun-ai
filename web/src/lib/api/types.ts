@@ -553,10 +553,8 @@ export interface Agent {
   runtime_chain: ChainEntry[];
   /** Catalog skill ids */
   skill_ids: string[];
-  /** The mode its sessions run in; `null` inherits the runtime's */
+  /** The mode its sessions run in; `null`: each host's sun.yaml default */
   permission_mode: PermissionMode | null;
-  /** Its own mode, else the first runtime's; `null`: each host's sun.yaml default */
-  effective_permission_mode: PermissionMode | null;
   created_at: Timestamp;
   archived_at: Timestamp | null;
   /** Some runtime of the chain is logged in on an online host */
@@ -574,7 +572,7 @@ export interface AgentFields {
   instructions?: string;
   runtime_chain?: ChainEntry[];
   skill_ids?: string[];
-  /** `null` inherits; `bypass_permissions` needs `allow_bypass` on the deployment */
+  /** `null`: each host's sun.yaml default; `bypass_permissions` needs `allow_bypass` on the deployment */
   permission_mode?: PermissionMode | null;
 }
 
@@ -636,8 +634,6 @@ export interface Runtime {
   /** The workspace whose chains it serves; `null` for a host's CLI (every workspace's). */
   workspace_id: Ulid | null;
   source: RuntimeSource;
-  /** Sent with every new session of this tool, on every host; `null` = the host's sun.yaml default */
-  permission_mode: PermissionMode | null;
   /** The operator allows `bypass_permissions` (sun.yaml `runtimes.allow_bypass`) */
   allow_bypass: boolean;
   /** A stored `byo_key` runtime's source; `null` for the others */

@@ -512,7 +512,8 @@ struct Start {
     model: Option<String>,
     /// The chain entry's effort, if it sets one the host offers.
     effort: Option<String>,
-    /// [`failover::effective_mode`]; `None`: the host's `sun.yaml` default.
+    /// The step's own mode (an agent's, on its system workflow); `None`:
+    /// the host's `sun.yaml` default.
     permission_mode: Option<String>,
 }
 
@@ -2158,9 +2159,7 @@ impl Executor {
             .workflow(tx, &run)
             .await?
             .permission_mode(&step.step_key);
-        let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
-        let permission_mode =
-            failover::effective_mode(step_mode, &modes, &row.adapter).map(str::to_owned);
+        let permission_mode = step_mode.map(|m| m.as_str().to_owned());
         append(
             tx,
             step,

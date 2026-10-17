@@ -256,22 +256,9 @@ pub(crate) fn entries(workflow: &Workflow, default: &str) -> Vec<ChainEntry> {
         .map_or_else(|| vec![ChainEntry::from(default)], |p| p.chain.clone())
 }
 
-/// The mode a session of `adapter` runs in: its step's own
-/// `permission_mode:` (an agent's, on its system workflow), else the tool's
-/// `runtime_policy` row in `modes` (the fallback until Stage 5 drops it).
-pub(crate) fn effective_mode<'a>(
-    step_mode: Option<sun_core::PermissionMode>,
-    modes: &'a HashMap<String, String>,
-    adapter: &str,
-) -> Option<&'a str> {
-    step_mode
-        .map(sun_core::PermissionMode::as_str)
-        .or_else(|| modes.get(adapter).map(String::as_str))
-}
-
 /// Why a session in `mode` may not run when the operator's `allow_bypass`
 /// is `allow`: `bypass_permissions` saved while it was on (an agent, a
-/// workflow step, a runtime policy) stops running once it is turned off.
+/// workflow step) stops running once it is turned off.
 /// The engine's run-time backstop to the API's save-time gate, checked at
 /// placement, at failover and before the host is asked to start the CLI.
 pub(crate) fn bypass_disabled(mode: Option<&str>, allow: bool) -> Option<String> {
@@ -456,7 +443,7 @@ impl Executor {
     /// host that reported no capabilities is trusted. An entry pinned to
     /// another host (`host:`), or whose `effort:` this host doesn't list,
     /// is unready here. A runtime whose
-    /// permission mode ([`effective_mode`]) is `bypass_permissions` is unready while the operator
+    /// step's permission mode (an agent's, on its system workflow) is `bypass_permissions` is unready while the operator
     /// turned it off ([`bypass_disabled`]) and for a run outside a
     /// container or VM ([`sun_core::mode_refusal`]). A `market:` entry is
     /// ready only for a limit hit (`market`) whose run may move there
@@ -488,18 +475,18 @@ impl Executor {
         }
         let workspace = tx.workspace_of_run(step.run_id).await?;
         let env = self.exec_env(tx, step.run_id).await?;
-        let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
         let run = tx.get_run(step.run_id).await?;
         let workflow = self.workflow(tx, &run).await?;
         let entries = entries(&workflow, &self.config.adapter);
-        let step_mode = workflow.permission_mode(&step.step_key);
+        let mode = workflow
+            .permission_mode(&step.step_key)
+            .map(sun_core::PermissionMode::as_str);
         // A `market:` runtime runs on the seller's host, not this one.
         for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
             let adapter = match tx.runtime_by_name(workspace, name).await? {
                 Some(row) => row.adapter,
                 None => name.clone(),
             };
-            let mode = effective_mode(step_mode, &modes, &adapter);
             let entry = entry(&entries, name);
             let pinned = entry.and_then(|e| pinned_elsewhere(e, self.host(step.run_id)));
             let effort = entry.and_then(|e| effort_missing(e, host.as_ref(), &adapter));

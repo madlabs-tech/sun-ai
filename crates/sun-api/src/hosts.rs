@@ -1172,15 +1172,14 @@ pub(crate) async fn list_runtimes(
 // ponytail: deprecated with `?model=v1`; delete one release after v2.
 async fn legacy_runtimes(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult<Vec<Value>> {
     let online = online_adapters(api, workspace).await?;
-    let modes: BTreeMap<String, String> =
-        api.engine.permission_modes().await?.into_iter().collect();
     let view = |name: &str, adapter: &str, source: &str, ready: bool, config: Option<&ByoKey>| {
         json!({
             "model": null, "workspace_id": null,
             "id": name, "name": name, "adapter": adapter, "source": source,
             "status": if ready { "ready" } else { "offline" },
             "cooldown_until": null, "sessions": 0, "max_sessions": 0,
-            "permission_mode": modes.get(adapter),
+            // The old shape: always the host's default since item 14.
+            "permission_mode": null,
             "allow_bypass": api.allow_bypass,
             "config": config,
         })
@@ -1416,7 +1415,7 @@ pub(crate) async fn runtime_readiness(
 }
 
 /// `422` for a `bypass` the operator doesn't allow (`sun.yaml`
-/// `runtimes.allow_bypass`): on a runtime policy, an agent or a workflow step.
+/// `runtimes.allow_bypass`): on an agent or a workflow step.
 pub(crate) fn check_bypass_allowed(api: &Api, bypass: bool) -> ApiResult<()> {
     if bypass && !api.allow_bypass {
         return Err(ApiError::invalid(
@@ -1427,36 +1426,14 @@ pub(crate) fn check_bypass_allowed(api: &Api, bypass: bool) -> ApiResult<()> {
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct SetPolicy {
-    permission_mode: String,
-}
-
-/// `PUT /api/v1/runtimes/{id}/policy {permission_mode}` (admin): the mode
-/// every new session of that runtime gets, on any host. Audited.
-pub(crate) async fn set_runtime_policy(
-    State(api): State<Api>,
-    axum::Extension(caller): axum::Extension<auth::Caller>,
-    axum::extract::Path(adapter): axum::extract::Path<String>,
-    crate::routes::Body(input): crate::routes::Body<SetPolicy>,
-) -> ApiResult<Json<Value>> {
-    let valid_id = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
-    if adapter.is_empty() || adapter.len() > 64 || !adapter.chars().all(valid_id) {
-        return Err(ApiError::invalid(format!("`{adapter}` is not a runtime.")));
-    }
-    let mode = input.permission_mode;
-    if !sun_core::PERMISSION_MODES.contains(&mode.as_str()) {
-        return Err(ApiError::invalid(format!(
-            "`{mode}` is not a permission mode. Use {}.",
-            sun_core::PERMISSION_MODES.join(", ")
-        )));
-    }
-    check_bypass_allowed(&api, mode == "bypass_permissions")?;
-    api.engine
-        .set_permission_mode(&adapter, &mode, &caller.actor())
-        .await?;
-    Ok(Json(json!({ "id": adapter, "permission_mode": mode })))
+/// `PUT /api/v1/runtimes/{id}/policy`: `410`. `runtime_policy` is gone
+/// (TRD BLO-117 item 14); each agent carries its own mode.
+pub(crate) async fn runtime_policy_gone() -> ApiResult<()> {
+    Err(ApiError::new(
+        axum::http::StatusCode::GONE,
+        "gone",
+        "Runtime permission modes are gone. Set the permission mode on each agent.",
+    ))
 }
 
 #[cfg(test)]

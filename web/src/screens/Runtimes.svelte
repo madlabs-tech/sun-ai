@@ -1,6 +1,5 @@
 <!-- Runtimes: one row per (host, CLI) with an honest state (TRD §6 copy: badge, one line, one action; "Check again"
-     asks that host to re-probe), and, for deployment owners, the permission mode every new session of a CLI gets
-     on every host (PUT /runtimes/{tool}/policy, audited). Bypass needs a second click.
+     asks that host to re-probe). Permission modes are each agent's, not the runtime's.
      With manage_runtimes, "Add runtime" stores a BYO key runtime: a provider key (OpenAI-compatible, Anthropic
      or Google) run through OpenCode, Claude Code or Codex; its key is a secret of the workspace picked by name
      (POST /runtimes), and "Check" shows its readiness. With Sun Cloud connected it can also add a runtime paid
@@ -13,18 +12,16 @@
   import { ApiFailure, api } from '../lib/api/client';
   import {
     BYO_KEY_ADAPTERS,
-    PERMISSION_MODES,
     type ByoKeyAdapter,
     type ByoKeyKind,
-    type PermissionMode,
     type Readiness,
     type Runtime,
     type RuntimeSource,
     type RuntimeState,
     type RuntimeUsage,
   } from '../lib/api/types';
-  import { can, current_workspace, error_text, is_owner, toast } from '../lib/app_state.svelte';
-  import { PERMISSION_MODE_COPY as MODE, SOURCE_LABEL, clock, money, stamp, tokens, tool_label } from '../lib/format';
+  import { can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
+  import { SOURCE_LABEL, clock, money, stamp, tokens, tool_label } from '../lib/format';
 
   type Tone = 'success' | 'info' | 'warning' | 'neutral';
   /** The badge per state (TRD §6). Busy also shows its load. */
@@ -54,37 +51,6 @@
     () => {},
   );
   const used = (u: { input_tokens: number; output_tokens: number }) => `${tokens(u.input_tokens)} in · ${tokens(u.output_tokens)} out`;
-  /** A bypass waiting for the second click. */
-  let bypass = $state<Runtime | null>(null);
-  let saving = $state(false);
-
-  const options = (r: Runtime) =>
-    PERMISSION_MODES.filter((m) => m !== 'bypass_permissions' || r.allow_bypass).map((m) => ({ value: m, label: MODE[m][0] }));
-
-  function pick(r: Runtime, mode: PermissionMode) {
-    if (mode === r.permission_mode) return;
-    if (mode === 'bypass_permissions') bypass = r;
-    else void save(r, mode);
-  }
-
-  async function save(r: Runtime, mode: PermissionMode) {
-    saving = true;
-    try {
-      await api.set_runtime_policy(r.tool, mode);
-      toast('success', `${tool_label(r.tool)}: ${MODE[mode][0].toLowerCase()}`, 'New sessions get it on every host; running ones keep theirs.');
-    } catch (e) {
-      toast('danger', 'Permission mode not changed', error_text(e));
-    }
-    saving = false;
-    bypass = null;
-    load = list();
-  }
-
-  function cancel_bypass() {
-    bypass = null;
-    load = list(); // puts the select back
-  }
-
   // Add runtime. The kernel validates; a 422 message starts with the field to fix (`endpoint: …`).
   const FIELDS = ['name', 'adapter', 'endpoint', 'model', 'key_secret'] as const;
   type Field = (typeof FIELDS)[number];
@@ -210,11 +176,11 @@
     ready.installed && ready.logged_in
       ? `Ready: ${ADAPTER_LABEL[r.adapter as ByoKeyAdapter] ?? r.adapter} is on a host and ${r.source === 'credits' ? 'Sun Cloud is connected' : 'the key settings are complete'}.`
       : (ready.detail ?? 'Not ready.');
-  /** Stored runtimes (BYO key, credits) get a readiness check instead of a permission mode. */
+  /** Stored runtimes (BYO key, credits) get a readiness check. */
   const stored = (r: Runtime) => !!r.config || r.source === 'credits';
 </script>
 
-<PageHeader title="Runtimes" subtitle="Agent CLIs Sun can dispatch to, and what their sessions may do.">
+<PageHeader title="Runtimes" subtitle="Agent CLIs Sun can dispatch to. Each agent sets what its sessions may do.">
   {#if can('manage_runtimes')}<Button variant="ice" iconLeft="plus" onclick={open_add}>Add runtime</Button>{/if}
 </PageHeader>
 
@@ -297,18 +263,6 @@
           <Button class="runtime__mode" size="sm" variant="secondary" iconLeft="activity" loading={ready === null} onclick={() => check(r)}>
             Check
           </Button>
-        {:else if is_owner()}
-          <Select
-            class="runtime__mode"
-            size="sm"
-            aria-label={r.host ? `Permissions for ${tool_label(r.tool)} on ${r.host.name}` : `Permissions for ${r.name}`}
-            value={r.permission_mode ?? ''}
-            placeholder="Host default"
-            options={options(r)}
-            hint={r.permission_mode ? `${MODE[r.permission_mode][1]} On every host.` : 'From each host’s sun.yaml.'}
-            disabled={saving}
-            onchange={(e: Event) => pick(r, (e.currentTarget as HTMLSelectElement).value as PermissionMode)}
-          />
         {/if}
       </article>
     {/snippet}
@@ -399,20 +353,6 @@
   </Dialog>
 {/if}
 
-{#if bypass}
-  {@const r = bypass}
-  <Dialog open onclose={cancel_bypass} title="Let {tool_label(r.tool)} run anything?">
-    <p class="runtime__warn">
-      <Icon name="triangle-alert" size={16} />
-      <span>Its sessions will run any command on the host without asking, on every host. Use it only when sessions run in a container or VM.</span>
-    </p>
-    {#snippet footer()}
-      <Button variant="secondary" onclick={cancel_bypass}>Cancel</Button>
-      <Button variant="danger" loading={saving} onclick={() => save(r, 'bypass_permissions')}>Allow anything</Button>
-    {/snippet}
-  </Dialog>
-{/if}
-
 <style>
   .runtime {
     align-items: center;
@@ -480,14 +420,6 @@
     border-radius: var(--radius-sm);
     background: var(--bg-subtle);
     overflow-x: auto;
-  }
-  .runtime__warn {
-    display: flex;
-    gap: var(--space-2);
-    margin: 0;
-    font-size: 14px;
-    line-height: 1.5;
-    color: var(--fg-1);
   }
   .add {
     display: grid;

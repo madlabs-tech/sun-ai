@@ -1,6 +1,5 @@
 // Runtimes screen against the in-memory API: one row per (host, CLI) with the TRD §6 copy per state,
-// "Check again" (POST /workspaces/{id}/hosts/{host}/reprobe), and the permission mode per CLI
-// (PUT /runtimes/{tool}/policy), which applies on every host.
+// and "Check again" (POST /workspaces/{id}/hosts/{host}/reprobe). Permission modes are each agent's.
 import { expect, test, type Page } from '@playwright/test';
 
 const no_overflow = async (page: Page) =>
@@ -61,42 +60,10 @@ test('check again: a login done since shows; none done says No change', async ({
   await expect(claude).toContainText('Needs login');
 });
 
-test('runtimes: set a permission mode per CLI; bypass needs a second click', async ({ page }) => {
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.goto('/?mock=1#/runtimes');
-
-  // No mode set: the host's own default. Set on one host's row, it applies on every host.
-  const codex = page.getByRole('combobox', { name: 'Permissions for Codex on hery-mbp' });
-  await expect(codex).toHaveValue('');
-  await expect(row(page, 'Codex on hery-mbp')).toContainText('From each host’s sun.yaml.');
-  await codex.selectOption('plan');
-  await expect(page.getByText('Codex: plan only')).toBeVisible();
-  await expect(codex).toHaveValue('plan');
-  await expect(page.getByRole('combobox', { name: 'Permissions for Codex on build-box-01' })).toHaveValue('plan');
-  await expect(row(page, 'Codex on hery-mbp')).toContainText('Reads and plans; changes nothing. On every host.');
-
-  // Bypass asks first; cancelling keeps the old mode.
-  const claude = page.getByRole('combobox', { name: 'Permissions for Claude Code on hery-mbp' });
-  await expect(claude).toHaveValue('accept_edits');
-  await claude.selectOption('bypass_permissions');
-  const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('heading', { name: 'Let Claude Code run anything?' })).toBeVisible();
-  await dialog.getByRole('button', { name: 'Cancel' }).click();
-  await expect(dialog).toBeHidden();
-  await expect(claude).toHaveValue('accept_edits');
-
-  await claude.selectOption('bypass_permissions');
-  await page.getByRole('dialog').getByRole('button', { name: 'Allow anything' }).click();
-  await expect(page.getByRole('dialog')).toBeHidden();
-  await expect(claude).toHaveValue('bypass_permissions');
-});
-
-test('360 px: runtimes fit, the mode select stays usable', async ({ page }) => {
+test('runtimes: no permission mode per CLI, and the page fits 360 px', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   await page.goto('/?mock=1#/runtimes');
-  const select = page.getByRole('combobox', { name: 'Permissions for OpenCode on build-box-01' });
-  await expect(select).toBeVisible();
-  await expect(select).toHaveValue('plan');
-  expect((await select.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(32);
+  await expect(row(page, 'OpenCode on build-box-01')).toBeVisible();
+  await expect(page.getByRole('combobox', { name: /^Permissions for / })).toHaveCount(0);
   await no_overflow(page);
 });

@@ -46,8 +46,7 @@ pub struct AgentFields {
     pub runtime_chain: Option<Vec<sun_core::ChainEntry>>,
     /// Skill names (catalog ids); at most 32.
     pub skill_ids: Option<Vec<String>>,
-    /// The mode its sessions run in; `null` inherits the tool's
-    /// `runtime_policy` row.
+    /// The mode its sessions run in; `null`: the host's `sun.yaml` default.
     #[serde(default, deserialize_with = "crate::workspaces::present")]
     pub permission_mode: Option<Option<sun_core::PermissionMode>>,
 }

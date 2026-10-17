@@ -111,22 +111,6 @@ impl Engine {
         Ok(entry)
     }
 
-    /// Sets the permission mode every new session of runtime `adapter` gets
-    /// (validated by the caller) and audits it as `actor`, in one transaction.
-    pub async fn set_permission_mode(&self, adapter: &str, mode: &str, actor: &str) -> Result<()> {
-        let mut tx = self.store.begin().await?;
-        tx.set_permission_mode(adapter, mode).await?;
-        tx.append_audit(actor, AuditAction::PolicyChange, adapter, mode)
-            .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// `(adapter, permission mode)` of every runtime with one set.
-    pub async fn permission_modes(&self) -> Result<Vec<(String, String)>> {
-        Ok(self.store.read().await?.permission_modes().await?)
-    }
-
     /// `account -> cooldown_until` of every account still cooling down now,
     /// by [`sun_core::model::Account::key`] (internal: never in a response).
     pub async fn cooldowns(&self) -> Result<std::collections::BTreeMap<String, Timestamp>> {

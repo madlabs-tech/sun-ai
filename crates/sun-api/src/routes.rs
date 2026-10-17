@@ -381,7 +381,7 @@ pub(crate) fn router(api: Api) -> Router {
         )
         .route(
             "/runtimes/{id}/policy",
-            put(crate::hosts::set_runtime_policy),
+            put(crate::hosts::runtime_policy_gone),
         )
         .route("/settings/on_limit", get(get_on_limit).put(put_on_limit))
         .route("/settings/budget", get(get_spend_cap).put(put_spend_cap))
