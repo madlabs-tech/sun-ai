@@ -139,6 +139,11 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/agents", get(crate::agents::list))
         .route("/runtimes", get(crate::hosts::list_runtimes))
         .route("/runtimes/{id}/readiness", get(crate::hosts::readiness))
+        // Gone for every caller: no owner-only `403` in front of the `410`.
+        .route(
+            "/runtimes/{id}/policy",
+            put(crate::hosts::runtime_policy_gone),
+        )
         .route("/memory", get(crate::memory::list))
         .route("/memory/metrics", get(crate::memory::metrics))
         // Its hosts, catalog installs and MCP servers.
@@ -311,9 +316,8 @@ pub(crate) fn router(api: Api) -> Router {
         ])));
     // The deployment itself, for deployment owners only: its accounts, mail,
     // sign-in, security, audit, the kernel's own resources and sessions,
-    // mods, ecosystem and mod secrets, the permission mode of each runtime
-    // adapter (every workspace's sessions of it), limits, dismissed catalog
-    // suggestions, usage and marketplace.
+    // mods, ecosystem and mod secrets, limits, dismissed catalog suggestions,
+    // usage and marketplace.
     let deployment = Router::new()
         .route(
             "/members",
@@ -378,10 +382,6 @@ pub(crate) fn router(api: Api) -> Router {
         .route(
             "/settings/embeddings",
             get(crate::knowledge::get_embeddings).put(crate::knowledge::put_embeddings),
-        )
-        .route(
-            "/runtimes/{id}/policy",
-            put(crate::hosts::runtime_policy_gone),
         )
         .route("/settings/on_limit", get(get_on_limit).put(put_on_limit))
         .route("/settings/budget", get(get_spend_cap).put(put_spend_cap))
