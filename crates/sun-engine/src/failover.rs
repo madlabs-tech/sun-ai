@@ -269,6 +269,20 @@ pub(crate) fn effective_mode<'a>(
         .or_else(|| modes.get(adapter).map(String::as_str))
 }
 
+/// Why a session in `mode` may not run when the operator's `allow_bypass`
+/// is `allow`: `bypass_permissions` saved while it was on (an agent, a
+/// workflow step, a runtime policy) stops running once it is turned off.
+/// The engine's run-time backstop to the API's save-time gate, checked at
+/// placement, at failover and before the host is asked to start the CLI.
+pub(crate) fn bypass_disabled(mode: Option<&str>, allow: bool) -> Option<String> {
+    let bypass = mode == Some(sun_core::PermissionMode::BypassPermissions.as_str());
+    (bypass && !allow).then(|| {
+        "bypass_permissions is turned off: the operator set `runtimes.allow_bypass: false` \
+         in sun.yaml"
+            .to_owned()
+    })
+}
+
 /// Why `entry` can't run on `host`: it is pinned to another one.
 pub(crate) fn pinned_elsewhere(entry: &ChainEntry, host: HostId) -> Option<String> {
     let pin = entry.host()?;
@@ -442,7 +456,8 @@ impl Executor {
     /// host that reported no capabilities is trusted. An entry pinned to
     /// another host (`host:`), or whose `effort:` this host doesn't list,
     /// is unready here. A runtime whose
-    /// permission mode ([`effective_mode`]) is `bypass_permissions` is unready for a run outside a
+    /// permission mode ([`effective_mode`]) is `bypass_permissions` is unready while the operator
+    /// turned it off ([`bypass_disabled`]) and for a run outside a
     /// container or VM ([`sun_core::mode_refusal`]). A `market:` entry is
     /// ready only for a limit hit (`market`) whose run may move there
     /// ([`crate::market::unmovable`]).
@@ -491,7 +506,10 @@ impl Executor {
             let why = pinned
                 .or(effort)
                 .or_else(|| reported.as_ref().and_then(|r| r.unready(&adapter)));
-            if let Some(why) = why.or_else(|| sun_core::mode_refusal(mode, &env)) {
+            let why = why
+                .or_else(|| bypass_disabled(mode, self.config.allow_bypass))
+                .or_else(|| sun_core::mode_refusal(mode, &env));
+            if let Some(why) = why {
                 unready.insert(name.clone(), why);
             }
         }

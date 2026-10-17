@@ -552,6 +552,7 @@ impl Engine {
             spec.runtime.is_none(),
         ));
         let config = EngineConfig {
+            allow_bypass: false,
             host: self.host,
             adapter: spec.runtime.clone().unwrap_or_else(|| REPLAY.into()),
             delivery_timeout: Duration::from_secs(5),

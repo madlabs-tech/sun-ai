@@ -223,6 +223,7 @@ async fn memory_starred_correction_opens_a_pr_and_reaches_packs_once_approved() 
     let pr_url = "https://github.com/acme/web/pull/7";
     let mods = mods(json!({ "number": 7, "url": pr_url, "created": true }));
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),
@@ -431,6 +432,7 @@ async fn memory_metrics_count_review_rejections() {
     let store = Store::open(dir.path()).await.unwrap();
     let host = LocalHost::new(dir.path(), |_, _| {});
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),
@@ -575,6 +577,7 @@ async fn workflow_scope_proposal_opens_a_pr() {
     let mods =
         mods(json!({ "number": 8, "url": "https://gitlab.com/acme/api/-/merge_requests/8" }));
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),

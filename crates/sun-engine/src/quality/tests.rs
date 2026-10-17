@@ -68,6 +68,7 @@ async fn quality_tracks_ci_revert_and_fix_commits_after_merge() {
     let host = LocalHost::new(root, |_, _| {});
     let ci = mods(json!({ "state": "success", "checks": [] }));
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),
@@ -187,6 +188,7 @@ async fn quality_links_bug_issues_and_records_regressions() {
     });
     let plugin = mods(reply);
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),

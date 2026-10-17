@@ -18,6 +18,7 @@ use crate::queue::{NoHost, NoMods};
 async fn engine(dir: &std::path::Path) -> (Store, Engine) {
     let store = Store::open(dir).await.unwrap();
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),

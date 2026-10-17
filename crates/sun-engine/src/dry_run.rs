@@ -125,6 +125,7 @@ impl Engine {
             true,
         ));
         let config = EngineConfig {
+            allow_bypass: false,
             host: self.host,
             adapter: REPLAY.into(),
             delivery_timeout: Duration::from_secs(5),

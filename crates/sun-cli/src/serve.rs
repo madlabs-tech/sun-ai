@@ -246,6 +246,7 @@ pub async fn start(
         engine_mods,
         EngineConfig {
             host,
+            allow_bypass: config.runtimes.allow_bypass,
             adapter: runtime.clone(),
             delivery_timeout: Duration::from_secs(30),
             watchdog: WatchdogConfig {

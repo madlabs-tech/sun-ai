@@ -256,6 +256,7 @@ async fn app_with(
         Arc::new(hosts.clone()),
         mods.clone(),
         EngineConfig {
+            allow_bypass: false,
             host,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),

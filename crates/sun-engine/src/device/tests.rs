@@ -110,6 +110,7 @@ async fn start(
     .unwrap();
     tx.commit().await.unwrap();
     let config = EngineConfig {
+        allow_bypass: false,
         host: id,
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),

@@ -530,6 +530,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let config = crate::EngineConfig {
+            allow_bypass: false,
             host: HostId::generate(),
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -626,6 +627,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
         let config = crate::EngineConfig {
+            allow_bypass: false,
             host: HostId::generate(),
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),

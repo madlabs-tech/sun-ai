@@ -44,6 +44,7 @@ async fn catalog_skill_repo_install_pushes_a_branch_and_opens_one_pr() {
     let pr_url = "https://github.com/acme/web/pull/9";
     let mods = mods(json!({ "number": 9, "url": pr_url, "created": true }));
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),

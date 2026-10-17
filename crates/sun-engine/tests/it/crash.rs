@@ -264,6 +264,7 @@ fn read_lines(path: &Path) -> Vec<String> {
 
 fn config(delivery_timeout: Duration) -> EngineConfig {
     EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout,

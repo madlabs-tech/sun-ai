@@ -1072,6 +1072,7 @@ mod tests {
     async fn engine(dir: &std::path::Path) -> (Engine, Store) {
         let store = Store::open(dir).await.unwrap();
         let config = crate::EngineConfig {
+            allow_bypass: false,
             host: HostId::generate(),
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),

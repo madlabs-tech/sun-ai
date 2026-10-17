@@ -79,6 +79,7 @@ async fn main() {
         Arc::new(hosts.clone()),
         Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),

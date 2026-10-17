@@ -16,6 +16,7 @@ const AGENT: &str = "name: fix\nsteps:\n  - id: implement\n    type: agent\n    
 
 async fn start(dir: &Path, store: &Store) -> Engine {
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),
