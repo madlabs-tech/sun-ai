@@ -329,3 +329,69 @@ async fn runtime_policy_fans_out_to_agents_most_restrictive_first() {
             .unwrap();
     assert_eq!(left, 0);
 }
+
+/// BLO-141: an agent that ran before the upgrade already has a system
+/// workflow (written at its first run, without a mode). The fan-out still
+/// lands on its row: the engine reads `agent.permission_mode` for a modeless
+/// system step (BLO-159; `sun-engine` `agents::tests::
+/// a_modeless_system_step_runs_in_the_agents_mode` checks the session). The
+/// fixture is the shape v0.1.2 wrote on a real kernel.
+#[tokio::test]
+async fn fan_out_reaches_an_agent_that_already_has_a_system_workflow() {
+    use sqlx::migrate::Migrate;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    conn.ensure_migrations_table().await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    for migration in migrator.iter().filter(|m| m.version < 20261108090000) {
+        conn.apply(migration).await.unwrap();
+    }
+    let workspace = "00000000000000000000000001";
+    let agent = sun_core::AgentId::generate().to_string();
+    let workflow = sun_core::WorkflowId::generate().to_string();
+    let v1 = r#"{"name":"agent","runtime":{"chain":["claude-code"]},"steps":[{"id":"agent","prompt":"","skills":[],"type":"agent"}]}"#;
+    sqlx::query(
+        "INSERT INTO runtime_policy (adapter, permission_mode) VALUES ('claude-code', 'plan')",
+    )
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO agent (id, workspace_id, name, runtime_chain, created_at)
+         VALUES ($1, $2, 'ran-before', '[\"claude-code\"]', '2026-10-17T10:00:00+00:00')",
+    )
+    .bind(&agent)
+    .bind(workspace)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow (id, name, workspace_id, system_agent_id) VALUES ($1, 'ran-before', $2, $3)",
+    )
+    .bind(&workflow)
+    .bind(workspace)
+    .bind(&agent)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow_version (workflow_id, version, source_yaml, schema_hash) VALUES ($1, 1, $2, 'h1')",
+    )
+    .bind(&workflow)
+    .bind(v1)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+
+    let _store = Store::open(dir.path()).await.unwrap();
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    let agent_mode: Option<String> =
+        sqlx::query_scalar("SELECT permission_mode FROM agent WHERE id = $1")
+            .bind(&agent)
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+    assert_eq!(agent_mode.as_deref(), Some("plan"));
+}
