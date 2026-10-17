@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use sun_core::host_protocol::{ExecRequest, Worktree};
 use sun_core::model::Run;
-use sun_core::{ExecEnvSpec, HostId, HostLink, Result};
+use sun_core::{ExecEnvSpec, HostId, HostLink, PermissionMode, Result};
 use sun_store::{EventLog, NewEvent, RunRepo, Tx, WorkflowRepo};
 use sun_workflow::{StepKind, Workflow};
 
@@ -121,12 +121,26 @@ async fn resolve(
 
 /// Saves `source` as the next version of the run's workflow unless the
 /// pinned or the latest version already is it, pins the run to it and
-/// journals `workflow_source`. In the start's transaction.
-pub(crate) async fn pin(tx: &mut Tx, run: &Run, source: Source) -> Result<()> {
+/// journals `workflow_source`. In the start's transaction. `Ok(Err(why))`:
+/// the file raises a step to `bypass_permissions`, which only a save
+/// through Sun may do (`manage_runtimes`, `runtimes.allow_bypass`); the run
+/// fails.
+pub(crate) async fn pin(
+    tx: &mut Tx,
+    run: &Run,
+    source: Source,
+) -> Result<std::result::Result<(), String>> {
     let same = |yaml: &str| sun_workflow::parse(yaml).is_ok_and(|w| w.hash == source.workflow.hash);
     let pinned = tx
         .get_workflow_version(run.workflow_id, run.workflow_version)
         .await?;
+    if let Some(step) = raised_to_bypass(&pinned.source_yaml, &source.workflow) {
+        return Ok(Err(format!(
+            "{}: step `{step}` sets permission_mode: bypass_permissions and the saved \
+             workflow doesn't; save it in Sun to allow that",
+            source.path
+        )));
+    }
     let version = if same(&pinned.source_yaml) {
         pinned.version
     } else {
@@ -152,7 +166,23 @@ pub(crate) async fn pin(tx: &mut Tx, run: &Run, source: Source) -> Result<()> {
     });
     tx.append_event(NewEvent::new(run.id, None, WORKFLOW_SOURCE, payload))
         .await?;
-    Ok(())
+    Ok(Ok(()))
+}
+
+/// The first step of `repo` in `bypass_permissions` whose namesake in the
+/// `pinned` YAML isn't.
+fn raised_to_bypass<'a>(pinned: &str, repo: &'a Workflow) -> Option<&'a str> {
+    let pinned = sun_workflow::parse(pinned).ok();
+    let bypass = Some(PermissionMode::BypassPermissions);
+    repo.steps
+        .iter()
+        .find(|s| {
+            repo.permission_mode(&s.id) == bypass
+                && pinned
+                    .as_ref()
+                    .is_none_or(|p| p.permission_mode(&s.id) != bypass)
+        })
+        .map(|s| s.id.as_str())
 }
 
 /// `.sun/exec_env.yaml`: the toolchain the repo declares. The
@@ -536,6 +566,16 @@ steps:
             "{started} session(s) ran on version {} whose step is bypass_permissions, \
              taken from the repo's .sun/workflows/fix.yaml",
             run.workflow_version
+        );
+        // Refused with the reason, before any session; the pinned version stays.
+        assert_eq!(
+            (run.status, started, run.workflow_version),
+            (RunStatus::Failed, 0, 1)
+        );
+        let reason = run.end_reason.unwrap_or_default();
+        assert!(
+            reason.starts_with(".sun/workflows/fix.yaml: step `implement` sets permission_mode"),
+            "{reason}"
         );
     }
 

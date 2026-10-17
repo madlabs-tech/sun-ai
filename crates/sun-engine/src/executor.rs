@@ -1090,30 +1090,32 @@ impl Executor {
             self.placed.insert(run_id, host);
         }
         let mut effects = Vec::new();
-        match (source, repo_env) {
+        let started = match (source, repo_env) {
             (Ok(source), Ok(repo_env)) => {
-                if let Some(source) = source {
-                    repo_source::pin(&mut tx, &run, source).await?;
-                }
                 if from_repo {
                     // `null` when the repo declares none (any more).
                     let key = repo_exec_env_key(run.task_id);
                     tx.put_setting(&key, &json!(repo_env)).await?;
                 }
+                match source {
+                    Some(source) => repo_source::pin(&mut tx, &run, source).await?,
+                    None => Ok(()),
+                }
             }
-            (Err(why), _) | (_, Err(why)) => {
-                let (mut none, failed) = (HashMap::new(), RunStatus::Failed);
-                self.end_run(
-                    &mut tx,
-                    run_id,
-                    &mut none,
-                    failed,
-                    &why,
-                    false,
-                    &mut effects,
-                )
-                .await?;
-            }
+            (Err(why), _) | (_, Err(why)) => Err(why),
+        };
+        if let Err(why) = started {
+            let (mut none, failed) = (HashMap::new(), RunStatus::Failed);
+            self.end_run(
+                &mut tx,
+                run_id,
+                &mut none,
+                failed,
+                &why,
+                false,
+                &mut effects,
+            )
+            .await?;
         }
         self.advance(&mut tx, run_id, &mut effects).await?;
         tx.commit().await?;
