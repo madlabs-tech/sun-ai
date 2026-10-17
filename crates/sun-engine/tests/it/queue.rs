@@ -1515,3 +1515,240 @@ async fn queue_cools_the_account_not_every_host_with_the_tool() {
         "the key cools on h1 and h2"
     );
 }
+
+/// BLO-136 case 2a and 2d under `runtimes.model: v2`, with only bare hosts
+/// online. (2a) A run whose only chain entry is in `bypass_permissions`
+/// fails at placement: journalled as `placement_refused_bypass_bare` with
+/// exactly `{runtime, exec_env, reason}` and no account key, never placed,
+/// no session. (2d) A chain `[bypass, plain]` goes to `plain`: not refused,
+/// and the bypass entry's mode is never lowered.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_v2_bare_hosts_only_refuse_bypass_and_take_the_plain_entry() {
+    const SOLO: &str = "name: solo\nsteps:\n  - {id: implement, type: agent, prompt: do it}\n";
+    const CHAINED: &str = "name: chained\nruntime: {chain: [fake, plain]}\nsteps:\n  \
+                           - {id: implement, type: agent, prompt: do it}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let solo = tasks_of(&store, SOLO, 1).await.remove(0);
+    let chained = tasks_of(&store, CHAINED, 1).await.remove(0);
+    let mut tx = store.begin().await.unwrap();
+    tx.put_setting(sun_engine::RUNTIMES_MODEL, &serde_json::json!("v2"))
+        .await
+        .unwrap();
+    tx.set_permission_mode("fake", "bypass_permissions")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let h1 = add_host(&store, "bare-1", true).await;
+    let h2 = add_host(&store, "bare-2", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![h1, h2])));
+    let (engine, queue) = kernel_on(&store, link, h1, Caps::default()).await;
+    let ready = |adapter: &str| {
+        serde_json::json!({"adapter": adapter, "readiness":
+            {"installed": true, "version": "1", "logged_in": true, "detail": null}})
+    };
+    let bare_only = serde_json::json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4,
+        "runtimes": [ready("fake"), ready("plain")],
+        "exec_envs": [{"kind": "bare", "ready": true, "version": null, "detail": null}],
+    });
+    for host in [h1, h2] {
+        engine
+            .set_host_capabilities(host, &bare_only)
+            .await
+            .unwrap();
+    }
+    let rows = sun_store::HostRepo::host_runtimes(&mut store.read().await.unwrap(), None)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 4, "v2 reads projected rows: {rows:?}");
+
+    // 2a: refused, journalled, never placed.
+    queue.enqueue(solo.id).await.unwrap();
+    let failed = || async {
+        let mut read = store.read().await.unwrap();
+        let run = read.runs_of_task(solo.id).await.unwrap().pop();
+        run.filter(|r| r.status == RunStatus::Failed)
+    };
+    eventually("the bypass run refused", || async {
+        failed().await.is_some()
+    })
+    .await;
+    let run = failed().await.unwrap();
+    let reason = run.end_reason.clone().unwrap_or_default();
+    assert!(
+        reason.contains("bypass_permissions needs a container or vm"),
+        "{reason}"
+    );
+    let events = store
+        .read()
+        .await
+        .unwrap()
+        .events_after(Some(run.id), 0, 64)
+        .await
+        .unwrap();
+    let refused = events
+        .iter()
+        .find(|e| e.kind == "placement_refused_bypass_bare")
+        .expect("journalled");
+    let mut keys: Vec<&str> = refused
+        .payload
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["exec_env", "reason", "runtime"],
+        "{}",
+        refused.payload
+    );
+    assert_eq!(refused.payload["runtime"], "fake");
+    assert_eq!(refused.payload["exec_env"], "bare");
+    let text = refused.payload.to_string();
+    for internal in ["cred:", "login:", &h1.to_string(), &h2.to_string()] {
+        assert!(!text.contains(internal), "{internal} in {text}");
+    }
+    for kind in ["run_placed", "session_assigned", "step_started"] {
+        assert!(!events.iter().any(|e| e.kind == kind), "{kind}: {events:?}");
+    }
+
+    // 2d: the plain entry is taken; nothing refused, the mode not lowered.
+    queue.enqueue(chained.id).await.unwrap();
+    eventually("the chained run placed", || async {
+        placed_on(&store, chained.id).await.is_some()
+    })
+    .await;
+    let run = store
+        .read()
+        .await
+        .unwrap()
+        .runs_of_task(chained.id)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+        .id;
+    let events = store
+        .read()
+        .await
+        .unwrap()
+        .events_after(Some(run), 0, 64)
+        .await
+        .unwrap();
+    let placed = events.iter().find(|e| e.kind == "run_placed").unwrap();
+    assert_eq!(placed.payload["runtime"], "plain", "{}", placed.payload);
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == "placement_refused_bypass_bare"),
+        "{events:?}"
+    );
+    let modes = store
+        .read()
+        .await
+        .unwrap()
+        .permission_modes()
+        .await
+        .unwrap();
+    assert!(
+        modes
+            .iter()
+            .any(|(a, m)| a == "fake" && m == "bypass_permissions"),
+        "never lowered: {modes:?}"
+    );
+}
+
+/// BLO-136 case 3 (cross-workspace placement and cooldown). Workspace Main
+/// runs `fake` on a key that cools; workspace Ops has no key and its own
+/// host. Ops' run goes to Ops' host only (never Main's), and Main's cooling
+/// key neither blocks nor marks it; Main's run waits on its own key.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_a_workspaces_cooling_key_never_blocks_another_workspaces_host() {
+    use sun_store::{HostRepo, WorkspaceRepo};
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let main_task = tasks_of(&store, WORKFLOW, 1).await.remove(0);
+    let main_host = add_host(&store, "main-mac", true).await;
+    let key = sun_core::model::Runtime {
+        id: sun_core::RuntimeId::generate(),
+        workspace_id: sun_core::WorkspaceId::MAIN,
+        name: "fake".into(),
+        adapter: "fake".into(),
+        source: RuntimeSource::Credits,
+        byo_key: None,
+        created_by: None,
+    };
+    let until = chrono::Utc::now() + chrono::Duration::minutes(10);
+    // Stored before the kernel starts: the queue loads cooldowns at start.
+    let mut tx = store.begin().await.unwrap();
+    assert!(tx.insert_runtime(&key).await.unwrap());
+    tx.set_cooldown(&Account::Credential(key.id).key(main_host), Some(until))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![main_host])));
+    let (engine, queue) = kernel_on(&store, link.clone(), main_host, Caps::default()).await;
+    let policy = sun_core::model::SignupPolicy::default();
+    let ops = engine
+        .create_workspace("Ops", None, None, &policy, "user:me")
+        .await
+        .unwrap()
+        .id;
+    let ops_host = sun_core::model::Host {
+        id: HostId::generate(),
+        name: "ops-vps".into(),
+        capabilities: serde_json::json!({
+            "os": "linux", "arch": "x86_64", "cpus": 4,
+            "runtimes": [{"adapter": "fake", "readiness":
+                {"installed": true, "version": "1", "logged_in": true, "detail": null}}],
+        }),
+        enrolled_by: None,
+    };
+    let parsed = sun_workflow::parse(WORKFLOW).unwrap();
+    let workflow = Workflow {
+        id: WorkflowId::generate(),
+        workspace_id: ops,
+        name: parsed.name.clone(),
+    };
+    let ops_task = Task {
+        title: "ops".into(),
+        workflow_id: Some(workflow.id),
+        status: TaskStatus::Backlog,
+        ..sun_core::model::Task::new(ops, "")
+    };
+    let mut tx = store.begin().await.unwrap();
+    tx.insert_host(&ops_host).await.unwrap();
+    tx.link(ops, sun_store::WorkspaceItem::Host(ops_host.id))
+        .await
+        .unwrap();
+    tx.insert_workflow(&workflow).await.unwrap();
+    tx.save_workflow_version(workflow.id, WORKFLOW, &parsed.hash)
+        .await
+        .unwrap();
+    tx.insert_task(&ops_task).await.unwrap();
+    tx.commit().await.unwrap();
+    link.0.lock().unwrap().push(ops_host.id);
+    queue.wake();
+
+    // Main's first: by the time Ops' run is placed, a pass has weighed it.
+    let main_run = queue.enqueue(main_task.id).await.unwrap();
+    queue.enqueue(ops_task.id).await.unwrap();
+    eventually("Ops' run placed", || async {
+        placed_on(&store, ops_task.id).await.is_some()
+    })
+    .await;
+    assert_eq!(
+        placed_on(&store, ops_task.id).await,
+        Some(ops_host.id),
+        "Ops' run on Ops' host, not Main's"
+    );
+    assert_eq!(
+        run_of(&store, main_task.id).await,
+        Some((main_run, RunStatus::Queued)),
+        "Main's key cools: its run waits, and never goes to Ops' host"
+    );
+}

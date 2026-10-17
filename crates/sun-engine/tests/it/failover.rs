@@ -1736,3 +1736,33 @@ async fn failover_a_failed_checkpoint_push_releases_the_paid_lease() {
     let handoff = first_event(&h, "handoff").await;
     assert_eq!(handoff.payload["to"], "fake-limit");
 }
+
+/// BLO-136 case 4: no internal account key (`cred:` / `login:`,
+/// `sun_core::model::Account::key`) in the run journal. A real limit hit
+/// journals `runtime_cooling`; the journal API (`GET /runs/{id}/events`,
+/// read through `Engine::events`) hands every payload out as is.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_journal_holds_no_account_key() {
+    let limit = limit_hit(Duration::from_secs(3600));
+    let h = Harness::start(
+        "switch",
+        &[
+            ("fake-limit", vec![script(&[TALK, EDIT, &limit, EXIT])]),
+            ("fake-ok", vec![script(&[TALK, DONE, EXIT])]),
+        ],
+    )
+    .await;
+    h.assert_handed_off("fake-limit").await;
+    h.wait_for(|s| s.is_terminal()).await;
+    let journal = h.engine.events(h.run_id, 0, 10_000).await.unwrap();
+    assert!(journal.iter().any(|e| e.kind == "runtime_cooling"));
+    let leaks: Vec<String> = journal
+        .iter()
+        .filter(|e| {
+            let text = e.payload.to_string();
+            text.contains("cred:") || text.contains("login:")
+        })
+        .map(|e| format!("{}: {}", e.kind, e.payload))
+        .collect();
+    assert!(leaks.is_empty(), "account keys in the journal: {leaks:?}");
+}

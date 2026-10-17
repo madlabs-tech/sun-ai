@@ -698,3 +698,99 @@ async fn flipping_the_kill_switch_loses_nothing_and_v1_stays_the_old_json() {
         "one online host is logged in: {claude}"
     );
 }
+
+// --- BLO-136 case 3: a cooling key stays in its own workspace ----------
+
+/// Main's key on Claude Code cools. Beta's own host (enrolled into Beta
+/// only) is not marked `limited` by it, in Beta's list, in the owner's
+/// all-workspaces list, or to Beta's admin; Main's host is. Beta's admin
+/// sees nothing of Main's host or key.
+#[tokio::test]
+async fn a_cooling_key_never_marks_another_workspaces_host() {
+    use std::future::IntoFuture;
+    let k = kernel().await;
+    let app = &k.app;
+    let _main_host = host_with(&k, claude_code(true)).await;
+    let b = beta(app).await;
+    let bea = member_token_in(&k.store, "bea", &[(b, Role::Admin)]).await;
+    // Enrol a host into Beta.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/host", listener.local_addr().unwrap());
+    tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let (status, issued) = call(
+        app,
+        "POST",
+        &format!("/api/v1/workspaces/{b}/hosts/tokens"),
+        None,
+    )
+    .await;
+    assert!(status.is_success(), "{status} {issued}");
+    let enroll = json!({ "type": "enroll", "token": issued["token"], "name": "beta-vps" });
+    let enrolled = crate::api::ask(&url, enroll).await.unwrap();
+    let beta_host: HostId = serde_json::from_value(enrolled["host_id"].clone()).unwrap();
+    let mut hello = crate::api::hello(beta_host, enrolled["host_key"].as_str().unwrap());
+    hello["capabilities"]["runtimes"] = claude_code(true);
+    let _beta_socket = connect_host(app, beta_host, hello).await;
+
+    let key = Runtime {
+        id: sun_core::RuntimeId::generate(),
+        workspace_id: MAIN,
+        name: "claude-credits".into(),
+        adapter: "claude-code".into(),
+        source: RuntimeSource::Credits,
+        byo_key: None,
+        created_by: None,
+    };
+    let until = chrono::Utc::now() + chrono::Duration::minutes(30);
+    let mut tx = k.store.begin().await.unwrap();
+    assert!(tx.insert_runtime(&key).await.unwrap());
+    tx.set_cooldown(&Account::Credential(key.id).key(k.host), Some(until))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let state_in = |list: &Value, host: HostId| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["tool"] == "claude-code" && r["host"]["id"] == json!(host))
+            .map(|r| r["state"].clone())
+    };
+    for model in [RuntimesModel::V2, RuntimesModel::V1] {
+        let app = &sun_api::router(k.api.clone().with_runtimes_model(model));
+        let (_, owner) = call(app, "GET", "/api/v1/runtimes", None).await;
+        assert_eq!(
+            state_in(&owner, k.host),
+            Some(json!("limited")),
+            "{model:?} {owner}"
+        );
+        assert_eq!(
+            state_in(&owner, beta_host),
+            Some(json!("idle")),
+            "{model:?} {owner}"
+        );
+        let beta_path = format!("/api/v1/runtimes?workspace={b}");
+        for (who, list) in [
+            ("owner", call(app, "GET", &beta_path, None).await.1),
+            ("bea", call_as(app, &bea, "GET", &beta_path, None).await.1),
+        ] {
+            assert_eq!(
+                state_in(&list, beta_host),
+                Some(json!("idle")),
+                "{model:?} {who}: {list}"
+            );
+            let text = list.to_string();
+            for hidden in [
+                k.host.to_string(),
+                key.id.to_string(),
+                "cred:".into(),
+                "login:".into(),
+            ] {
+                assert!(
+                    !text.contains(&hidden),
+                    "{model:?} {who} sees {hidden}: {list}"
+                );
+            }
+        }
+    }
+}
