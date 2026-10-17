@@ -2822,3 +2822,41 @@ async fn a_workflow_steps_mode_is_one_its_tools_report() {
     );
     k.engine.save_workflow(None, &yaml("plan")).await.unwrap();
 }
+
+/// BLO-163: a direct chat's mode is checked against its tool the same way,
+/// when it starts and when it switches.
+#[tokio::test]
+async fn a_direct_chats_mode_is_one_its_tool_reports() {
+    let k = kernel_on(&[("old", Some(&["bare"]))], Caps::default()).await;
+    k.engine
+        .set_host_capabilities(k.hosts[0], &with_modes(None))
+        .await
+        .unwrap();
+    let runtime = sun_core::ChainSpec {
+        tool: "fake".into(),
+        credential: None,
+        host: None,
+        model: None,
+        effort: None,
+    };
+    let start = |mode| {
+        k.engine
+            .create_direct_chat(WorkspaceId::MAIN, runtime.clone(), Some(mode), None)
+    };
+    let refused = start(sun_core::PermissionMode::Auto).await;
+    assert!(
+        matches!(refused, Err(Error::InvalidInput(ref why))
+            if why.starts_with("permission_mode: fake can't run in `auto`")),
+        "{refused:?}"
+    );
+    let chat = start(sun_core::PermissionMode::Plan).await.unwrap().task;
+    let switch = sun_engine::ChatChange {
+        runtime: None,
+        permission_mode: Some(Some(sun_core::PermissionMode::Auto)),
+    };
+    let refused = k.engine.update_direct_chat(chat.id, switch, None).await;
+    assert!(
+        matches!(refused, Err(Error::InvalidInput(ref why)) if why.starts_with("permission_mode: ")),
+        "{refused:?}"
+    );
+}

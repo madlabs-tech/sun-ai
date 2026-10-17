@@ -31,7 +31,7 @@ use crate::query::parse;
 pub const AGENT_STEP: &str = "agent";
 
 /// How errors name an agent's mode.
-const MODE_FIELD: &str = "permission_mode";
+pub(crate) const MODE_FIELD: &str = "permission_mode";
 
 /// `POST /agents` and `PATCH /agents/{id}`: the fields to set; absent ones
 /// stay (a new agent needs a name and a runtime).

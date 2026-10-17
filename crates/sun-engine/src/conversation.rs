@@ -357,7 +357,7 @@ impl Engine {
     /// A new chat of `creator` (`None`: the token holder) on `workspace`
     /// with no agent: straight with `runtime`'s tool, in `permission_mode`
     /// (`None`: the host's default). It waits in Needs you for its first
-    /// message. `InvalidInput` for an entry `chain_check` refuses.
+    /// message. `InvalidInput` for an entry or a mode `chain_check` refuses.
     pub async fn create_direct_chat(
         &self,
         workspace: WorkspaceId,
@@ -371,6 +371,14 @@ impl Engine {
         let mut tx = self.store.begin().await?;
         tx.get_workspace(workspace).await?;
         crate::chain_check::check(&mut tx, workspace, &chain, "runtime").await?;
+        crate::chain_check::check_mode(
+            &mut tx,
+            workspace,
+            &chain,
+            permission_mode,
+            agents::MODE_FIELD,
+        )
+        .await?;
         let workflow = Workflow {
             id: WorkflowId::generate(),
             workspace_id: workspace,
@@ -436,6 +444,15 @@ impl Engine {
         }
         let chain = [ChainEntry::Spec(after.runtime.clone())];
         crate::chain_check::check(&mut tx, task.workspace_id, &chain, "runtime").await?;
+        let mode = after.permission_mode;
+        crate::chain_check::check_mode(
+            &mut tx,
+            task.workspace_id,
+            &chain,
+            mode,
+            agents::MODE_FIELD,
+        )
+        .await?;
         let (source, parsed) = agents::one_step_source(&chain, "", &[], after.permission_mode)?;
         let workflow = task
             .workflow_id
