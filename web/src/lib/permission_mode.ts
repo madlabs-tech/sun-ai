@@ -1,13 +1,14 @@
 // The permissions picker of the agent form and of a chat without an agent: which modes it offers, and its hint.
 import { PERMISSION_MODES, type Host, type PermissionMode, type Runtime } from './api/types';
-import { can } from './app_state.svelte';
+import { app, can } from './app_state.svelte';
 import { PERMISSION_MODE_COPY as MODE } from './format';
 
 /** Why the caller can't pick bypass ('' when they can): the operator's `runtimes.allow_bypass`, as every runtime
- *  reports it, and `manage_runtimes`. */
-// ponytail: BLO-164's `can_bypass` on /me replaces this body.
+ *  reports it, the owner's bypass policy (`can_bypass` on /me; absent on an older kernel, so not hidden) and
+ *  `manage_runtimes`. */
 export function bypass_off(runtimes: Runtime[]): string {
   if (!runtimes.some((r) => r.allow_bypass)) return '“Anything” is off on this deployment (sun.yaml runtimes.allow_bypass).';
+  if (app.me?.can_bypass === false) return '“Anything” is not enabled for you. The owner can enable it in Settings → Security.';
   if (!can('manage_runtimes')) return '“Anything” needs the manage runtimes permission.';
   return '';
 }
