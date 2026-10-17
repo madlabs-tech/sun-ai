@@ -21,10 +21,10 @@
 
 use serde_json::json;
 use sun_core::model::{ActivityKind, Run, Task, TaskActivity, TaskKey, TaskKind};
+use sun_core::redact::redact;
 use sun_core::{
     AgentId, Error, MemberId, Result, RunId, RunStatus, TaskId, TaskStatus, WorkspaceId,
 };
-use sun_core::redact::redact;
 use sun_store::{AgentRepo, EventLog, RunRepo, SecretRepo, TaskRepo, Tx};
 
 use crate::executor::tasks;
@@ -168,7 +168,12 @@ pub(crate) async fn thread(tx: &mut Tx, task_id: TaskId, me: Option<AgentId>) ->
         lines.push(format!("- {who}: {text}"));
     }
     let mut keep = lines.len().saturating_sub(THREAD_COMMENTS);
-    while keep < lines.len() && lines[keep..].iter().map(String::len).sum::<usize>() > THREAD_CHARS
+    while keep < lines.len()
+        && lines[keep..]
+            .iter()
+            .map(|l| l.chars().count())
+            .sum::<usize>()
+            > THREAD_CHARS
     {
         keep += 1;
     }

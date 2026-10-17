@@ -2061,7 +2061,6 @@ async fn a_secret_cut_by_the_comment_limit_is_still_redacted() {
 /// 4. Defect probe: the thread's 16k budget counts bytes, not chars, so a
 /// non-ASCII thread well under 16k chars is trimmed anyway.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BLO-146 defect: conversation::thread sums String::len (bytes) against THREAD_CHARS; non-ASCII threads are cut at ~half the stated 16k chars"]
 async fn the_thread_budget_counts_chars_not_bytes() {
     let k = kernel().await;
     let ada = k.agent("Ada").await;
