@@ -43,7 +43,11 @@
   const allow_bypass = $derived(runtimes.some((r) => r.allow_bypass));
   const mode_options = $derived([
     { value: '', label: 'Inherit from the runtime' },
-    ...PERMISSION_MODES.filter((m) => m !== 'bypass_permissions' || allow_bypass).map((m) => ({ value: m, label: MODE[m][0] })),
+    // An agent already in bypass keeps showing it, even with bypass now off.
+    ...PERMISSION_MODES.filter((m) => m !== 'bypass_permissions' || allow_bypass || editing?.permission_mode === m).map((m) => ({
+      value: m,
+      label: MODE[m][0],
+    })),
   ]);
   /** The agent row's mode: its own, or the inherited one. */
   const mode_line = (a: Agent) =>
@@ -92,6 +96,8 @@
     saving = true;
     error = '';
     const fields: AgentFields = { ...$state.snapshot(form), name: form.name.trim(), permission_mode: form.permission_mode || null };
+    // Unchanged, it isn't sent: an agent saved in bypass stays editable after the deployment turns bypass off.
+    if (editing && fields.permission_mode === editing.permission_mode) delete fields.permission_mode;
     try {
       if (editing) {
         await api.update_agent(editing.id, fields);
