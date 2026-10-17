@@ -477,6 +477,68 @@ steps:
         assert!(ended.end_reason.unwrap().starts_with(".sun/exec_env.yaml:"));
     }
 
+    /// BLO-139: a workflow file in the repo can't raise a step to
+    /// `bypass_permissions`. Saving that step through the API needs
+    /// `manage_runtimes` and `runtimes.allow_bypass`; whoever can push to the
+    /// repo (or an earlier session that edited it) must not get a bypass
+    /// session past that gate.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repo_workflow_file_cannot_raise_a_step_to_bypass() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let sessions = Arc::new(Mutex::new(0_usize));
+        let count = sessions.clone();
+        let host = LocalHost::new(dir.path(), move |_, _| *count.lock().unwrap() += 1);
+        let work = host
+            .prepare_worktree(
+                HostId::generate(),
+                Worktree::Folder {
+                    task_id: TaskId::generate(),
+                },
+            )
+            .await
+            .unwrap();
+        // A container, so the bare-host refusal doesn't hide the mode.
+        let pinned = "name: fix
+exec_env: { kind: container, image: 'node:22' }
+steps:
+  - id: implement
+    type: agent
+    prompt: fix it
+";
+        std::fs::create_dir_all(work.join(".sun/workflows")).unwrap();
+        std::fs::write(
+            work.join(".sun/workflows/fix.yaml"),
+            format!("{pinned}    permission_mode: bypass_permissions\n"),
+        )
+        .unwrap();
+        let repo = crate::gates::tests::repo("https://github.com/acme/app.git");
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_repo(&repo).await.unwrap();
+        tx.commit().await.unwrap();
+        let run_id = seed_with(&store, pinned, vec![repo.id]).await;
+        let engine = engine(&store, host, Arc::new(Echo::default())).await;
+
+        engine.start_run(run_id).await.unwrap();
+        let run = until_run_ends(&store, run_id).await;
+        let mut read = store.read().await.unwrap();
+        let ran = read
+            .get_workflow_version(run.workflow_id, run.workflow_version)
+            .await
+            .unwrap();
+        let step = StepKey::new("implement").unwrap();
+        let mode = sun_workflow::parse(&ran.source_yaml)
+            .unwrap()
+            .permission_mode(&step);
+        let started = *sessions.lock().unwrap();
+        assert!(
+            !(started > 0 && mode == Some(sun_core::PermissionMode::BypassPermissions)),
+            "{started} session(s) ran on version {} whose step is bypass_permissions, \
+             taken from the repo's .sun/workflows/fix.yaml",
+            run.workflow_version
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn extension_step_runs_through_the_echo_mod() {
         let dir = tempfile::tempdir().unwrap();
