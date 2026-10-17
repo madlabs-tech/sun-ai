@@ -403,6 +403,17 @@ async fn builtin_template_reaches_the_first_prompt() {
     assert!(prompt.contains("(todowrite)"), "{prompt}");
 }
 
+/// BLO-163: OpenCode has no reviewer for `auto`, so its host reports only
+/// the four modes it enforces exactly.
+#[tokio::test]
+async fn opencode_reports_every_mode_but_auto() {
+    let host = HostCtx {
+        host_id: HostId::generate(),
+    };
+    let modes = OpenCode::new("opencode").permission_modes(&host).await;
+    assert_eq!(modes, sun_core::PermissionMode::LEGACY);
+}
+
 /// BLO-163: OpenCode allows every tool by default, so each session's config
 /// makes it ask (Sun answers by mode), in every mode and merged over a
 /// provider config the session env already carries (Sun credits).

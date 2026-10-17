@@ -18,8 +18,12 @@
 //! | `plan` | read, search, think | never edits, runs or fetches, even with `allow_shell` |
 //! | `default` | read, search, think (+ execute with `allow_shell`) | edits refused |
 //! | `accept_edits` | + edit, delete, move | edits freely |
-//! | `auto` | same as `accept_edits` | OpenCode has no reviewer to approve "safe" commands |
 //! | `bypass_permissions` | every kind | everything |
+//!
+//! `auto` is not reported (the four [`PermissionMode::LEGACY`] modes are):
+//! OpenCode has no reviewer to approve "safe" commands. A session can still
+//! get it from a host's own `runtimes.permission_mode` default; it then
+//! answers as `accept_edits`, never more.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -345,8 +349,7 @@ impl AcpStream {
             PermissionMode::BypassPermissions => {
                 kinds.extend(["edit", "delete", "move", "execute", "fetch", "other"]);
             }
-            // ponytail: OpenCode has no reviewer, so `auto` never approves
-            // more than `accept_edits`; a reviewer of its own when OpenCode has one.
+            // Not reported (module doc): only a host default reaches `auto`.
             PermissionMode::AcceptEdits | PermissionMode::Auto => {
                 kinds.extend(["edit", "delete", "move"]);
             }

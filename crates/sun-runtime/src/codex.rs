@@ -10,19 +10,23 @@
 //! Permission modes ([`mode_args`]), from 0.160.0's `codex exec --help`.
 //! `exec` is headless: nobody can answer an approval, so every mode but
 //! `auto` sets `approval_policy="never"` and the sandbox alone bounds the
-//! agent (a refused write comes back to the model as an error).
+//! agent (a refused write comes back to the model as an error). The host
+//! reports only the modes with an exact Codex equivalent
+//! ([`parse_permission_modes_help`]):
 //!
 //! | Sun mode | Codex flags | Effect |
 //! |---|---|---|
 //! | `plan` | `sandbox_mode="read-only"`, `approval_policy="never"` | reads and runs read-only commands; never writes |
-//! | `default` | same as `plan` | "ask first" with nobody to ask: refused, as on Claude Code |
-//! | `accept_edits` | `sandbox_mode="workspace-write"`, `approval_policy="never"` | edits the worktree; commands run too, sandboxed to it, no network |
+//! | `default` | same as `plan` | "ask first" with nobody to ask: refused, as on Claude Code headless |
 //! | `auto` | `--approve-for-me` | workspace-write; escalations go to Codex's automatic reviewer |
 //! | `bypass_permissions` | `--dangerously-bypass-approvals-and-sandbox` | everything, no sandbox (container or vm only) |
 //!
-//! What Codex can't express: `default` vs `plan` (no "ask" without a human),
-//! and edits without commands in `accept_edits` (its sandbox bounds both
-//! alike). `auto` is offered only when the installed `codex exec --help`
+//! `accept_edits` is not reported: Codex's sandbox bounds edits and
+//! commands alike, so it can't allow one without the other. A session can
+//! still get it from a host's own `runtimes.permission_mode` default (or an
+//! agent saved before the save-time check); it then runs workspace-write
+//! with `approval_policy="never"`, as every Codex session did before
+//! BLO-163. `auto` is reported only when the installed `codex exec --help`
 //! lists `--approve-for-me`.
 
 use std::collections::HashSet;
@@ -144,19 +148,25 @@ pub fn mode_args(mode: PermissionMode) -> &'static [&'static str] {
         PermissionMode::Plan | PermissionMode::Default => {
             &["-c", "sandbox_mode=\"read-only\"", "-c", NEVER]
         }
+        // Not reported (module doc): only a host default reaches it.
         PermissionMode::AcceptEdits => &["-c", "sandbox_mode=\"workspace-write\"", "-c", NEVER],
         PermissionMode::Auto => &["--approve-for-me"],
         PermissionMode::BypassPermissions => &["--dangerously-bypass-approvals-and-sandbox"],
     }
 }
 
-/// `codex exec --help` → the Sun modes it can enforce: all but `auto`
-/// always (`sandbox_mode`, `approval_policy`), `auto` with `--approve-for-me`.
+/// `codex exec --help` → the Sun modes Codex enforces exactly: `plan`,
+/// `default` and `bypass_permissions` always, `auto` with
+/// `--approve-for-me`, never `accept_edits` (the module doc says why).
 pub fn parse_permission_modes_help(help: &str) -> Vec<PermissionMode> {
     let auto = help.contains("--approve-for-me");
     PermissionMode::ALL
         .into_iter()
-        .filter(|mode| auto || *mode != PermissionMode::Auto)
+        .filter(|mode| match mode {
+            PermissionMode::AcceptEdits => false,
+            PermissionMode::Auto => auto,
+            _ => true,
+        })
         .collect()
 }
 
@@ -303,7 +313,7 @@ impl RuntimeAdapter for Codex {
         process::run(&self.binary, &["exec", "--help"])
             .await
             .map_or_else(
-                |_| PermissionMode::legacy(),
+                |_| parse_permission_modes_help(""),
                 |out| parse_permission_modes_help(&String::from_utf8_lossy(&out.stdout)),
             )
     }
