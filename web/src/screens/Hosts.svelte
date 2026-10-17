@@ -87,7 +87,9 @@
     acting = '';
   }
 
-  const INSTALL = 'curl -fsSL https://get-sun.madlabs.tech | sh -s -- --no-service';
+  // Linux installs into /usr/local/bin, so it needs root; macOS installs into ~/.local/bin and must not.
+  const INSTALL_LINUX = 'curl -fsSL https://get-sun.madlabs.tech | sudo sh -s -- --no-service';
+  const INSTALL_MACOS = 'curl -fsSL https://get-sun.madlabs.tech | sh -s -- --no-service';
   let enrol = $state<HostToken | null>(null);
   let enrol_open = $state(false);
   let host_name = $state('');
@@ -111,7 +113,6 @@
   }
 
   const copy = () => copy_text(command, 'Command copied');
-  const copy_install = () => copy_text(INSTALL, 'Command copied');
 
   const TOOL_NAMES: Record<string, string> = { ios_simulator: 'iOS Simulator', android_emulator: 'Android emulator', maestro: 'Maestro' };
   /** Device tools that aren't ready, with the fix the host reported. */
@@ -163,8 +164,11 @@
     <Input label="Run this on the machine" mono readonly value={command} hint={enrol ? `Works once, for ${valid_for(enrol)} min (until ${clock(enrol.expires_at)}). The host serves ${here}.` : ''}>
       {#snippet trailing()}<IconButton icon="copy" label="Copy command" variant="ghost" size="sm" onclick={copy} />{/snippet}
     </Input>
-    <Input label="No sun on the machine yet? Install it first" mono readonly value={INSTALL}>
-      {#snippet trailing()}<IconButton icon="copy" label="Copy install command" variant="ghost" size="sm" onclick={copy_install} />{/snippet}
+    <Input label="No sun on the machine yet? Install it on Linux" mono readonly value={INSTALL_LINUX}>
+      {#snippet trailing()}<IconButton icon="copy" label="Copy Linux install command" variant="ghost" size="sm" onclick={() => copy_text(INSTALL_LINUX, 'Command copied')} />{/snippet}
+    </Input>
+    <Input label="Or on macOS" mono readonly value={INSTALL_MACOS}>
+      {#snippet trailing()}<IconButton icon="copy" label="Copy macOS install command" variant="ghost" size="sm" onclick={() => copy_text(INSTALL_MACOS, 'Command copied')} />{/snippet}
     </Input>
   </div>
   {#snippet footer()}<Button variant="secondary" onclick={() => (enrol_open = false)}>Done</Button>{/snippet}

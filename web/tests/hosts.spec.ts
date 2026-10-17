@@ -118,3 +118,13 @@ test('hosts: a member reads the workspace’s hosts and changes nothing', async 
   for (const name of ['Add host', 'Detach hery-mbp', /^Kill session/]) await expect(page.getByRole('button', { name })).toHaveCount(0);
   await expect(page.getByRole('region', { name: 'Hosts you can attach' })).toHaveCount(0);
 });
+
+test('hosts: add host shows the install line for Linux (with sudo) and macOS', async ({ page }) => {
+  await page.goto('/?mock=1#/hosts');
+  await page.getByRole('button', { name: 'Add host' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByLabel('No sun on the machine yet? Install it on Linux')).toHaveValue(
+    'curl -fsSL https://get-sun.madlabs.tech | sudo sh -s -- --no-service',
+  );
+  await expect(dialog.getByLabel('Or on macOS')).toHaveValue('curl -fsSL https://get-sun.madlabs.tech | sh -s -- --no-service');
+});
