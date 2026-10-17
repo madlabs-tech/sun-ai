@@ -1,5 +1,5 @@
 // Display rules shared by every screen: task columns, status labels, money, time.
-import type { Agent, ChainEntry, OnLimit, PermissionMode, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
+import type { Agent, ChainEntry, ChainSpec, DirectSettings, OnLimit, PermissionMode, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
 import { PERMISSION_MODES } from './api/types';
 
 /** `list` with `item` added (`on`) or removed, once. */
@@ -157,6 +157,25 @@ export function chain_modes(runtimes: Runtime[], chain: ChainEntry[]): Permissio
     return runtimes.filter((r) => r.host && r.tool === tool && (!pin || r.host.id === pin)).flatMap((r) => (r.permission_modes ? [r.permission_modes] : []));
   });
   return PERMISSION_MODES.filter((m) => reports.every((modes) => !modes.length || modes.some((x) => x.includes(m))));
+}
+
+/** A chat without an agent's name: the paying key's, else the tool's, then its model. */
+export const direct_name = (s: ChainSpec) => [s.credential ?? tool_label(s.tool), s.model].filter(Boolean).join(' · ');
+
+/** A chat without an agent's model, effort and mode, as its header and its switch lines say them. */
+export const direct_line = (s: DirectSettings) =>
+  [s.runtime.model ?? 'Default model', s.runtime.effort, s.permission_mode ? PERMISSION_MODE_COPY[s.permission_mode][0] : 'Host default mode']
+    .filter(Boolean)
+    .join(' · ');
+
+/** Who pays for a chat straight with `s`'s tool: a workspace key or credits, else the host's own login of the CLI. */
+export function payer(s: ChainSpec, runtimes: Runtime[]): string {
+  if (s.credential) {
+    const credits = runtimes.find((r) => !r.host && r.name === s.credential)?.source === 'credits';
+    return credits ? `Paid from workspace credits (${s.credential}).` : `Paid by the workspace key ${s.credential}.`;
+  }
+  const host = runtimes.find((r) => r.host && r.host.id === s.host)?.host?.name;
+  return `Runs on ${host ? `${host}’s` : 'its host’s'} ${tool_label(s.tool)} login.`;
 }
 
 /** The distinct chain names of a runtime list (one per tool, however many hosts have it). */
