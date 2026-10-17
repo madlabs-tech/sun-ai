@@ -8,7 +8,7 @@
 //! (BYO runtime).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -73,7 +73,7 @@ struct Launch {
 }
 
 impl Launch {
-    /// `codex exec --json -c … [resume <thread>] -- <prompt>`.
+    /// `codex exec [--skip-git-repo-check] --json -c … [resume <thread>] -- <prompt>`.
     async fn spawn(
         &self,
         resume: Option<&str>,
@@ -81,7 +81,14 @@ impl Launch {
         thread_id: watch::Sender<Option<String>>,
     ) -> Result<Process> {
         let mut cmd = Command::new(process::program(&self.binary, &self.spec.env));
-        cmd.args(["exec", "--json", "-c"])
+        cmd.arg("exec");
+        // Codex refuses a cwd outside a git repo. A folder task (or the parent
+        // dir of a multi-repo task) is a scratch dir Sun made for the task;
+        // `sandbox_mode` still bounds what the agent may write.
+        if !in_git_repo(&self.spec.worktree) {
+            cmd.arg("--skip-git-repo-check");
+        }
+        cmd.args(["--json", "-c"])
             .arg(format!("sandbox_mode={}", json!(self.sandbox)));
         if let Some(model) = &self.spec.model {
             cmd.arg("-c").arg(format!("model={}", json!(model)));
@@ -108,6 +115,12 @@ impl Launch {
         let secrets = self.spec.env.values().cloned().collect();
         Process::spawn(ID, cmd, normalizer, None, secrets).await
     }
+}
+
+/// Whether `dir` is inside a git work tree as Codex checks it: a `.git`
+/// entry in `dir` or one of its parents.
+fn in_git_repo(dir: &Path) -> bool {
+    dir.ancestors().any(|dir| dir.join(".git").exists())
 }
 
 /// One Codex session: a chain of `codex exec` processes, one per turn.

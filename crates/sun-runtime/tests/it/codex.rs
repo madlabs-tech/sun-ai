@@ -1,5 +1,6 @@
 //! Codex adapter: exact fixture replays, then a fake `codex` script through
 //! the real process path. No real CLI is called.
+#![allow(clippy::unwrap_used)]
 
 use crate::common;
 
@@ -7,7 +8,8 @@ use chrono::{TimeZone, Utc};
 use common::{collect, parts, pinned_dir, replay_case, sandbox, spec};
 use serde_json::json;
 use sun_core::{
-    HostCtx, HostId, LimitKind, Role, RuntimeAdapter, Steer, StopMode, SunEvent, Todo, TodoStatus,
+    HostCtx, HostId, LimitKind, Role, RuntimeAdapter, SessionId, Steer, StopMode, SunEvent, Todo,
+    TodoStatus,
 };
 use sun_runtime::Codex;
 use sun_runtime::codex::CodexStream;
@@ -175,6 +177,14 @@ case "$1" in
 MODELS
   exit 0 ;;
 esac
+case " $* " in
+  *" --skip-git-repo-check "*) ;;
+  *) d=$PWD
+     until [ -e "$d/.git" ]; do
+       [ "$d" = / ] && { echo "Not inside a trusted directory and --skip-git-repo-check was not specified." >&2; exit 1; }
+       d=$(dirname "$d")
+     done ;;
+esac
 printf '%s\n' "$*" >> "$SUN_OUT.args"
 thread='{"type":"thread.started","thread_id":"t-1"}'
 case "$*" in
@@ -201,9 +211,17 @@ esac
 exit "${SUN_EXIT:-0}"
 "#;
 
+/// A fake-`codex` sandbox that is a git repo, as a repo-backed task's
+/// worktree is.
+fn repo_sandbox(name: &str) -> std::path::PathBuf {
+    let dir = sandbox("codex", FAKE_CODEX, name);
+    std::fs::create_dir(dir.join(".git")).unwrap();
+    dir
+}
+
 #[tokio::test]
 async fn live_run_matches_replay_and_passes_the_envelope() {
-    let dir = sandbox("codex", FAKE_CODEX, "live");
+    let dir = repo_sandbox("live");
     let adapter = Codex::new(dir.join("codex"));
     let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
     let mut spec = spec(&dir, &[("SUN_FIXTURE", &fixture)]);
@@ -228,9 +246,77 @@ async fn live_run_matches_replay_and_passes_the_envelope() {
     assert!(adapter.send(&handle, steer).await.is_err(), "session ended");
 }
 
+/// A fresh task folder outside any git repo, as a repo-less task gets.
+fn folder_task(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("sun-codex-{name}-{}", SessionId::generate()));
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(
+        !dir.ancestors().any(|d| d.join(".git").exists()),
+        "{} is inside a git repo",
+        dir.display()
+    );
+    dir
+}
+
+#[tokio::test]
+async fn fake_codex_rejects_a_dir_outside_git() {
+    let dir = repo_sandbox("untrusted");
+    let folder = folder_task("untrusted");
+    let out = std::process::Command::new(dir.join("codex"))
+        .args(["exec", "--json", "--", "hi"])
+        .current_dir(&folder)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Not inside a trusted directory"));
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[tokio::test]
+async fn folder_task_skips_the_git_repo_check_on_every_turn() {
+    let dir = repo_sandbox("folder");
+    let folder = folder_task("folder");
+    let adapter = Codex::new(dir.join("codex"));
+    let handle = adapter
+        .start(spec(&folder, &[("SUN_MODE", "steer")]))
+        .await
+        .unwrap();
+    let steer = Steer {
+        text: "again".into(),
+    };
+    adapter.send(&handle, steer).await.unwrap();
+    let events = collect(adapter.events(&handle)).await;
+    assert_eq!(events.last(), Some(&SunEvent::Exited { code: Some(0) }));
+    let args = std::fs::read_to_string(folder.join("out.args")).unwrap();
+    let turns: Vec<&str> = args.lines().collect();
+    assert_eq!(turns.len(), 2, "{args}");
+    for turn in &turns {
+        assert!(
+            turn.starts_with("exec --skip-git-repo-check --json -c "),
+            "{args}"
+        );
+    }
+    assert!(turns[1].ends_with("resume t-1 -- again"), "{args}");
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[tokio::test]
+async fn repo_task_keeps_the_git_repo_check() {
+    let dir = repo_sandbox("repo");
+    let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
+    let adapter = Codex::new(dir.join("codex"));
+    let handle = adapter
+        .start(spec(&dir, &[("SUN_FIXTURE", &fixture)]))
+        .await
+        .unwrap();
+    collect(adapter.events(&handle)).await;
+    let args = std::fs::read_to_string(dir.join("out.args")).unwrap();
+    assert!(!args.contains("--skip-git-repo-check"), "{args}");
+}
+
 #[tokio::test]
 async fn live_crash_honors_the_contract() {
-    let dir = sandbox("codex", FAKE_CODEX, "crash");
+    let dir = repo_sandbox("crash");
     let adapter = Codex::new(dir.join("codex"));
     let fixture = format!("{}/crash.jsonl", pinned_dir("codex"));
     let spec = spec(&dir, &[("SUN_FIXTURE", &fixture), ("SUN_EXIT", "137")]);
@@ -241,7 +327,7 @@ async fn live_crash_honors_the_contract() {
 
 #[tokio::test]
 async fn steer_resumes_the_thread_after_the_turn() {
-    let dir = sandbox("codex", FAKE_CODEX, "steer");
+    let dir = repo_sandbox("steer");
     let adapter = Codex::new(dir.join("codex"));
     let handle = adapter
         .start(spec(&dir, &[("SUN_MODE", "steer")]))
@@ -286,7 +372,7 @@ async fn steer_resumes_the_thread_after_the_turn() {
 
 #[tokio::test]
 async fn steers_queued_on_a_failed_turn_are_reported() {
-    let dir = sandbox("codex", FAKE_CODEX, "fail");
+    let dir = repo_sandbox("fail");
     let adapter = Codex::new(dir.join("codex"));
     let handle = adapter
         .start(spec(&dir, &[("SUN_MODE", "fail")]))
@@ -313,7 +399,7 @@ async fn steers_queued_on_a_failed_turn_are_reported() {
 
 #[tokio::test]
 async fn kill_ends_the_stream_without_an_error() {
-    let dir = sandbox("codex", FAKE_CODEX, "kill");
+    let dir = repo_sandbox("kill");
     let adapter = Codex::new(dir.join("codex"));
     let handle = adapter
         .start(spec(&dir, &[("SUN_MODE", "sleep")]))
@@ -327,7 +413,7 @@ async fn kill_ends_the_stream_without_an_error() {
 
 #[tokio::test]
 async fn readiness_reports_version_and_login() {
-    let dir = sandbox("codex", FAKE_CODEX, "ready");
+    let dir = repo_sandbox("ready");
     let host = HostCtx {
         host_id: HostId::generate(),
     };
@@ -349,7 +435,7 @@ async fn readiness_reports_version_and_login() {
 /// fake prints its JSON shape): per-model levels, and their union tool-wide.
 #[tokio::test]
 async fn effort_is_per_model_from_the_installed_cli() {
-    let dir = sandbox("codex", FAKE_CODEX, "effort");
+    let dir = repo_sandbox("effort");
     let host = HostCtx {
         host_id: HostId::generate(),
     };
@@ -392,7 +478,7 @@ async fn effort_is_per_model_from_the_installed_cli() {
 
 #[tokio::test]
 async fn start_resumes_an_earlier_thread() {
-    let dir = sandbox("codex", FAKE_CODEX, "resume");
+    let dir = repo_sandbox("resume");
     let adapter = Codex::new(dir.join("codex"));
     let mut spec = spec(&dir, &[]);
     spec.resume = Some("t-9".into());
@@ -416,7 +502,7 @@ async fn start_resumes_an_earlier_thread() {
 
 #[tokio::test]
 async fn builtin_template_reaches_the_first_prompt() {
-    let dir = sandbox("codex", FAKE_CODEX, "template");
+    let dir = repo_sandbox("template");
     let adapter = Codex::new(dir.join("codex"));
     let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
     let mut spec = spec(&dir, &[("SUN_FIXTURE", &fixture)]);
@@ -431,7 +517,7 @@ async fn builtin_template_reaches_the_first_prompt() {
 
 #[tokio::test]
 async fn an_effort_that_is_not_a_token_never_reaches_the_cli() {
-    let dir = sandbox("codex", FAKE_CODEX, "bad-effort");
+    let dir = repo_sandbox("bad-effort");
     let adapter = Codex::new(dir.join("codex"));
     let mut spec = spec(&dir, &[]);
     spec.effort = Some("high\" -c sandbox_mode=\"danger-full-access".into());
