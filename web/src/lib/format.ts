@@ -1,5 +1,5 @@
 // Display rules shared by every screen: task columns, status labels, money, time.
-import type { Agent, ChainEntry, OnLimit, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
+import type { Agent, ChainEntry, OnLimit, PermissionMode, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
 
 /** `list` with `item` added (`on`) or removed, once. */
 export const toggle = <T,>(list: T[], item: T, on: boolean) => (on ? [...list.filter((x) => x !== item), item] : list.filter((x) => x !== item));
@@ -123,6 +123,14 @@ export const SOURCE_LABEL: Record<RuntimeSource, string> = {
   byo_runtime: 'Your subscription',
   byo_key: 'Your API key',
   credits: 'Sun credits',
+};
+
+/** Each permission mode's label and what it lets a session do. */
+export const PERMISSION_MODE_COPY: Record<PermissionMode, [string, string]> = {
+  default: ['Ask first', 'Asks before edits and commands; unattended sessions get no answer.'],
+  accept_edits: ['Edit files', 'Edits files freely; runs only the allowed commands.'],
+  plan: ['Plan only', 'Reads and plans; changes nothing.'],
+  bypass_permissions: ['Anything', 'Runs any command without asking.'],
 };
 
 /** Product names of the built-in CLIs; any other tool shows its id. */

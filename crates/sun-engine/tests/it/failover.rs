@@ -47,7 +47,11 @@ fn limit_hit(reset_in: Duration) -> String {
 }
 
 /// `runtime_extra`: more `runtime:` keys; `pr`: a final `github.open_pr` step.
-fn workflow(on_limit: &str, runtime_extra: &str, pr: bool, chain: &str) -> String {
+fn workflow(on_limit: &str, runtime_extra: &str, pr: bool, chain: &str, mode: &str) -> String {
+    let mode = match mode {
+        "" => String::new(),
+        mode => format!("    permission_mode: {mode}\n"),
+    };
     let pr = if pr {
         "  - {id: pr, type: action, use: github.open_pr}\n"
     } else {
@@ -69,7 +73,7 @@ steps:
   - id: implement
     type: agent
     prompt: implement it
-  - id: verify
+{mode}  - id: verify
     type: gate
     gates: [diff_not_empty, {{test: {{command: "git ls-files --error-unmatch work.txt"}}}}]
 {pr}"#
@@ -342,6 +346,8 @@ struct Setup {
     runtimes_model: Option<&'static str>,
     /// Adapters whose permission mode is `bypass_permissions`.
     bypass: Vec<&'static str>,
+    /// The agent step's own `permission_mode:`; empty: none.
+    step_mode: &'static str,
 }
 
 impl Harness {
@@ -369,7 +375,13 @@ impl Harness {
         }
 
         let store = Store::open(dir.path()).await.unwrap();
-        let source = workflow(on_limit, setup.runtime_extra, setup.pr, setup.chain);
+        let source = workflow(
+            on_limit,
+            setup.runtime_extra,
+            setup.pr,
+            setup.chain,
+            setup.step_mode,
+        );
         let repo = Repo {
             id: RepoId::generate(),
             workspace_id: sun_core::WorkspaceId::MAIN,
@@ -1151,6 +1163,47 @@ async fn failover_skips_a_bypass_runtime_for_a_bare_run() {
         reason.contains("bypass_permissions needs a container or vm"),
         "{reason}"
     );
+}
+
+/// A step's own `permission_mode:` wins over the tool's policy row: `plan`
+/// on the step runs the bypass runtime on a bare run (the host would refuse
+/// bypass), and `bypass_permissions` on the step refuses a plain runtime,
+/// never downgrading it.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_a_steps_permission_mode_wins_over_the_runtime_policy() {
+    let plan = Setup {
+        bypass: vec!["fake-ok"],
+        chain: "fake-ok",
+        step_mode: "plan",
+        ..Setup::default()
+    };
+    let h = Harness::with(
+        "switch",
+        &[("fake-ok", vec![script(&[TALK, EDIT, DONE, EXIT])])],
+        plan,
+    )
+    .await;
+    let run = h.wait_for(|s| s.is_terminal()).await;
+    let reason = run.end_reason.unwrap_or_default();
+    assert!(!reason.contains("bypass_permissions"), "{reason}");
+    assert_eq!(h.adapters(), ["fake-ok"], "the session started");
+
+    let bypass = Setup {
+        chain: "fake-ok",
+        step_mode: "bypass_permissions",
+        ..Setup::default()
+    };
+    let h = Harness::with(
+        "switch",
+        &[("fake-ok", vec![script(&[TALK, EDIT, DONE, EXIT])])],
+        bypass,
+    )
+    .await;
+    let run = h.wait_for(|s| s.is_terminal()).await;
+    assert_eq!(run.status, RunStatus::Failed);
+    let reason = run.end_reason.unwrap_or_default();
+    assert!(reason.contains("bypass_permissions"), "{reason}");
+    assert!(h.adapters().is_empty(), "no session started");
 }
 
 /// Every runtime of the chain is bypass on a bare run: the engine still

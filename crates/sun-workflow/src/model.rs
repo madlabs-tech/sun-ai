@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sun_core::model::Budget;
-use sun_core::{ExecEnvSpec, McpGrant, StepKey};
+use sun_core::{ExecEnvSpec, McpGrant, PermissionMode, StepKey};
 
 /// Built-in code gates.
 pub const CODE_GATES: &[&str] = &[
@@ -82,6 +82,19 @@ pub struct Workflow {
 }
 
 impl Workflow {
+    /// The `permission_mode:` agent step `step` sets, if any.
+    pub fn permission_mode(&self, step: &StepKey) -> Option<PermissionMode> {
+        self.steps
+            .iter()
+            .find(|s| s.id == *step)
+            .and_then(|s| match s.kind {
+                StepKind::Agent {
+                    permission_mode, ..
+                } => permission_mode,
+                _ => None,
+            })
+    }
+
     /// Whether a run needs a repo: it opens a PR (an `*.open_pr` action),
     /// gates on one (`pr_exists`, `ci_green`, `merge_order`) or says so
     /// (`needs_repo: true`).
@@ -248,6 +261,11 @@ pub enum StepKind {
         context_sources: Vec<String>,
         /// Token budget for the pushed context pack.
         context_budget_tokens: Option<u32>,
+        /// The mode its sessions run in (`permission_mode:`); `None`
+        /// inherits the tool's `runtime_policy` row. An agent's system
+        /// workflow carries the agent's here. Left out of the hash when absent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<PermissionMode>,
     },
     /// Verify the previous work.
     Gate {

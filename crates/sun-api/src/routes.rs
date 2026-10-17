@@ -1409,27 +1409,35 @@ fn check_size(input: &SaveWorkflow) -> ApiResult<()> {
     Ok(())
 }
 
+/// Saves `input` as a new workflow or the next version of `workflow_id`. A
+/// step with `permission_mode: bypass_permissions` also needs
+/// `manage_runtimes` on the workflow's workspace and `runtimes.allow_bypass`.
 async fn save(
     api: &Api,
+    caller: &Caller,
     workflow_id: Option<WorkflowId>,
     input: SaveWorkflow,
 ) -> ApiResult<Json<Value>> {
     check_size(&input)?;
     let workspace = workspace_param(input.workspace_id.as_deref())?;
-    if let (Some(workflow_id), Some(workspace)) = (workflow_id, workspace)
-        && api.engine.workspace_of_workflow(workflow_id).await? != workspace
-    {
+    let target = match workflow_id {
+        Some(workflow_id) => api.engine.workspace_of_workflow(workflow_id).await?,
+        None => workspace.unwrap_or(WorkspaceId::MAIN),
+    };
+    if workspace.is_some_and(|w| w != target) {
         return Err(ApiError::invalid(
             "A workflow stays on its workspace; save it without `workspace_id`.",
         ));
     }
+    if sun_engine::sets_bypass(&input.source_yaml) {
+        if !caller.can_in(target, Permission::ManageRuntimes) {
+            return Err(auth::denied(Permission::ManageRuntimes));
+        }
+        crate::hosts::check_bypass_allowed(api, true)?;
+    }
     let (workflow, version) = api
         .engine
-        .save_workflow_on(
-            workspace.unwrap_or(WorkspaceId::MAIN),
-            workflow_id,
-            &input.source_yaml,
-        )
+        .save_workflow_on(target, workflow_id, &input.source_yaml)
         .await?;
     Ok(Json(json!({
         "id": workflow.id,
@@ -1442,21 +1450,23 @@ async fn save(
 /// Creates a workflow from YAML (its version 1).
 async fn create_workflow(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
     Body(input): Body<SaveWorkflow>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    Ok((StatusCode::CREATED, save(&api, None, input).await?))
+    Ok((StatusCode::CREATED, save(&api, &caller, None, input).await?))
 }
 
 /// Saves the next version of a workflow.
 async fn save_workflow_version(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
     Path(workflow): Path<String>,
     Body(input): Body<SaveWorkflow>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
     let workflow_id = id(&workflow, "workflow")?;
     Ok((
         StatusCode::CREATED,
-        save(&api, Some(workflow_id), input).await?,
+        save(&api, &caller, Some(workflow_id), input).await?,
     ))
 }
 
@@ -1519,6 +1529,7 @@ async fn list_templates() -> Json<Vec<Value>> {
 /// 409 when that workspace already has a workflow of that name.
 async fn install_template(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
     Path(template): Path<String>,
     Query(filter): Query<WorkspaceFilter>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
@@ -1549,7 +1560,7 @@ async fn install_template(
         source_yaml: template.source_yaml.to_owned(),
         workspace_id: Some(workspace.to_string()),
     };
-    Ok((StatusCode::CREATED, save(&api, None, input).await?))
+    Ok((StatusCode::CREATED, save(&api, &caller, None, input).await?))
 }
 
 #[derive(Deserialize)]

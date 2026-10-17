@@ -256,6 +256,19 @@ pub(crate) fn entries(workflow: &Workflow, default: &str) -> Vec<ChainEntry> {
         .map_or_else(|| vec![ChainEntry::from(default)], |p| p.chain.clone())
 }
 
+/// The mode a session of `adapter` runs in: its step's own
+/// `permission_mode:` (an agent's, on its system workflow), else the tool's
+/// `runtime_policy` row in `modes` (the fallback until Stage 5 drops it).
+pub(crate) fn effective_mode<'a>(
+    step_mode: Option<sun_core::PermissionMode>,
+    modes: &'a HashMap<String, String>,
+    adapter: &str,
+) -> Option<&'a str> {
+    step_mode
+        .map(sun_core::PermissionMode::as_str)
+        .or_else(|| modes.get(adapter).map(String::as_str))
+}
+
 /// Why `entry` can't run on `host`: it is pinned to another one.
 pub(crate) fn pinned_elsewhere(entry: &ChainEntry, host: HostId) -> Option<String> {
     let pin = entry.host()?;
@@ -429,7 +442,7 @@ impl Executor {
     /// host that reported no capabilities is trusted. An entry pinned to
     /// another host (`host:`), or whose `effort:` this host doesn't list,
     /// is unready here. A runtime whose
-    /// permission mode is `bypass_permissions` is unready for a run outside a
+    /// permission mode ([`effective_mode`]) is `bypass_permissions` is unready for a run outside a
     /// container or VM ([`sun_core::mode_refusal`]). A `market:` entry is
     /// ready only for a limit hit (`market`) whose run may move there
     /// ([`crate::market::unmovable`]).
@@ -462,14 +475,16 @@ impl Executor {
         let env = self.exec_env(tx, step.run_id).await?;
         let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
         let run = tx.get_run(step.run_id).await?;
-        let entries = entries(&*self.workflow(tx, &run).await?, &self.config.adapter);
+        let workflow = self.workflow(tx, &run).await?;
+        let entries = entries(&workflow, &self.config.adapter);
+        let step_mode = workflow.permission_mode(&step.step_key);
         // A `market:` runtime runs on the seller's host, not this one.
         for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
             let adapter = match tx.runtime_by_name(workspace, name).await? {
                 Some(row) => row.adapter,
                 None => name.clone(),
             };
-            let mode = modes.get(&adapter).map(String::as_str);
+            let mode = effective_mode(step_mode, &modes, &adapter);
             let entry = entry(&entries, name);
             let pinned = entry.and_then(|e| pinned_elsewhere(e, self.host(step.run_id)));
             let effort = entry.and_then(|e| effort_missing(e, host.as_ref(), &adapter));

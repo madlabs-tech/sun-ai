@@ -1415,6 +1415,18 @@ pub(crate) async fn runtime_readiness(
     })
 }
 
+/// `422` for a `bypass` the operator doesn't allow (`sun.yaml`
+/// `runtimes.allow_bypass`): on a runtime policy, an agent or a workflow step.
+pub(crate) fn check_bypass_allowed(api: &Api, bypass: bool) -> ApiResult<()> {
+    if bypass && !api.allow_bypass {
+        return Err(ApiError::invalid(
+            "bypass_permissions lets the agent run anything. Set `runtimes.allow_bypass: true` \
+             in sun.yaml first, and only when sessions run in a container or VM.",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SetPolicy {
@@ -1440,12 +1452,7 @@ pub(crate) async fn set_runtime_policy(
             sun_core::PERMISSION_MODES.join(", ")
         )));
     }
-    if mode == "bypass_permissions" && !api.allow_bypass {
-        return Err(ApiError::invalid(
-            "bypass_permissions lets the agent run anything. Set `runtimes.allow_bypass: true` \
-             in sun.yaml first, and only when sessions run in a container or VM.",
-        ));
-    }
+    check_bypass_allowed(&api, mode == "bypass_permissions")?;
     api.engine
         .set_permission_mode(&adapter, &mode, &caller.actor())
         .await?;

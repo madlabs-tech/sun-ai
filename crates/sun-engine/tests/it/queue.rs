@@ -1299,6 +1299,63 @@ async fn tasks_of(store: &Store, source: &str, count: usize) -> Vec<Task> {
     tasks
 }
 
+/// Item 9: a step's own `permission_mode:` (an agent's, on its system
+/// workflow) decides at placement over the tool's policy row. Bypass on the
+/// step on a bare-only workspace takes the FR7 refusal path, never a silent
+/// downgrade; `plan` on the step places a run whose tool's policy is bypass.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_a_steps_permission_mode_wins_at_placement() {
+    const BYPASS: &str = "name: bypass\nruntime: {chain: [plain]}\nsteps:\n  \
+                          - {id: implement, type: agent, prompt: do it, permission_mode: bypass_permissions}\n";
+    const PLAN: &str = "name: plan\nsteps:\n  \
+                        - {id: implement, type: agent, prompt: do it, permission_mode: plan}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let bypass = tasks_of(&store, BYPASS, 1).await.remove(0);
+    let plan = tasks_of(&store, PLAN, 1).await.remove(0);
+    let mut tx = store.begin().await.unwrap();
+    tx.set_permission_mode("fake", "bypass_permissions")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let host = add_host(&store, "bare", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![host])));
+    let (_engine, queue) = kernel_on(&store, link, host, Caps::default()).await;
+
+    queue.enqueue(bypass.id).await.unwrap();
+    queue.enqueue(plan.id).await.unwrap();
+    eventually("the plan run placed", || async {
+        placed_on(&store, plan.id).await.is_some()
+    })
+    .await;
+    let failed = || async {
+        let mut read = store.read().await.unwrap();
+        let run = read.runs_of_task(bypass.id).await.unwrap().pop();
+        run.filter(|r| r.status == RunStatus::Failed)
+    };
+    eventually("the bypass run refused", || async {
+        failed().await.is_some()
+    })
+    .await;
+    let run = failed().await.unwrap();
+    let events = store
+        .read()
+        .await
+        .unwrap()
+        .events_after(Some(run.id), 0, 32)
+        .await
+        .unwrap();
+    let refused = events
+        .iter()
+        .find(|e| e.kind == "placement_refused_bypass_bare")
+        .expect("journalled");
+    assert_eq!(refused.payload["runtime"], "plain");
+    assert!(
+        !events.iter().any(|e| e.kind == "run_placed"),
+        "never placed"
+    );
+}
+
 /// FR7: a run whose runtime is in `bypass_permissions` goes only to a host
 /// with its container ready; a bare run of it is refused, journalled, and
 /// fails without being placed, even with a container host online.

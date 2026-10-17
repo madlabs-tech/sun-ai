@@ -246,3 +246,42 @@ async fn a_carried_login_cooldown_stays_on_its_own_workspaces_hosts() {
         "workspace Beta's host cools on Main's cooldown: {moved:?}"
     );
 }
+
+/// Item 9: an agent from before `agent.permission_mode` comes out
+/// inheriting (NULL), and the `runtime_policy` row it inherits stays, so it
+/// keeps the mode it ran in.
+#[tokio::test]
+async fn existing_agents_inherit_their_runtime_policy_after_the_migration() {
+    use sqlx::migrate::Migrate;
+    use sun_store::{AgentRepo, RuntimeRepo};
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    conn.ensure_migrations_table().await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    for migration in migrator.iter().filter(|m| m.version < 20261107090000) {
+        conn.apply(migration).await.unwrap();
+    }
+    let agent = sun_core::AgentId::generate().to_string();
+    for sql in [
+        "INSERT INTO agent (id, workspace_id, name, runtime_chain, created_at) VALUES
+           ($1, '00000000000000000000000001', 'Ada', '[\"claude-code\"]', '2026-10-16T20:00:00+00:00')",
+        "INSERT INTO runtime_policy (adapter, permission_mode) VALUES ('claude-code', 'plan')",
+    ] {
+        sqlx::query(sql)
+            .bind(&agent)
+            .execute(&mut conn)
+            .await
+            .unwrap();
+    }
+    conn.close().await.unwrap();
+
+    let store = Store::open(dir.path()).await.unwrap();
+    let mut tx = store.read().await.unwrap();
+    let ada = tx.get_agent(agent.parse().unwrap()).await.unwrap();
+    assert_eq!(ada.permission_mode, None);
+    assert_eq!(
+        tx.permission_modes().await.unwrap(),
+        [("claude-code".to_owned(), "plan".to_owned())]
+    );
+}

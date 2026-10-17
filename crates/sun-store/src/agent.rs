@@ -52,7 +52,8 @@ impl AgentRepo for Tx {
     async fn insert_agent(&mut self, agent: &Agent) -> Result<()> {
         name_free(self, agent).await?;
         sqlx::query(&format!(
-            "INSERT INTO agent ({COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+            "INSERT INTO agent ({COLUMNS}, permission_mode)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
         ))
         .bind(agent.id.to_string())
         .bind(agent.workspace_id.to_string())
@@ -63,23 +64,26 @@ impl AgentRepo for Tx {
         .bind(serde_json::to_string(&agent.skill_ids)?)
         .bind(ts(&agent.created_at))
         .bind(agent.archived_at.as_ref().map(ts))
+        .bind(agent.permission_mode.map(|m| m.as_str()))
         .execute(self.conn())
         .await?;
         Ok(())
     }
 
     async fn get_agent(&mut self, id: AgentId) -> Result<Agent> {
-        let row = sqlx::query(&format!("SELECT {COLUMNS} FROM agent WHERE id = $1"))
-            .bind(id.to_string())
-            .fetch_optional(self.conn())
-            .await?
-            .ok_or_else(|| StoreError::not_found("agent", id))?;
+        let row = sqlx::query(&format!(
+            "SELECT {COLUMNS}, permission_mode FROM agent WHERE id = $1"
+        ))
+        .bind(id.to_string())
+        .fetch_optional(self.conn())
+        .await?
+        .ok_or_else(|| StoreError::not_found("agent", id))?;
         agent_from(&row)
     }
 
     async fn agents(&mut self, workspace: Option<WorkspaceId>) -> Result<Vec<Agent>> {
         sqlx::query(&format!(
-            "SELECT {COLUMNS} FROM agent
+            "SELECT {COLUMNS}, permission_mode FROM agent
              WHERE archived_at IS NULL AND ($1 IS NULL OR workspace_id = $1)
              ORDER BY lower(name), workspace_id"
         ))
@@ -97,8 +101,8 @@ impl AgentRepo for Tx {
         }
         let done = sqlx::query(
             "UPDATE agent SET name = $1, description = $2, instructions = $3,
-               runtime_chain = $4, skill_ids = $5, archived_at = $6
-             WHERE id = $7",
+               runtime_chain = $4, skill_ids = $5, archived_at = $6, permission_mode = $7
+             WHERE id = $8",
         )
         .bind(&agent.name)
         .bind(&agent.description)
@@ -106,6 +110,7 @@ impl AgentRepo for Tx {
         .bind(serde_json::to_string(&agent.runtime_chain)?)
         .bind(serde_json::to_string(&agent.skill_ids)?)
         .bind(agent.archived_at.as_ref().map(ts))
+        .bind(agent.permission_mode.map(|m| m.as_str()))
         .bind(agent.id.to_string())
         .execute(self.conn())
         .await?;
@@ -225,6 +230,11 @@ fn agent_from(row: &SqliteRow) -> Result<Agent> {
         skill_ids: serde_json::from_str(row.try_get("skill_ids")?)?,
         created_at: parse_ts(row.try_get("created_at")?)?,
         archived_at: parse_ts_opt(row.try_get("archived_at")?)?,
+        permission_mode: row
+            .try_get::<Option<&str>, _>("permission_mode")?
+            .map(str::parse)
+            .transpose()
+            .map_err(sun_core::Error::InvalidInput)?,
     })
 }
 

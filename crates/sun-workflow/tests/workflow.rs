@@ -677,3 +677,27 @@ fn structured_chain_entries_are_checked() {
         "2:32: runtime `ollama-qwen` appears twice",
     );
 }
+
+#[test]
+fn an_agent_step_may_set_its_permission_mode() {
+    let step = |key: &str| sun_core::StepKey::new(key).unwrap();
+    let source = "name: wf\nsteps:\n  - {id: a, type: agent, prompt: p, permission_mode: plan}\n  - {id: b, type: agent, prompt: p}\n";
+    let wf = parse(source).unwrap();
+    assert_eq!(
+        wf.permission_mode(&step("a")),
+        Some(sun_core::PermissionMode::Plan)
+    );
+    assert_eq!(wf.permission_mode(&step("b")), None);
+    // Exact names only: a CLI spelling is refused, not passed on.
+    errors(
+        "name: wf\nsteps: [{id: a, type: agent, prompt: p, permission_mode: bypassPermissions}]\n",
+    );
+    let on_wait =
+        errors("name: wf\nsteps: [{id: w, type: wait, for: 1s, permission_mode: plan}]\n");
+    assert!(
+        on_wait
+            .iter()
+            .any(|e| e.contains("`permission_mode` is not allowed on `wait` steps")),
+        "{on_wait:#?}"
+    );
+}

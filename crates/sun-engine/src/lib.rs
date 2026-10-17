@@ -130,7 +130,7 @@ pub use pull_requests::{
     AutoComplete, AutoCompleteState, LinkSource, PrEvent, PullRequestView, TaskPullRequests,
 };
 pub use quality::{DEFAULT_WINDOW_DAYS, MERGED_TRIGGER, Merge, QualityMetrics};
-pub use query::{DryRun, DryStep, ModNeed, Plan, PlannedStep, check_workflow};
+pub use query::{DryRun, DryStep, ModNeed, Plan, PlannedStep, check_workflow, sets_bypass};
 pub use queue::{Caps, HostCap, Queue, QueueConfig, Slot};
 pub use roles::Access;
 pub use secrets::{audit_secret_read, delete_secret, set_secret};

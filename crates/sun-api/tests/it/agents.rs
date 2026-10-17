@@ -400,3 +400,130 @@ async fn structured_chain_entries_over_http() {
         "{error}"
     );
 }
+
+/// Item 9: an agent's `permission_mode` (null inherits), its
+/// `effective_permission_mode` (else the first runtime's `runtime_policy`
+/// row), and the bypass gate: `runtimes.allow_bypass` plus `manage_runtimes`,
+/// on the agent and on a workflow step's `permission_mode:`.
+#[tokio::test]
+async fn an_agents_permission_mode_inherits_and_bypass_needs_manage_runtimes() {
+    let k = kernel().await;
+    let bypass_ok = sun_api::router(k.api.clone().with_allow_bypass(true));
+    let body = json!({ "name": "Ada", "runtime_chain": ["claude-code"] });
+    let (status, ada) = call(&k.app, "POST", "/api/v1/agents", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{ada}");
+    let modes = |a: &Value| {
+        (
+            a["permission_mode"].clone(),
+            a["effective_permission_mode"].clone(),
+        )
+    };
+    assert_eq!(modes(&ada), (Value::Null, Value::Null));
+    let policy = json!({ "permission_mode": "plan" });
+    let (status, _) = call(
+        &k.app,
+        "PUT",
+        "/api/v1/runtimes/claude-code/policy",
+        Some(policy),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let path = format!("/api/v1/agents/{}", ada["id"].as_str().unwrap());
+    let (_, ada) = call(&k.app, "PATCH", &path, Some(json!({ "description": "d" }))).await;
+    assert_eq!(modes(&ada), (Value::Null, json!("plan")), "inherited");
+
+    let set = |mode: Value| Some(json!({ "permission_mode": mode }));
+    let (status, ada) = call(&k.app, "PATCH", &path, set(json!("accept_edits"))).await;
+    assert_eq!(status, StatusCode::OK, "{ada}");
+    assert_eq!(modes(&ada), (json!("accept_edits"), json!("accept_edits")));
+    let (_, ada) = call(&k.app, "PATCH", &path, Some(json!({ "description": "e" }))).await;
+    assert_eq!(ada["permission_mode"], "accept_edits", "absent keeps it");
+    let (status, _) = call(&k.app, "PATCH", &path, set(json!("bypassPermissions"))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    // Without the operator's `allow_bypass`, nobody sets bypass.
+    let (status, error) = call(&k.app, "PATCH", &path, set(json!("bypass_permissions"))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(error.to_string().contains("allow_bypass"), "{error}");
+
+    // With it: a member without manage_runtimes can't, an admin can.
+    let bob = member_token(&k.store, "bob", Role::Member).await;
+    let (status, _) = call_as(
+        &bypass_ok,
+        &bob,
+        "PATCH",
+        &path,
+        set(json!("bypass_permissions")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let ann = member_token(&k.store, "ann", Role::Admin).await;
+    let (status, ada) = call_as(
+        &bypass_ok,
+        &ann,
+        "PATCH",
+        &path,
+        set(json!("bypass_permissions")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ada}");
+    assert_eq!(
+        modes(&ada),
+        (json!("bypass_permissions"), json!("bypass_permissions"))
+    );
+    let (_, ada) = call(&k.app, "PATCH", &path, set(Value::Null)).await;
+    assert_eq!(
+        modes(&ada),
+        (Value::Null, json!("plan")),
+        "back to inheriting"
+    );
+
+    // A workflow step: Bob may save workflows, but not a bypass step.
+    let flow = |mode: &str| {
+        let yaml = format!(
+            "name: wf-{mode}\nsteps:\n  - {{id: a, type: agent, prompt: p, permission_mode: {mode}}}\n"
+        );
+        Some(json!({ "source_yaml": yaml, "workspace_id": MAIN }))
+    };
+    let (status, _) = call_as(&bypass_ok, &bob, "POST", "/api/v1/workflows", flow("plan")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = call_as(
+        &bypass_ok,
+        &bob,
+        "POST",
+        "/api/v1/workflows",
+        flow("bypass_permissions"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(
+        &k.app,
+        "POST",
+        "/api/v1/workflows",
+        flow("bypass_permissions"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "no allow_bypass");
+    let (status, saved) = call_as(
+        &bypass_ok,
+        &ann,
+        "POST",
+        "/api/v1/workflows",
+        flow("bypass_permissions"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    // A new version is checked the same way.
+    let versions = format!(
+        "/api/v1/workflows/{}/versions",
+        saved["id"].as_str().unwrap()
+    );
+    let (status, _) = call_as(
+        &bypass_ok,
+        &bob,
+        "POST",
+        &versions,
+        flow("bypass_permissions"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

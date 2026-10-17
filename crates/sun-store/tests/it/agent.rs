@@ -16,6 +16,7 @@ fn agent(name: &str) -> Agent {
         instructions: "Be brief.".into(),
         runtime_chain: vec!["claude-code".into(), "codex".into()],
         skill_ids: vec!["tdd".into()],
+        permission_mode: None,
         created_at: chrono::Utc::now(),
         archived_at: None,
     }
@@ -82,4 +83,23 @@ async fn agent_names_are_unique_while_active_and_tasks_name_real_agents() {
     let listed = tx.workflows_of_workspace(WorkspaceId::MAIN).await.unwrap();
     assert_eq!(listed, [mine]);
     assert_eq!(tx.system_workflows().await.unwrap(), [system]);
+}
+
+/// Item 9: `agent.permission_mode` is `None` (inherit) unless set, and
+/// round-trips through insert, update and the list.
+#[tokio::test]
+async fn an_agents_permission_mode_is_none_until_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let mut ada = agent("Ada");
+    tx.insert_agent(&ada).await.unwrap();
+    assert_eq!(tx.get_agent(ada.id).await.unwrap().permission_mode, None);
+    ada.permission_mode = Some(sun_core::PermissionMode::Plan);
+    tx.update_agent(&ada).await.unwrap();
+    assert_eq!(tx.get_agent(ada.id).await.unwrap(), ada);
+    assert_eq!(tx.agents(None).await.unwrap(), [ada.clone()]);
+    ada.permission_mode = None;
+    tx.update_agent(&ada).await.unwrap();
+    assert_eq!(tx.get_agent(ada.id).await.unwrap().permission_mode, None);
 }

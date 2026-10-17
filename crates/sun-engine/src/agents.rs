@@ -46,6 +46,10 @@ pub struct AgentFields {
     pub runtime_chain: Option<Vec<sun_core::ChainEntry>>,
     /// Skill names (catalog ids); at most 32.
     pub skill_ids: Option<Vec<String>>,
+    /// The mode its sessions run in; `null` inherits the tool's
+    /// `runtime_policy` row.
+    #[serde(default, deserialize_with = "crate::workspaces::present")]
+    pub permission_mode: Option<Option<sun_core::PermissionMode>>,
 }
 
 impl AgentFields {
@@ -67,6 +71,9 @@ impl AgentFields {
         if let Some(skills) = self.skill_ids {
             agent.skill_ids = Agent::clean_skills(skills)?;
         }
+        if let Some(mode) = self.permission_mode {
+            agent.permission_mode = mode;
+        }
         agent.name = Agent::clean_name(&agent.name)?;
         agent.runtime_chain = Agent::clean_chain(agent.runtime_chain)?;
         system_source(&agent)?;
@@ -75,7 +82,8 @@ impl AgentFields {
 }
 
 /// The YAML (JSON, a YAML subset) of `agent`'s system workflow, with its
-/// parse: one `agent` step, the agent's chain and skills. `InvalidInput`
+/// parse: one `agent` step, the agent's chain, skills and permission mode
+/// (left out when it inherits, so older agents keep their source). `InvalidInput`
 /// when the parser refuses a runtime or skill name.
 pub(crate) fn system_source(agent: &Agent) -> Result<(String, sun_workflow::Workflow)> {
     // No instructions: an empty prompt, the session gets its task alone.
@@ -85,15 +93,19 @@ pub(crate) fn system_source(agent: &Agent) -> Result<(String, sun_workflow::Work
         "" => String::new(),
         text => format!("{text}\n"),
     };
+    let mut step = json!({
+        "id": AGENT_STEP,
+        "type": "agent",
+        "prompt": prompt,
+        "skills": agent.skill_ids,
+    });
+    if let Some(mode) = agent.permission_mode {
+        step["permission_mode"] = json!(mode);
+    }
     let source = json!({
         "name": AGENT_STEP,
         "runtime": { "chain": agent.runtime_chain },
-        "steps": [{
-            "id": AGENT_STEP,
-            "type": "agent",
-            "prompt": prompt,
-            "skills": agent.skill_ids,
-        }],
+        "steps": [step],
     });
     let source = serde_json::to_string_pretty(&source)
         .map_err(|e| Error::InvalidInput(format!("agent {}: {e}", agent.name)))?;
@@ -259,6 +271,7 @@ impl Engine {
             instructions: String::new(),
             runtime_chain: Vec::new(),
             skill_ids: Vec::new(),
+            permission_mode: None,
             created_at: chrono::Utc::now(),
             archived_at: None,
         })?;
@@ -352,6 +365,7 @@ mod tests {
             instructions: instructions.into(),
             runtime_chain: chain.iter().map(|r| (*r).into()).collect(),
             skill_ids: vec!["tdd".into()],
+            permission_mode: None,
             created_at: chrono::Utc::now(),
             archived_at: None,
         }
@@ -383,5 +397,17 @@ mod tests {
             system_source(&agent("", &["not a runtime"])),
             Err(Error::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn an_agents_permission_mode_is_its_system_steps() {
+        let mut ada = agent("fix it", &["claude-code"]);
+        let (inherits, parsed) = system_source(&ada).unwrap();
+        let key = sun_core::StepKey::new(AGENT_STEP).unwrap();
+        assert_eq!(parsed.permission_mode(&key), None);
+        assert!(!inherits.contains("permission_mode"), "{inherits}");
+        ada.permission_mode = Some(sun_core::PermissionMode::Plan);
+        let (_, parsed) = system_source(&ada).unwrap();
+        assert_eq!(parsed.permission_mode(&key), ada.permission_mode);
     }
 }

@@ -735,6 +735,9 @@ pub struct Agent {
     pub runtime_chain: Vec<crate::ChainEntry>,
     /// Skill names (catalog ids) installed into its sessions.
     pub skill_ids: Vec<String>,
+    /// The mode its sessions run in; `None` inherits the tool's
+    /// `runtime_policy` row (TRD BLO-117 D2).
+    pub permission_mode: Option<crate::PermissionMode>,
     /// When it was created.
     pub created_at: Timestamp,
     /// When it was archived (`DELETE`); archived agents take no new tasks.
