@@ -244,6 +244,22 @@ pub(crate) fn io(path: &Path) -> impl Fn(std::io::Error) -> Error + '_ {
     move |e| Error::Unavailable(format!("{}: {e}", path.display()))
 }
 
+/// Writes `text` to `path` with `mode` (set before any byte is written), so a
+/// file holding a secret is never readable by others, not even briefly.
+pub(crate) fn write_file(path: &Path, text: &str, mode: u32) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(mode)
+        .open(path)
+        .map_err(io(path))?;
+    file.write_all(text.as_bytes()).map_err(io(path))?;
+    // `mode` only applies on create; an existing file keeps its own.
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(io(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

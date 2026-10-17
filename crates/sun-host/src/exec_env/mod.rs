@@ -18,7 +18,6 @@ mod egress;
 mod mod_env;
 mod vm;
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -34,6 +33,7 @@ pub use mod_env::{ModEnv, ModEnvs};
 pub use vm::Vm;
 
 use crate::HostConfig;
+use crate::buffer::write_file;
 
 /// One session's execution environment. Lifecycle: [`prepare`](Self::prepare)
 /// once, then any number of [`exec`](Self::exec), then
@@ -222,22 +222,6 @@ fn install_shims(dir: &Path, spec: &mut SessionSpec, shim: impl Fn(&str) -> Stri
     let dir = dir.to_string_lossy().into_owned();
     spec.env.insert(EXEC_SHIMS_ENV.into(), dir);
     Ok(())
-}
-
-/// Writes `text` to `path` with `mode` (set before any byte is written).
-fn write_file(path: &Path, text: &str, mode: u32) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(path)
-        .map_err(io(path))?;
-    file.write_all(text.as_bytes()).map_err(io(path))?;
-    // `mode` only applies on create; an existing file keeps its own.
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(io(path))
 }
 
 /// Removes `dir`; a missing dir is fine (teardown is idempotent).

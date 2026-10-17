@@ -17,7 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 /// How often task folder disk use is measured and sent (`du` is not free).
 const DISK_EVERY: Duration = Duration::from_secs(60);
 
-use crate::buffer::io;
+use crate::buffer::{io, write_file};
 use crate::host::Host;
 
 /// How long a one-shot connection (enrolment, status, leave) waits for the
@@ -54,20 +54,10 @@ impl Credentials {
     }
 
     fn save(&self, data_dir: &Path) -> Result<()> {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         std::fs::create_dir_all(data_dir).map_err(io(data_dir))?;
-        let path = Self::path(data_dir);
-        let json = serde_json::to_vec_pretty(self)
+        let json = serde_json::to_string_pretty(self)
             .map_err(|e| Error::Protocol(format!("encode credentials: {e}")))?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .and_then(|mut f| f.write_all(&json))
-            .map_err(io(&path))
+        write_file(&Self::path(data_dir), &json, 0o600)
     }
 
     /// Deletes the saved credentials (`sun host leave`); gone already is fine.
