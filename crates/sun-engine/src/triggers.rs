@@ -1002,7 +1002,7 @@ async fn create_once(
         tx.put_setting(&format!("{TRIGGER_OF}{}", task.id), payload)
             .await?;
     }
-    queue_run(tx, task.id, "trigger").await?;
+    queue_run(tx, task.id, "trigger", None).await?;
     Ok((task.id, true))
 }
 
