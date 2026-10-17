@@ -58,6 +58,17 @@ use crate::push;
 
 /// Corrections with the same cause in one workflow that make a proposal.
 pub(crate) const REPEAT: u32 = 3;
+/// `InvalidInput` when `workflow` is a direct chat's: a chat without an
+/// agent writes no memory (BLO-162 §3).
+async fn refuse_direct_chat(tx: &mut Tx, workflow: WorkflowId) -> Result<()> {
+    if tx.workflow_owner(workflow).await? == WorkflowOwner::DirectChat {
+        return Err(Error::InvalidInput(
+            "A chat without an agent writes no memory.".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The section learned lines go under, in whichever file the PR edits.
 const SECTION: &str = "## Learned from corrections";
 /// `author` of proposals Sun makes itself.
@@ -643,6 +654,7 @@ impl Engine {
     pub async fn star_correction(&self, id: CorrectionId, by: &str) -> Result<bool> {
         let mut tx = self.store.begin().await?;
         let c = tx.get_correction(id).await?;
+        refuse_direct_chat(&mut tx, c.workflow_id).await?;
         let run = tx.get_run(c.run_id).await?;
         let (scope, scope_id) = scope_of(&run.repo_ids, MemoryScope::Workflow, c.workflow_id);
         let target = target_for(&mut tx, c.run_id, c.step_key.as_ref(), scope, &c.body).await?;
@@ -679,11 +691,7 @@ impl Engine {
             )));
         }
         let run = tx.get_run(note.run_id).await?;
-        if tx.workflow_owner(run.workflow_id).await? == WorkflowOwner::DirectChat {
-            return Err(Error::InvalidInput(
-                "A chat without an agent writes no memory.".into(),
-            ));
-        }
+        refuse_direct_chat(&mut tx, run.workflow_id).await?;
         let (scope, scope_id) = scope_of(&run.repo_ids, MemoryScope::Ecosystem, run.workflow_id);
         let step = Some(&note.step_key);
         let target = target_for(&mut tx, note.run_id, step, scope, &note.body).await?;
