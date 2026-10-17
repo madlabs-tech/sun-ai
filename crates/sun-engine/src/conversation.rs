@@ -407,7 +407,8 @@ impl Engine {
     /// title follows the model. `InvalidInput` for a chat with an agent, a
     /// change of tool, credential or host (one per thread: start a new
     /// chat), or while a run is queued or going (it is pinned to the old
-    /// version). Nothing changes when nothing differs.
+    /// version); a stopped (paused) run is cancelled. Nothing changes when
+    /// nothing differs.
     pub async fn update_direct_chat(
         &self,
         id: TaskId,
@@ -436,12 +437,6 @@ impl Engine {
             tx.commit().await?;
             return Ok(chat);
         }
-        let going = tx.runs_of_task(id).await?.pop();
-        if going.is_some_and(|r| !r.status.is_terminal()) {
-            return Err(Error::InvalidInput(
-                "Wait for the reply or stop it, then switch.".into(),
-            ));
-        }
         let chain = [ChainEntry::Spec(after.runtime.clone())];
         crate::chain_check::check(&mut tx, task.workspace_id, &chain, "runtime").await?;
         let mode = after.permission_mode;
@@ -453,6 +448,22 @@ impl Engine {
             agents::MODE_FIELD,
         )
         .await?;
+        // A stopped reply pauses its run, pinned to the old version: end it,
+        // or the next message would resume the old session. The executor
+        // owns the cancel and the store has one writer, so this tx yields.
+        let last = tx.runs_of_task(id).await?.pop();
+        if let Some(run) = last.filter(|r| r.status == RunStatus::Paused) {
+            drop(tx);
+            self.cancel(run.id).await?;
+            tx = self.store.begin().await?;
+            task = tx.get_task(id).await?;
+        }
+        let going = tx.runs_of_task(id).await?.pop();
+        if going.is_some_and(|r| !r.status.is_terminal()) {
+            return Err(Error::InvalidInput(
+                "Wait for the reply or stop it, then switch.".into(),
+            ));
+        }
         let (source, parsed) = agents::one_step_source(&chain, "", &[], after.permission_mode)?;
         let workflow = task
             .workflow_id
