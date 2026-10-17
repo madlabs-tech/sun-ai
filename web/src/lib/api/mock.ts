@@ -57,7 +57,7 @@ import { is_vcs_route, vcs_route } from './mock_vcs';
 import { pull_request_route } from './mock_pull_requests';
 import { agents_route, find_agent } from './mock_agents';
 import { budget_route, has_ecosystem_secret, on_limit_route, settings_route } from './mock_settings';
-import { chain_names, entry_name, runtime_name } from '../format';
+import { chain_modes, chain_names, entry_name, runtime_name } from '../format';
 
 type StepDef = [key: string, name: string, type: StepType];
 
@@ -718,6 +718,11 @@ function start_agent_run(t: TaskDetail, trigger: string) {
  *  then replies in the chat. */
 const chats: Chat[] = [];
 const find_chat = (id: string) => chats.find((c) => c.id === id);
+/** The kernel's 422 for a mode the chat's tool can't enforce on its hosts (BLO-163). */
+function check_mode(runtime: ChainSpec, mode: PermissionMode | null) {
+  if (mode && !chain_modes(RUNTIMES, [runtime]).includes(mode))
+    throw invalid(`invalid input: permission_mode: the chain can't run in \`${mode}\` on its hosts`);
+}
 
 function chat_route(method: string, parts: string[], params: URLSearchParams, input: Record<string, unknown>): unknown {
   if (parts[0] === 'chats' && method === 'GET') {
@@ -728,6 +733,7 @@ function chat_route(method: string, parts: string[], params: URLSearchParams, in
     const runtime = input.runtime as ChainSpec;
     const permission_mode = (input.permission_mode ?? null) as PermissionMode | null;
     if (permission_mode === 'bypass_permissions' && !allow_bypass) throw invalid('bypass_permissions is off: set `runtimes.allow_bypass: true` in sun.yaml first.');
+    check_mode(runtime, permission_mode);
     const now = new Date().toISOString();
     const chat: Chat = {
       id: fake_id('H', 700 + next_seq++), workspace_id: String(input.workspace_id), agent_id: null, title: runtime.model ? `${runtime.tool} · ${runtime.model}` : runtime.tool,
@@ -759,6 +765,7 @@ function chat_route(method: string, parts: string[], params: URLSearchParams, in
     const [a, b] = [from.runtime, to.runtime];
     if (a.tool !== b.tool || a.credential !== b.credential || a.host !== b.host) throw invalid('Start a new chat to use another tool, credential or host.');
     if (chat.run && chat.run.status === 'running') throw invalid('Wait for the reply or stop it, then switch.');
+    check_mode(b, to.permission_mode);
     log(as_task, 'settings', { from, to }, undefined, true);
     Object.assign(chat, { ...to, title: b.model ? `${b.tool} · ${b.model}` : b.tool });
     return clone(chat);

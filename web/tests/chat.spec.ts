@@ -134,3 +134,18 @@ test('chat without an agent: bypass only with a container or VM host, allow_bypa
   await expect(mode.getByRole('option', { name: 'Anything' })).toHaveCount(0);
   await expect(picker).toContainText('“Anything” needs the manage runtimes permission.');
 });
+
+test('chat without an agent: only the modes the tool’s hosts report (BLO-163)', async ({ page }) => {
+  await open(page);
+  await main(page).getByRole('button', { name: 'Chat with a tool' }).click();
+  const picker = page.getByRole('dialog');
+  await pick_tool(picker, 'Codex');
+  const labels = () => picker.getByLabel('Permissions').locator('option').allTextContents();
+  // Codex reports no `accept_edits` anywhere; hery-mbp's reports `auto`, so any host may run it.
+  expect(await labels()).toEqual(['Host default', 'Ask first', 'Plan only', 'Auto', 'Anything']);
+  // build-box-01's Codex doesn't report `auto` (and the host has no container).
+  await picker.getByLabel('Host').selectOption({ label: 'build-box-01' });
+  expect(await labels()).toEqual(['Host default', 'Ask first', 'Plan only']);
+  await picker.getByLabel('Host').selectOption({ label: 'hery-mbp' });
+  expect(await labels()).toContain('Auto');
+});
