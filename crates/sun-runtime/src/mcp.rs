@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde_json::{Value, json};
-use sun_core::{Error, Result};
+use sun_core::{Error, Result, SessionSpec};
 
 /// One stdio MCP server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,9 +72,44 @@ pub fn read_mcp_config(path: &Path) -> Result<Vec<McpEntry>> {
         .collect()
 }
 
+/// Puts the session MCP servers' env (the `SUN_MCP_TOKEN`) in `spec.env`
+/// for Codex, which forwards it to them by name ([`McpEntry::codex_args`]),
+/// so no value is ever on argv, where every local user can read it.
+/// Idempotent; a no-op without an MCP config or for other adapters (Claude
+/// Code reads the file, OpenCode gets ACP entries). The host calls it before
+/// an exec env is prepared, so the vars reach a container or VM too.
+pub fn native_env(spec: &mut SessionSpec, adapter: &str) -> Result<()> {
+    let Some(path) = spec
+        .mcp_config
+        .clone()
+        .filter(|_| adapter == crate::codex::ID)
+    else {
+        return Ok(());
+    };
+    for server in read_mcp_config(&path)? {
+        for (name, value) in server.env {
+            match spec.env.get(&name) {
+                Some(have) if *have != value => {
+                    return Err(Error::InvalidInput(format!(
+                        "mcp config {}: env {name} of server {:?} clashes with another value",
+                        path.display(),
+                        server.name
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    spec.env.insert(name, value);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl McpEntry {
     /// Codex `-c key=value` overrides (values are TOML; JSON strings and
-    /// string arrays are valid TOML).
+    /// string arrays are valid TOML). Env goes by name only (`env_vars`):
+    /// Codex forwards those from its own env, which [`native_env`] fills.
     pub fn codex_args(&self) -> Vec<String> {
         let key = format!("mcp_servers.{}", self.name);
         let mut out = vec![
@@ -83,9 +118,10 @@ impl McpEntry {
             "-c".into(),
             format!("{key}.args={}", json!(self.args)),
         ];
-        for (name, value) in &self.env {
+        if !self.env.is_empty() {
+            let names: Vec<&String> = self.env.keys().collect();
             out.push("-c".into());
-            out.push(format!("{key}.env.{name}={}", json!(value)));
+            out.push(format!("{key}.env_vars={}", json!(names)));
         }
         out
     }
@@ -125,7 +161,7 @@ mod tests {
                 "-c",
                 r#"mcp_servers.sun.args=["mcp","--token","t\"x"]"#,
                 "-c",
-                r#"mcp_servers.sun.env.A="1""#,
+                r#"mcp_servers.sun.env_vars=["A"]"#,
             ]
         );
         assert_eq!(
@@ -137,6 +173,42 @@ mod tests {
         assert!(
             read_mcp_config(&path).is_err(),
             "dotted names would nest TOML keys"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn native_env_lifts_mcp_env_for_codex_only() {
+        let dir = std::env::temp_dir().join(format!("sun-mcp-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mcp.json");
+        let write = |docs: &str| {
+            let config = json!({"mcpServers": {
+                "sun": {"command": "sun", "env": {"SUN_MCP_TOKEN": "t"}},
+                "docs": {"command": "sun", "env": {"SUN_MCP_TOKEN": docs}},
+            }});
+            std::fs::write(&path, config.to_string()).unwrap();
+        };
+        write("t");
+        let mut spec: SessionSpec = serde_json::from_value(json!({
+            "session_id": sun_core::SessionId::generate(),
+            "run_id": sun_core::RunId::generate(),
+            "step_key": "implement",
+            "worktree": dir,
+            "envelope": "",
+            "mcp_config": path,
+            "env": {},
+        }))
+        .unwrap();
+        native_env(&mut spec, "claude-code").unwrap();
+        assert!(spec.env.is_empty(), "Claude Code reads the file itself");
+        native_env(&mut spec, "codex").unwrap();
+        native_env(&mut spec, "codex").unwrap();
+        assert_eq!(spec.env["SUN_MCP_TOKEN"], "t");
+        write("other");
+        assert!(
+            native_env(&mut spec, "codex").is_err(),
+            "one name can't forward two values"
         );
         let _ = std::fs::remove_dir_all(dir);
     }
