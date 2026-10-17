@@ -939,6 +939,9 @@ string_enum! {
         /// A pull request was linked, unlinked or merged:
         /// `{action: linked|unlinked|merged, number, url, repo, source}`.
         PullRequest => "pull_request",
+        /// A chat without an agent switched model, effort or mode:
+        /// `{from, to}`, each `{runtime, permission_mode}`.
+        Settings => "settings",
     }
 }
 

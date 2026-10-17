@@ -2623,7 +2623,8 @@ async fn a_direct_chat_talks_to_the_bare_tool_and_the_tool_replies() {
         .engine
         .create_direct_chat(WorkspaceId::MAIN, runtime, plan, None)
         .await
-        .unwrap();
+        .unwrap()
+        .task;
     assert_eq!(
         (chat.kind, chat.assignee_agent_id, chat.status),
         (TaskKind::Chat, None, TaskStatus::NeedsYou)

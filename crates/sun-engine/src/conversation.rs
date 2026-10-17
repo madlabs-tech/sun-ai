@@ -32,14 +32,14 @@ use sun_core::model::{
 use sun_core::redact::redact;
 use sun_core::{
     AgentId, ChainEntry, ChainSpec, Error, MemberId, PermissionMode, Result, RunId, RunStatus,
-    TaskId, TaskStatus, WorkflowId, WorkspaceId,
+    StateMachine, TaskId, TaskStatus, WorkflowId, WorkspaceId,
 };
 use sun_store::{
     AgentRepo, EventLog, RunRepo, SecretRepo, TaskRepo, Tx, WorkflowRepo, WorkspaceRepo,
 };
 
 use crate::executor::tasks;
-use crate::{Engine, OnWorkspace, agents};
+use crate::{Actor, Engine, OnWorkspace, agents};
 
 /// The `run_status` reason of a run a comment queued.
 pub(crate) const COMMENT: &str = "comment";
@@ -78,16 +78,100 @@ pub(crate) async fn reply(tx: &mut Tx, run_id: RunId, summary: &str) -> Result<(
     Ok(())
 }
 
-/// The tool a direct chat's run talks to: its one chain entry's.
+/// The tool a direct chat's run talks to, on the version it was pinned to.
 async fn chat_tool(tx: &mut Tx, run: &Run) -> Result<String> {
     let version = tx
         .get_workflow_version(run.workflow_id, run.workflow_version)
         .await?;
-    let parsed = crate::query::parse(&version.source_yaml)?;
-    let entry = parsed.runtime.and_then(|r| r.chain.into_iter().next());
-    Ok(entry
-        .map(|e| e.spec().map_or(e.name(), |s| &s.tool).to_owned())
-        .unwrap_or_default())
+    Ok(settings_of(&version.source_yaml)?.runtime.tool)
+}
+
+/// A chat without an agent's settings: its one chain entry and its step's
+/// mode (`None`: the host's default).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DirectSettings {
+    /// The tool, and its credential, host, model and effort.
+    pub runtime: ChainSpec,
+    /// The mode its sessions run in.
+    pub permission_mode: Option<PermissionMode>,
+}
+
+/// The settings a direct chat's workflow source carries.
+fn settings_of(source_yaml: &str) -> Result<DirectSettings> {
+    let parsed = crate::query::parse(source_yaml)?;
+    let permission_mode = parsed
+        .steps
+        .first()
+        .and_then(|step| parsed.permission_mode(&step.id));
+    let runtime = parsed
+        .runtime
+        .and_then(|r| r.chain.into_iter().next())
+        .and_then(|entry| entry.spec().cloned())
+        .ok_or_else(|| Error::InvalidInput("A chat's workflow has no tool.".into()))?;
+    Ok(DirectSettings {
+        runtime,
+        permission_mode,
+    })
+}
+
+/// The settings of the chat's latest version (what its next message runs
+/// on); `None` for a chat with an agent.
+async fn direct_settings(tx: &mut Tx, task: &Task) -> Result<Option<DirectSettings>> {
+    let Some(workflow) = task.workflow_id.filter(|_| task.kind == TaskKind::Chat) else {
+        return Ok(None);
+    };
+    if tx.workflow_owner(workflow).await? != WorkflowOwner::DirectChat {
+        return Ok(None);
+    }
+    let version = tx
+        .latest_workflow_version(workflow)
+        .await?
+        .ok_or_else(|| Error::NotFound(format!("a saved version of workflow {workflow}")))?;
+    Ok(Some(settings_of(&version.source_yaml)?))
+}
+
+/// A chat's title: its agent's name, or `{tool} · {model}` without one.
+fn direct_title(runtime: &ChainSpec) -> String {
+    match &runtime.model {
+        Some(model) => format!("{} · {model}", runtime.tool),
+        None => runtime.tool.clone(),
+    }
+}
+
+/// `chat` as its list shows it.
+async fn chat_of(tx: &mut Tx, task: Task) -> Result<Chat> {
+    let run = tx.runs_of_task(task.id).await?.pop();
+    let last = tx
+        .activity_of(task.id, 0)
+        .await?
+        .into_iter()
+        .rfind(|a| a.kind == ActivityKind::Comment);
+    let queued_behind = match (&run, task.assignee_agent_id) {
+        (Some(run), Some(agent)) if run.status == RunStatus::Queued => {
+            busy(tx, task.workspace_id, agent).await?
+        }
+        _ => Vec::new(),
+    };
+    let direct = direct_settings(tx, &task).await?;
+    Ok(Chat {
+        task,
+        run,
+        last,
+        queued_behind,
+        direct,
+    })
+}
+
+/// `PATCH /chats/{id}`: the settings to change on a chat without an agent;
+/// absent ones stay.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatChange {
+    /// The same tool, credential and host, with another model or effort.
+    pub runtime: Option<ChainSpec>,
+    /// `null`: the host's default.
+    #[serde(default, deserialize_with = "crate::workspaces::present")]
+    pub permission_mode: Option<Option<PermissionMode>>,
 }
 
 /// The task whose thread `task_id` talks on: its source for a mention chat.
@@ -244,6 +328,8 @@ pub struct Chat {
     /// While its run waits: the agent's tasks with a run going, which hold
     /// the slots it waits for.
     pub queued_behind: Vec<TaskKey>,
+    /// Without an agent: the tool and settings it talks to.
+    pub direct: Option<DirectSettings>,
 }
 
 impl Engine {
@@ -278,11 +364,8 @@ impl Engine {
         runtime: ChainSpec,
         permission_mode: Option<PermissionMode>,
         creator: Option<MemberId>,
-    ) -> Result<Task> {
-        let title = match &runtime.model {
-            Some(model) => format!("{} · {model}", runtime.tool),
-            None => runtime.tool.clone(),
-        };
+    ) -> Result<Chat> {
+        let title = direct_title(&runtime);
         let chain = [ChainEntry::Spec(runtime)];
         let (source, parsed) = agents::one_step_source(&chain, "", &[], permission_mode)?;
         let mut tx = self.store.begin().await?;
@@ -304,7 +387,71 @@ impl Engine {
             ..Task::new(workspace, title)
         };
         tx.insert_task(&chat).await?;
-        let chat = tx.get_task(chat.id).await?;
+        let task = tx.get_task(chat.id).await?;
+        let chat = chat_of(&mut tx, task).await?;
+        tx.commit().await?;
+        Ok(chat)
+    }
+
+    /// Switches a chat without an agent to `change`'s model, effort or mode:
+    /// a new version of its workflow, so its next message starts a fresh
+    /// session that reads the thread. Logged as a `settings` activity; the
+    /// title follows the model. `InvalidInput` for a chat with an agent, a
+    /// change of tool, credential or host (one per thread: start a new
+    /// chat), or while a run is queued or going (it is pinned to the old
+    /// version). Nothing changes when nothing differs.
+    pub async fn update_direct_chat(
+        &self,
+        id: TaskId,
+        change: ChatChange,
+        actor: Option<&Actor>,
+    ) -> Result<Chat> {
+        let mut tx = self.store.begin().await?;
+        let mut task = tx.get_task(id).await?;
+        let Some(before) = direct_settings(&mut tx, &task).await? else {
+            return Err(Error::InvalidInput(
+                "Only a chat without an agent has settings to switch.".into(),
+            ));
+        };
+        let after = DirectSettings {
+            runtime: change.runtime.unwrap_or_else(|| before.runtime.clone()),
+            permission_mode: change.permission_mode.unwrap_or(before.permission_mode),
+        };
+        let (old, new) = (&before.runtime, &after.runtime);
+        if (&old.tool, &old.credential, &old.host) != (&new.tool, &new.credential, &new.host) {
+            return Err(Error::InvalidInput(
+                "Start a new chat to use another tool, credential or host.".into(),
+            ));
+        }
+        if after == before {
+            let chat = chat_of(&mut tx, task).await?;
+            tx.commit().await?;
+            return Ok(chat);
+        }
+        let going = tx.runs_of_task(id).await?.pop();
+        if going.is_some_and(|r| !r.status.is_terminal()) {
+            return Err(Error::InvalidInput(
+                "Wait for the reply or stop it, then switch.".into(),
+            ));
+        }
+        let chain = [ChainEntry::Spec(after.runtime.clone())];
+        crate::chain_check::check(&mut tx, task.workspace_id, &chain, "runtime").await?;
+        let (source, parsed) = agents::one_step_source(&chain, "", &[], after.permission_mode)?;
+        let workflow = task
+            .workflow_id
+            .ok_or_else(|| Error::NotFound(format!("chat {id}")))?;
+        tx.save_workflow_version(workflow, &source, &parsed.hash)
+            .await?;
+        let title = direct_title(&after.runtime);
+        if task.title != title {
+            task.title = title;
+            tx.update_task(&task).await?;
+            tx.rename_workflow(workflow, &task.title).await?;
+        }
+        let body = json!({ "from": before, "to": after });
+        tasks::log(&mut tx, id, ActivityKind::Settings, actor, body).await?;
+        let task = tx.get_task(id).await?;
+        let chat = chat_of(&mut tx, task).await?;
         tx.commit().await?;
         Ok(chat)
     }
@@ -319,24 +466,7 @@ impl Engine {
         let mut tx = self.store.read().await?;
         let mut out = Vec::new();
         for task in tx.chats_of(workspace, creator).await? {
-            let run = tx.runs_of_task(task.id).await?.pop();
-            let last = tx
-                .activity_of(task.id, 0)
-                .await?
-                .into_iter()
-                .rfind(|a| a.kind == ActivityKind::Comment);
-            let queued_behind = match (&run, task.assignee_agent_id) {
-                (Some(run), Some(agent)) if run.status == RunStatus::Queued => {
-                    busy(&mut tx, workspace, agent).await?
-                }
-                _ => Vec::new(),
-            };
-            out.push(Chat {
-                task,
-                run,
-                last,
-                queued_behind,
-            });
+            out.push(chat_of(&mut tx, task).await?);
         }
         Ok(out)
     }

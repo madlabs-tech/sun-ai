@@ -98,7 +98,7 @@ pub use agents::{AGENT_STEP, AgentFields};
 pub use approval::Principal;
 pub use attention::Attention;
 pub use budget::Spend;
-pub use conversation::Chat;
+pub use conversation::{Chat, ChatChange, DirectSettings};
 pub use data_touched::Touch;
 pub use dry_run::{SimStep, Simulation};
 pub use eval::{
