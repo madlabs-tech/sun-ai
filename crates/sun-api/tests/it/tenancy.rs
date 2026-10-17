@@ -915,11 +915,6 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
         ),
         ("PUT", "/settings/embeddings", Some(json!({}))),
         ("PUT", "/catalog/tdd/dismissed", None),
-        (
-            "PUT",
-            "/runtimes/claude-code/policy",
-            Some(json!({ "permission_mode": "default" })),
-        ),
     ];
     for (method, path, body) in &routes {
         // Naming their own workspace (query and body) opens nothing.
@@ -931,6 +926,11 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
         let (status, value) = call(app, Some(&ada), method, &path, body).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {value}");
     }
+    // The retired runtime policy is `410` for her too, not `403`.
+    let path = format!("/api/v1/runtimes/claude-code/policy?workspace={mine}");
+    let body = Some(json!({ "permission_mode": "default" }));
+    let (status, value) = call(app, Some(&ada), "PUT", &path, body).await;
+    assert_eq!(status, StatusCode::GONE, "{value}");
     let (status, _) = call(app, Some(TOKEN), "GET", "/api/v1/members", None).await;
     assert_eq!(status, StatusCode::OK);
     // Promoting her opens them.
