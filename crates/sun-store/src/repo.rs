@@ -301,6 +301,8 @@ pub trait EventLog {
     async fn count_events(&mut self, kind: &str) -> Result<i64>;
     /// Every event of `kind`, of every run, oldest first.
     async fn events_of_kind(&mut self, kind: &str) -> Result<Vec<EventRecord>>;
+    /// Whether `run_id` journalled an event of `kind`.
+    async fn run_has_event(&mut self, run_id: RunId, kind: &str) -> Result<bool>;
 }
 
 /// Summed token and cost usage (`usage` agent events).
@@ -1007,6 +1009,16 @@ impl EventLog for Tx {
         .iter()
         .map(event_from)
         .collect()
+    }
+
+    async fn run_has_event(&mut self, run_id: RunId, kind: &str) -> Result<bool> {
+        let found: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM event WHERE run_id = $1 AND kind = $2 LIMIT 1")
+                .bind(run_id.to_string())
+                .bind(kind)
+                .fetch_optional(self.conn())
+                .await?;
+        Ok(found.is_some())
     }
 
     async fn count_events(&mut self, kind: &str) -> Result<i64> {
