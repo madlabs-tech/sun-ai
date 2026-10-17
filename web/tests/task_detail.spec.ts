@@ -241,3 +241,18 @@ test('360 px: one column, no page overflow, the comment box in reach', async ({ 
   const scroll = await main(page).locator('.task-page').evaluate((el) => el.scrollWidth - el.clientWidth);
   expect(scroll).toBeLessThanOrEqual(0);
 });
+
+test('1280 px: the run log’s On limit select shows its labels in full', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await open(page, 'tasks/SUN-147');
+  const clipped = await main(page).getByLabel('On limit').evaluate((el: HTMLSelectElement) => {
+    const s = getComputedStyle(el);
+    const probe = Object.assign(document.createElement('span'), { style: `position:absolute;white-space:pre;font:${s.font}` });
+    document.body.append(probe);
+    const room = el.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight);
+    const wide = [...el.options].map((o) => o.text).filter((l) => ((probe.textContent = l), probe.getBoundingClientRect().width > room));
+    probe.remove();
+    return wide;
+  });
+  expect(clipped).toEqual([]);
+});
