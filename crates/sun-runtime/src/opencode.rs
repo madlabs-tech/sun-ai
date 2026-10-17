@@ -18,8 +18,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Value, json};
 use sun_core::{
-    BoxStream, Error, HostCtx, LimitKind, Readiness, Result, Role, RuntimeAdapter, SessionHandle,
-    SessionId, SessionSpec, Steer, StopMode, SunEvent, Transcript,
+    BoxStream, Error, HostCtx, LimitKind, PermissionMode, Readiness, Result, Role, RuntimeAdapter,
+    SessionHandle, SessionId, SessionSpec, Steer, StopMode, SunEvent, Transcript,
 };
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -46,9 +46,9 @@ pub struct OpenCode {
     pub binary: PathBuf,
     /// The `byo_key` source; `None` runs on OpenCode's own config (BYO runtime).
     pub byo_key: Option<ByoKey>,
-    /// Which agent permission requests are allowed: a `sun_core::PERMISSION_MODES`
-    /// name (`accept_edits` by default, `bypass_permissions`, `default`).
-    pub permission_mode: String,
+    /// Which agent permission requests are allowed when the spec names no
+    /// mode (`accept_edits` by default).
+    pub permission_mode: PermissionMode,
     /// Also allow shell commands (`execute`), e.g. to run the gate commands.
     pub allow_shell: bool,
     /// Where a user's `opencode.md` envelope template overrides the built-in
@@ -69,7 +69,7 @@ impl OpenCode {
         Self {
             binary: binary.into(),
             byo_key: None,
-            permission_mode: "accept_edits".into(),
+            permission_mode: PermissionMode::AcceptEdits,
             allow_shell: false,
             template_dir: None,
             sessions: Sessions::default(),
@@ -115,6 +115,9 @@ impl RuntimeAdapter for OpenCode {
     }
 
     async fn start(&self, spec: SessionSpec) -> Result<SessionHandle> {
+        let mode = PermissionMode::parse_opt(spec.permission_mode.as_deref())
+            .map_err(|why| Error::InvalidInput(format!("session permission_mode: {why}")))?
+            .unwrap_or(self.permission_mode);
         let prompt = envelope::first_prompt(ID, self.template_dir.as_deref(), &spec)?;
         let mut cmd = Command::new(process::program(&self.binary, &spec.env));
         cmd.arg("acp").current_dir(&spec.worktree).envs(&spec.env);
@@ -149,12 +152,7 @@ impl RuntimeAdapter for OpenCode {
         };
         let mut normalizer = AcpStream::new(prompt, Some(spec.worktree), Some(tx))
             .with_mcp_servers(mcp_servers)
-            .with_permissions(
-                spec.permission_mode
-                    .as_ref()
-                    .unwrap_or(&self.permission_mode),
-                self.allow_shell,
-            );
+            .with_permissions(mode, self.allow_shell);
         normalizer.resume = spec.resume;
         let initialize = request(
             INITIALIZE,
@@ -312,14 +310,14 @@ impl AcpStream {
     /// Answers permission requests by Sun's `mode` names: reads always,
     /// edits unless `default`/`plan`, everything on `bypass_permissions`,
     /// shell commands only with `allow_shell`.
-    pub fn with_permissions(mut self, mode: &str, allow_shell: bool) -> Self {
+    pub fn with_permissions(mut self, mode: PermissionMode, allow_shell: bool) -> Self {
         let mut kinds = vec!["read", "search", "think"];
         match mode {
-            "bypass_permissions" => {
+            PermissionMode::BypassPermissions => {
                 kinds.extend(["edit", "delete", "move", "execute", "fetch", "other"]);
             }
-            "accept_edits" => kinds.extend(["edit", "delete", "move"]),
-            _ => {}
+            PermissionMode::AcceptEdits => kinds.extend(["edit", "delete", "move"]),
+            PermissionMode::Default | PermissionMode::Plan => {}
         }
         if allow_shell && !kinds.contains(&"execute") {
             kinds.push("execute");
@@ -625,14 +623,15 @@ mod tests {
 
     #[test]
     fn permission_requests_follow_the_policy() {
-        let mut edits = AcpStream::default().with_permissions("accept_edits", false);
+        let mut edits = AcpStream::default().with_permissions(PermissionMode::AcceptEdits, false);
         assert_eq!(reply(&mut edits, "edit"), "a");
         assert_eq!(reply(&mut edits, "execute"), "r");
         assert_eq!(reply(&mut edits, ""), "r", "unknown kinds are refused");
-        let mut shell = AcpStream::default().with_permissions("default", true);
+        let mut shell = AcpStream::default().with_permissions(PermissionMode::Default, true);
         assert_eq!(reply(&mut shell, "edit"), "r");
         assert_eq!(reply(&mut shell, "execute"), "a");
-        let mut all = AcpStream::default().with_permissions("bypass_permissions", false);
+        let mut all =
+            AcpStream::default().with_permissions(PermissionMode::BypassPermissions, false);
         assert_eq!(reply(&mut all, "fetch"), "a");
     }
 }

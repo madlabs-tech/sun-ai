@@ -41,10 +41,12 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use sun_core::host_protocol::{
-    Capabilities, DeviceFlowRequest, DeviceInput, DeviceResult, DeviceScreen, PreviewSide, Worktree,
+    DeviceFlowRequest, DeviceInput, DeviceResult, DeviceScreen, ExecEnvCapability, PreviewSide,
+    Worktree,
 };
 use sun_core::model::{
-    AuditAction, EventRecord, Note, NoteKind, OutboxStatus, Run, RuntimeSource, SecretScope, Step,
+    AuditAction, EventRecord, HostRuntime, Note, NoteKind, OutboxStatus, Run, RuntimeSource,
+    SecretScope, Step,
 };
 use sun_core::{
     BoxStream, EngineHandle, Error, ExecEnvSpec, HostEvent, HostId, HostLink, IdemKey, ModLink,
@@ -177,8 +179,9 @@ impl std::fmt::Debug for Engine {
 pub(crate) enum Ready {
     /// Online hosts with the runtime installed and logged in, oldest first
     /// (may be empty: the run waits), each with the exec env kinds it has
-    /// ready (`bare` always).
-    Hosts(Vec<(HostId, Vec<String>)>),
+    /// ready (`bare` always) and, under `v2`, its cap on sessions of the
+    /// runtime.
+    Hosts(Vec<(HostId, Vec<String>, Option<usize>)>),
     /// No host has reported the runtime at all (not connected yet, tests).
     Unreported,
 }
@@ -186,6 +189,21 @@ pub(crate) enum Ready {
 /// Setting: hours a succeeded or cancelled task's worktrees are kept before
 /// they are removed; unset = 0. `sun serve` writes it from sun.yaml.
 pub const WORKTREE_RETENTION: &str = "worktree_retention_hours";
+
+/// Setting: where placement reads what each host's runtimes are, `"v1"`
+/// (the host's raw capabilities report, the default) or `"v2"` (its
+/// `host_runtime` rows, with per-host `max_sessions`). `sun serve` writes it
+/// from sun.yaml `runtimes.model`, the kill switch of the runtime rework.
+pub const RUNTIMES_MODEL: &str = "runtimes_model";
+
+/// [`RUNTIMES_MODEL`] is `v2`: every host's `host_runtime` rows; `None`
+/// under `v1`.
+pub(crate) async fn runtime_rows(tx: &mut Tx) -> Result<Option<Vec<HostRuntime>>> {
+    Ok(match tx.setting(RUNTIMES_MODEL).await? {
+        Some(model) if model == "v2" => Some(tx.host_runtimes(None).await?),
+        _ => None,
+    })
+}
 
 /// Setting: worktree removals still to do ([`Removal`]), so a restart
 /// schedules them again instead of leaking the worktrees.
@@ -260,6 +278,14 @@ enum Command {
         run_id: RunId,
         step_key: StepKey,
         summary: String,
+        reply: oneshot::Sender<Result<()>>,
+    },
+    /// The queue may not place a queued run: it fails, journalled as
+    /// `kind` with `payload` (whose `reason` ends the run).
+    Refuse {
+        run_id: RunId,
+        kind: &'static str,
+        payload: Value,
         reply: oneshot::Sender<Result<()>>,
     },
     /// A human cancelled the run.
@@ -611,23 +637,54 @@ impl Engine {
         .await
     }
 
+    /// Fails queued run `run_id` the queue may not place, journalling why
+    /// as `kind` with `payload` (its `reason` is the run's end reason). It
+    /// never starts a step.
+    pub(crate) async fn refuse_run(
+        &self,
+        run_id: RunId,
+        kind: &'static str,
+        payload: Value,
+    ) -> Result<()> {
+        self.request(|reply| Command::Refuse {
+            run_id,
+            kind,
+            payload,
+            reply,
+        })
+        .await
+    }
+
     /// Hosts a run of runtime `adapter` may be placed on: online, with the
-    /// adapter installed and logged in.
-    pub(crate) async fn ready_hosts(&self, adapter: &str) -> Result<Ready> {
+    /// adapter installed and logged in, read per [`RUNTIMES_MODEL`]. Under
+    /// `v2` each carries its session cap: the host's reported
+    /// `max_sessions`, else `max_sessions` (sun.yaml's default).
+    pub(crate) async fn ready_hosts(
+        &self,
+        adapter: &str,
+        max_sessions: Option<usize>,
+    ) -> Result<Ready> {
+        let mut read = self.store.read().await?;
+        let rows = runtime_rows(&mut read).await?;
         let mut reported = false;
         let mut ready = Vec::new();
-        for host in self.store.read().await?.hosts().await? {
-            let Ok(caps) = serde_json::from_value::<Capabilities>(host.capabilities) else {
+        for host in read.hosts().await? {
+            let Some(report) = failover::Reported::of(&host, rows.as_deref()) else {
                 continue;
             };
-            reported |= caps.runtimes.iter().any(|r| r.adapter == adapter);
-            if self.hosts.is_online(host.id) && failover::unready_reason(&caps, adapter).is_none() {
-                let envs = caps
-                    .exec_envs
-                    .into_iter()
-                    .filter(|e| e.ready && e.kind != "bare");
+            reported |= report.has(adapter);
+            if self.hosts.is_online(host.id) && report.unready(adapter).is_none() {
+                let envs = host.capabilities.get("exec_envs").cloned();
+                let envs: Vec<ExecEnvCapability> = envs
+                    .and_then(|e| serde_json::from_value(e).ok())
+                    .unwrap_or_default();
+                let envs = envs.into_iter().filter(|e| e.ready && e.kind != "bare");
                 let kinds = std::iter::once("bare".to_owned()).chain(envs.map(|e| e.kind));
-                ready.push((host.id, kinds.collect()));
+                let cap = match &report {
+                    failover::Reported::Rows(_) => report.max_sessions(adapter).or(max_sessions),
+                    failover::Reported::Caps(_) => None,
+                };
+                ready.push((host.id, kinds.collect(), cap));
             }
         }
         Ok(match reported {
@@ -893,6 +950,14 @@ impl Executor {
             } => {
                 let _ = reply.send(self.done(run_id, step_key, summary).await);
             }
+            Command::Refuse {
+                run_id,
+                kind,
+                payload,
+                reply,
+            } => {
+                let _ = reply.send(self.refuse_run(run_id, kind, payload).await);
+            }
             Command::Cancel { run_id, reply } => {
                 let _ = reply.send(self.cancel(run_id).await);
             }
@@ -1045,6 +1110,30 @@ impl Executor {
             }
         }
         self.advance(&mut tx, run_id, &mut effects).await?;
+        tx.commit().await?;
+        self.apply(effects).await
+    }
+
+    /// [`Engine::refuse_run`]: `queued → running → failed` (a queued run has
+    /// no edge to `failed`), with no step started.
+    async fn refuse_run(&mut self, run_id: RunId, kind: &str, payload: Value) -> Result<()> {
+        let reason = payload["reason"].as_str().unwrap_or(kind).to_owned();
+        let mut tx = self.store.begin().await?;
+        tx.append_event(NewEvent::new(run_id, None, kind, payload))
+            .await?;
+        move_run(&mut tx, run_id, RunStatus::Running, None).await?;
+        let mut effects = Vec::new();
+        let failed = RunStatus::Failed;
+        self.end_run(
+            &mut tx,
+            run_id,
+            &mut HashMap::new(),
+            failed,
+            &reason,
+            false,
+            &mut effects,
+        )
+        .await?;
         tx.commit().await?;
         self.apply(effects).await
     }

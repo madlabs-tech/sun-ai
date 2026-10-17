@@ -130,10 +130,10 @@ pub struct Decisions {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Runtimes {
-    /// One of `sun_core::PERMISSION_MODES`. `bypass_permissions` only
-    /// with `allow_bypass`.
+    /// One of `sun_core::PERMISSION_MODES`, spelled exactly.
+    /// `bypass_permissions` only with `allow_bypass`.
     #[serde(default = "accept_edits")]
-    pub permission_mode: String,
+    pub permission_mode: sun_core::PermissionMode,
     /// The operator's explicit opt-in to `bypass_permissions` (e.g. sessions
     /// run in a container or VM execution environment).
     #[serde(default)]
@@ -159,6 +159,10 @@ pub struct Runtimes {
     /// `host_runtime` rows. The kill switch of the runtime model rework.
     #[serde(default)]
     pub model: sun_api::RuntimesModel,
+    /// Sessions of one tool on one host at once, for hosts that report no
+    /// `max_sessions` of their own. Only under `model: v2`. Unset = no cap.
+    #[serde(default)]
+    pub max_sessions: Option<usize>,
 }
 
 impl Default for Runtimes {
@@ -171,6 +175,7 @@ impl Default for Runtimes {
             credits: BTreeMap::new(),
             template_dir: None,
             model: sun_api::RuntimesModel::default(),
+            max_sessions: None,
         }
     }
 }
@@ -186,8 +191,8 @@ pub struct CreditsSettings {
     pub model: Option<String>,
 }
 
-fn accept_edits() -> String {
-    "accept_edits".into()
+fn accept_edits() -> sun_core::PermissionMode {
+    sun_core::PermissionMode::AcceptEdits
 }
 
 /// The default `test`/`lint` gate commands (sun-engine `gates`), as Claude
@@ -295,14 +300,9 @@ impl Config {
         }
         self.watchdog.stall_after_secs()?;
         let runtimes = &self.runtimes;
-        if !sun_core::PERMISSION_MODES.contains(&runtimes.permission_mode.as_str()) {
-            bail!(
-                "sun.yaml: runtimes.permission_mode `{}` is not a permission mode; use {}",
-                runtimes.permission_mode,
-                sun_core::PERMISSION_MODES.join(", ")
-            );
-        }
-        if runtimes.permission_mode == "bypass_permissions" && !runtimes.allow_bypass {
+        if runtimes.permission_mode == sun_core::PermissionMode::BypassPermissions
+            && !runtimes.allow_bypass
+        {
             bail!(
                 "sun.yaml: runtimes.permission_mode bypass_permissions lets the agent \
                  run anything; set allow_bypass: true only when sessions run in a container or VM"

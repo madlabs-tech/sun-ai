@@ -1002,3 +1002,109 @@ async fn a_kernel_that_stops_answering_pings_is_redialled() {
     drop(kernel);
     running.abort();
 }
+
+/// FR8: a bare session in `bypass_permissions` is refused with a typed
+/// `forbidden` reply naming the rule, whether the spec asks for it or the
+/// host's own default would give it; no session starts. Another mode starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bare_host_refuses_a_bypass_session() {
+    let (listener, url) = listen().await;
+    let data_dir = temp_dir("bypass-bare");
+    let mut config = HostConfig::new(&data_dir);
+    config.permission_mode = Some(sun_core::PermissionMode::BypassPermissions);
+    let fake = Arc::new(Fake::default());
+    let host = Host::open(config, vec![fake.clone()]).unwrap();
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let running = tokio::spawn(Arc::clone(&host).run(credentials));
+    let mut kernel = Kernel::accept(&listener).await;
+    kernel.hello().await;
+    let task_id = TaskId::generate();
+    let ReplyBody::Worktree { path } = kernel
+        .request(|id| KernelFrame::WorktreePrepare {
+            id,
+            worktree: Worktree::Folder { task_id },
+        })
+        .await
+    else {
+        panic!()
+    };
+    let spec = |mode: Option<&str>| SessionSpec {
+        skills: None,
+        session_id: SessionId::generate(),
+        run_id: RunId::generate(),
+        step_key: StepKey::new("implement").unwrap(),
+        worktree: path.clone(),
+        envelope: "do it".into(),
+        envelope_parts: None,
+        model: None,
+        mcp_config: None,
+        env: BTreeMap::new(),
+        exec_env: ExecEnvSpec::Bare,
+        resume: None,
+        permission_mode: mode.map(Into::into),
+        byo_key: None,
+    };
+    // Asked for by the kernel, and the host's default (the spec says none).
+    for mode in [Some("bypass_permissions"), None] {
+        let spec = spec(mode);
+        let body = kernel
+            .request(|id| KernelFrame::SessionStart {
+                id,
+                adapter: "fake".into(),
+                spec: Box::new(spec),
+            })
+            .await;
+        let ReplyBody::Error { code, message } = body.clone() else {
+            panic!("{body:?}")
+        };
+        assert_eq!(code, "forbidden", "{mode:?}");
+        assert!(
+            message.contains("bypass_permissions needs a container or vm"),
+            "{message}"
+        );
+        assert_eq!(
+            body.into_result().unwrap_err(),
+            sun_core::Error::Forbidden(message)
+        );
+    }
+    // Any other spelling of a mode is not one: refused before the bypass
+    // check, so no CLI ever reads `bypassPermissions` as bypass.
+    for forged in [
+        "bypassPermissions",
+        "BYPASS_PERMISSIONS",
+        " bypass_permissions",
+    ] {
+        let spec = spec(Some(forged));
+        let body = kernel
+            .request(|id| KernelFrame::SessionStart {
+                id,
+                adapter: "fake".into(),
+                spec: Box::new(spec),
+            })
+            .await;
+        let ReplyBody::Error { code, message } = body else {
+            panic!("{forged:?}: {body:?}")
+        };
+        assert_eq!(code, "invalid_input", "{forged:?}");
+        assert!(message.contains("is not a permission mode"), "{message}");
+    }
+    assert!(fake.specs.lock().unwrap().is_empty(), "no session started");
+
+    let ok = spec(Some("accept_edits"));
+    let body = kernel
+        .request(|id| KernelFrame::SessionStart {
+            id,
+            adapter: "fake".into(),
+            spec: Box::new(ok),
+        })
+        .await;
+    assert!(matches!(body, ReplyBody::Session { .. }), "{body:?}");
+    let started = fake.specs.lock().unwrap();
+    assert_eq!(started[0].permission_mode.as_deref(), Some("accept_edits"));
+    drop(started);
+    running.abort();
+}

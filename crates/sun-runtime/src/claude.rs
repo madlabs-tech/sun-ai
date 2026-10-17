@@ -12,9 +12,9 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use serde_json::{Value, json};
 use sun_core::{
-    BoxStream, EffortCatalog, EffortLevel, HostCtx, LimitKind, Readiness, Result, Role,
-    RuntimeAdapter, SessionHandle, SessionId, SessionSpec, Steer, StopMode, SunEvent, Todo,
-    TodoStatus, Transcript,
+    BoxStream, EffortCatalog, EffortLevel, Error, HostCtx, LimitKind, PermissionMode, Readiness,
+    Result, Role, RuntimeAdapter, SessionHandle, SessionId, SessionSpec, Steer, StopMode, SunEvent,
+    Todo, TodoStatus, Transcript,
 };
 use tokio::process::Command;
 
@@ -30,10 +30,10 @@ pub const ID: &str = "claude-code";
 pub struct ClaudeCode {
     /// The `claude` binary (a bare name is looked up on `PATH`).
     pub binary: PathBuf,
-    /// A `sun_core::PERMISSION_MODES` name for sessions, mapped to
+    /// The mode of sessions whose spec names none, mapped to
     /// `--permission-mode` by [`cli_permission_mode`]. Defaults to
     /// `accept_edits`, the mode the fixtures were recorded with.
-    pub permission_mode: String,
+    pub permission_mode: PermissionMode,
     /// `--allowedTools` (e.g. `Bash(cargo test:*)`): tools allowed without a
     /// prompt on top of the mode, such as the commands the gates run.
     pub allowed_tools: Vec<String>,
@@ -54,7 +54,7 @@ impl ClaudeCode {
     pub fn new(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: binary.into(),
-            permission_mode: "accept_edits".into(),
+            permission_mode: PermissionMode::AcceptEdits,
             allowed_tools: Vec::new(),
             template_dir: None,
             sessions: Sessions::default(),
@@ -96,6 +96,9 @@ impl RuntimeAdapter for ClaudeCode {
     }
 
     async fn start(&self, mut spec: SessionSpec) -> Result<SessionHandle> {
+        let mode = PermissionMode::parse_opt(spec.permission_mode.as_deref())
+            .map_err(|why| Error::InvalidInput(format!("session permission_mode: {why}")))?
+            .unwrap_or(self.permission_mode);
         crate::byo_key::native_env(&mut spec, ID)?;
         let prompt = envelope::first_prompt(ID, self.template_dir.as_deref(), &spec)?;
         // Resuming keeps the conversation's id (no `--fork-session`).
@@ -107,14 +110,7 @@ impl RuntimeAdapter for ClaudeCode {
         cmd.args(["-p", "--input-format", "stream-json"])
             .args(["--output-format", "stream-json", "--verbose"])
             .args([flag, &native_id])
-            .args([
-                "--permission-mode",
-                cli_permission_mode(
-                    spec.permission_mode
-                        .as_ref()
-                        .unwrap_or(&self.permission_mode),
-                ),
-            ]);
+            .args(["--permission-mode", cli_permission_mode(mode)]);
         // Sun's own MCP tools (`sun.task`, `sun.done`, …) never wait for a
         // permission prompt: a headless session can't answer one.
         let sun_tools = spec.mcp_config.as_ref().map(|_| "mcp__sun".to_owned());
@@ -207,14 +203,15 @@ pub fn native_session_id(id: SessionId) -> String {
     )
 }
 
-/// Sun's snake_case permission mode → Claude Code's `--permission-mode`
-/// spelling (Adapter boundary). `default` and `plan` are spelled the same;
-/// anything else passes through so the CLI rejects it loudly.
-pub fn cli_permission_mode(mode: &str) -> &str {
+/// Sun's permission mode → Claude Code's `--permission-mode` spelling
+/// (Adapter boundary). Only Sun's modes exist here: no other spelling can
+/// reach the CLI.
+pub fn cli_permission_mode(mode: PermissionMode) -> &'static str {
     match mode {
-        "accept_edits" => "acceptEdits",
-        "bypass_permissions" => "bypassPermissions",
-        other => other,
+        PermissionMode::Default => "default",
+        PermissionMode::AcceptEdits => "acceptEdits",
+        PermissionMode::Plan => "plan",
+        PermissionMode::BypassPermissions => "bypassPermissions",
     }
 }
 
@@ -502,10 +499,7 @@ mod tests {
 
     #[test]
     fn permission_mode_maps_at_the_adapter() {
-        let mapped: Vec<&str> = sun_core::PERMISSION_MODES
-            .iter()
-            .map(|mode| cli_permission_mode(mode))
-            .collect();
+        let mapped = sun_core::PermissionMode::ALL.map(cli_permission_mode);
         assert_eq!(
             mapped,
             ["default", "acceptEdits", "plan", "bypassPermissions"]

@@ -106,7 +106,8 @@ pub use eval::{
 pub use executor::{Actor, NewTask, TaskChange, WorkflowPick};
 pub use executor::{
     Answer, Decision, DecisionClient, DecisionReplay, Design, Engine, EngineConfig, PLUGIN_METHOD,
-    Resolution, ScreenPath, SessionMcp, StallPolicy, Tally, WORKTREE_RETENTION, WatchdogConfig,
+    RUNTIMES_MODEL, Resolution, ScreenPath, SessionMcp, StallPolicy, Tally, WORKTREE_RETENTION,
+    WatchdogConfig,
 };
 pub use gates::GateResult;
 pub use knowledge::{

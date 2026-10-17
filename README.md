@@ -147,7 +147,7 @@ event_retention_days: 90                # default: keep forever
 notify_to: ["slack:#eng"]               # where approvals and stalls are announced
 ```
 
-**Permissions.** Each agent CLI has a permission mode. `runtimes.permission_mode` in a host's `sun.yaml` is that host's default (`accept_edits`). A deployment owner can set the mode per runtime on the **Runtimes** page, which applies to every new session of that runtime on any host. Claude Code takes the mode as a flag. OpenCode's permission requests are answered by it. Codex runs in its own `workspace-write` sandbox. `bypass_permissions` lets the agent run any command, so it needs `allow_bypass: true` first; use it only when sessions run in a container or VM.
+**Permissions.** Each agent CLI has a permission mode. `runtimes.permission_mode` in a host's `sun.yaml` is that host's default (`accept_edits`). A deployment owner can set the mode per runtime on the **Runtimes** page, which applies to every new session of that runtime on any host. Claude Code takes the mode as a flag. OpenCode's permission requests are answered by it. Codex runs in its own `workspace-write` sandbox. `bypass_permissions` lets the agent run any command, so it needs `allow_bypass: true` first, and it only runs in a container or VM: the queue fails a run that would get it bare (`placement_refused_bypass_bare`), and a host refuses such a session on its own too.
 
 **Secrets** never go in `sun.yaml`. `sun secret set` seals them in the store, with the key in `<data dir>/master.key` or `SUN_MASTER_KEY`. Back that key up: losing it loses every secret. Sign-in providers (Google, GitHub, any OIDC) and SMTP are set in **Settings**.
 

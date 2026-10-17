@@ -105,13 +105,13 @@ fn host_dir(data_dir: &Path) -> PathBuf {
 pub fn adapters(config: &Config) -> Vec<Arc<dyn RuntimeAdapter>> {
     let policy = &config.runtimes;
     let mut claude = sun_runtime::ClaudeCode::default();
-    claude.permission_mode = policy.permission_mode.clone();
+    claude.permission_mode = policy.permission_mode;
     claude.allowed_tools = policy.allowed_tools.clone();
     claude.template_dir = policy.template_dir.clone();
     let mut codex = sun_runtime::Codex::default();
     codex.template_dir = policy.template_dir.clone();
     let mut opencode = sun_runtime::OpenCode::default();
-    opencode.permission_mode = policy.permission_mode.clone();
+    opencode.permission_mode = policy.permission_mode;
     opencode.allow_shell = policy.allowed_tools.iter().any(|t| t.starts_with("Bash"));
     opencode.template_dir = policy.template_dir.clone();
     let mut out: Vec<Arc<dyn RuntimeAdapter>> =
@@ -182,6 +182,8 @@ pub async fn start(
     let retention = serde_json::json!(config.worktree_retention_hours.unwrap_or(0));
     tx.put_setting(sun_engine::WORKTREE_RETENTION, &retention)
         .await?;
+    let model = serde_json::json!(config.runtimes.model);
+    tx.put_setting(sun_engine::RUNTIMES_MODEL, &model).await?;
     tx.commit().await?;
     let host = placement_host(&store, data_dir, &secrets, options.with_host).await?;
 
@@ -318,6 +320,7 @@ pub async fn start(
                 per_ecosystem: config.max_active_runs,
                 per_runtime: config.caps.per_runtime.clone(),
                 per_host: config.caps.per_host.clone(),
+                max_sessions: config.runtimes.max_sessions,
             },
         },
     );
@@ -416,6 +419,7 @@ pub async fn start(
             let config = options.exec_env_tools.clone().apply(sun_host::HostConfig {
                 skills_dir,
                 mod_envs: Some(mod_envs),
+                permission_mode: Some(config.runtimes.permission_mode),
                 ..sun_host::HostConfig::new(host_dir(data_dir))
             });
             let local = sun_host::Host::open(config, adapters)?;
