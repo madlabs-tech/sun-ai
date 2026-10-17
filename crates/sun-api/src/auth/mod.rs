@@ -614,6 +614,7 @@ pub(crate) async fn me(
         "must_set_password": caller.must_set_password,
         "must_enroll_two_step": caller.must_enroll_two_step,
         "view_role": view_role,
+        "can_bypass": crate::bypass::can_bypass(&api, &caller).await?,
     })))
 }
 

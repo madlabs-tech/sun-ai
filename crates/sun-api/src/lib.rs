@@ -39,6 +39,7 @@
 mod agents;
 mod auth;
 mod billing;
+mod bypass;
 mod catalog;
 mod chats;
 mod corrections;

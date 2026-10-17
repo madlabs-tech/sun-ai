@@ -374,6 +374,10 @@ pub(crate) fn router(api: Api) -> Router {
             "/settings/security",
             get(auth::get_security_policy).put(auth::put_security_policy),
         )
+        .route(
+            "/settings/bypass",
+            get(crate::bypass::get_policy).put(crate::bypass::put_policy),
+        )
         .route("/settings/sso", get(auth::list_sso))
         .route(
             "/settings/sso/{id}",
@@ -1037,15 +1041,20 @@ async fn bump(
     summary(&api, task_id).await
 }
 
-/// Queues a new run of a finished run's task.
-async fn retry(State(api): State<Api>, Path(run): Path<String>) -> ApiResult<Json<TaskView>> {
+/// Queues a new run of a finished run's task, as the caller.
+async fn retry(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path(run): Path<String>,
+) -> ApiResult<Json<TaskView>> {
     let run = api.engine.run(id(&run, "run")?).await?;
     if !run.status.is_terminal() {
         return Err(ApiError::conflict(
             "This run is still going; cancel it first.",
         ));
     }
-    api.queue.enqueue(run.task_id).await?;
+    let by = caller.task_actor();
+    api.queue.enqueue_by(run.task_id, Some(&by)).await?;
     summary(&api, run.task_id).await
 }
 
