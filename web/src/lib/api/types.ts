@@ -644,10 +644,12 @@ export interface Runtime {
   effort_options: EffortLevel[];
   /** Models the CLI lists, when it scopes effort per model (Codex); a model not here uses `effort_options` */
   models: ModelEffort[];
+  /** The permission modes the CLI on this host can enforce; `null` for a key-backed runtime (any host with the tool) */
+  permission_modes: PermissionMode[] | null;
 }
 
-/** Claude Code's permission modes; every adapter maps them. */
-export const PERMISSION_MODES = ['default', 'accept_edits', 'plan', 'bypass_permissions'] as const;
+/** Sun's permission modes (Claude Code's set); every adapter maps them, and each host reports which its CLI can enforce. */
+export const PERMISSION_MODES = ['default', 'accept_edits', 'plan', 'auto', 'bypass_permissions'] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
 /** GET /api/v1/hosts */

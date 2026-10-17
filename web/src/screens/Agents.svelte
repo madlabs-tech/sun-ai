@@ -15,7 +15,7 @@
   import { api } from '../lib/api/client';
   import { PERMISSION_MODES, type Agent, type AgentFields, type ChainEntry, type PermissionMode, type Runtime } from '../lib/api/types';
   import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
-  import { PERMISSION_MODE_COPY as MODE, chain_names, entry_name } from '../lib/format';
+  import { PERMISSION_MODE_COPY as MODE, chain_modes, chain_names, entry_name } from '../lib/format';
 
   const workspace = current_workspace();
   const manage = $derived(can('manage_runtimes'));
@@ -41,10 +41,14 @@
   );
   /** The operator's `runtimes.allow_bypass`, as every runtime reports it. */
   const allow_bypass = $derived(runtimes.some((r) => r.allow_bypass));
+  /** What every runtime of the chain can enforce on its hosts (BLO-163). */
+  const offered = $derived.by(() => chain_modes(runtimes, form.runtime_chain));
   const mode_options = $derived([
     { value: '', label: 'Host default' },
-    // An agent already in bypass keeps showing it, even with bypass now off.
-    ...PERMISSION_MODES.filter((m) => m !== 'bypass_permissions' || allow_bypass || editing?.permission_mode === m).map((m) => ({
+    // An agent already in a mode keeps showing it, even once bypass is off or its chain can't run it.
+    ...PERMISSION_MODES.filter(
+      (m) => editing?.permission_mode === m || form.permission_mode === m || ((m !== 'bypass_permissions' || allow_bypass) && offered.includes(m)),
+    ).map((m) => ({
       value: m,
       label: MODE[m][0],
     })),
@@ -128,6 +132,12 @@
 
   const tasks = (n: number) => (n === 1 ? '1 open task' : `${n} open tasks`);
 
+  /** A mode the chain's runtimes can't enforce: saving it is refused, never run in another mode. */
+  const mode_error = $derived(
+    form.permission_mode && !offered.includes(form.permission_mode)
+      ? `${MODE[form.permission_mode][0]} isn’t available on the hosts of every runtime here. Pick another mode or runtime.`
+      : undefined,
+  );
   const mode_hint = $derived.by(() => {
     const mode = form.permission_mode;
     if (mode === 'bypass_permissions' && !allow_bypass)
@@ -211,7 +221,7 @@
       bind:items={form.runtime_chain}
     />
     <ChainSettings {runtimes} bind:chain={form.runtime_chain} />
-    <Select label="Permissions" options={mode_options} bind:value={form.permission_mode} hint={mode_hint} />
+    <Select label="Permissions" options={mode_options} bind:value={form.permission_mode} hint={mode_hint} error={mode_error} />
     <Chips label="Skills" placeholder="tdd" suggestions={skills} hint="Installed skills from the Catalog." bind:items={form.skill_ids} />
     {#if error}<p class="agent-form__error" role="alert">{error}</p>{/if}
   </form>
