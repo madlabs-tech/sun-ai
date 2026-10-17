@@ -456,14 +456,21 @@ pub(crate) fn require(
 /// 403 unless the caller is a deployment owner or holds one of
 /// `permissions` in each workspace (group) the request names.
 fn allowed(request: &Request, permissions: &[Permission]) -> ApiResult<()> {
-    let caller = caller(request)?;
+    let named = request.extensions().get::<NamedWorkspaces>();
+    allowed_in(caller(request)?, named, permissions)
+}
+
+/// [`allowed`] for a handler that checks a permission only some bodies
+/// need, on the workspaces the guard found ([`NamedWorkspaces`]).
+pub(crate) fn allowed_in(
+    caller: &Caller,
+    named: Option<&NamedWorkspaces>,
+    permissions: &[Permission],
+) -> ApiResult<()> {
     if caller.is_owner {
         return Ok(());
     }
-    let named = request
-        .extensions()
-        .get::<NamedWorkspaces>()
-        .map_or(&[][..], |n| n.0.as_slice());
+    let named = named.map_or(&[][..], |n| n.0.as_slice());
     if named.is_empty() {
         return Err(owner_only());
     }
