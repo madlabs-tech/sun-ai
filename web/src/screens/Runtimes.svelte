@@ -24,7 +24,7 @@
     type RuntimeUsage,
   } from '../lib/api/types';
   import { can, current_workspace, error_text, is_owner, toast } from '../lib/app_state.svelte';
-  import { SOURCE_LABEL, clock, money, stamp, tokens, tool_label } from '../lib/format';
+  import { PERMISSION_MODE_COPY as MODE, SOURCE_LABEL, clock, money, stamp, tokens, tool_label } from '../lib/format';
 
   type Tone = 'success' | 'info' | 'warning' | 'neutral';
   /** The badge per state (TRD §6). Busy also shows its load. */
@@ -43,12 +43,6 @@
   const SUPPORT_URL = 'https://github.com/madlabs-tech/sun-ai/issues/new';
   const support_url = (r: Runtime) =>
     `${SUPPORT_URL}?title=${encodeURIComponent(`Support ${r.tool} ${r.version ?? ''}`.trim())}`;
-  const MODE: Record<PermissionMode, [string, string]> = {
-    default: ['Ask first', 'Asks before edits and commands; unattended sessions get no answer.'],
-    accept_edits: ['Edit files', 'Edits files freely; runs only the allowed commands.'],
-    plan: ['Plan only', 'Reads and plans; changes nothing.'],
-    bypass_permissions: ['Anything', 'Runs any command without asking.'],
-  };
 
   const workspace = current_workspace();
   const list = () => api.list_runtimes(workspace);

@@ -553,6 +553,10 @@ export interface Agent {
   runtime_chain: ChainEntry[];
   /** Catalog skill ids */
   skill_ids: string[];
+  /** The mode its sessions run in; `null` inherits the runtime's */
+  permission_mode: PermissionMode | null;
+  /** Its own mode, else the first runtime's; `null`: each host's sun.yaml default */
+  effective_permission_mode: PermissionMode | null;
   created_at: Timestamp;
   archived_at: Timestamp | null;
   /** Some runtime of the chain is logged in on an online host */
@@ -570,6 +574,8 @@ export interface AgentFields {
   instructions?: string;
   runtime_chain?: ChainEntry[];
   skill_ids?: string[];
+  /** `null` inherits; `bypass_permissions` needs `allow_bypass` on the deployment */
+  permission_mode?: PermissionMode | null;
 }
 
 /** One runtime of a chain: a runtime name (`claude-code`, `ollama-qwen`, `market:codex`) or a tool

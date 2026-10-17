@@ -1,19 +1,21 @@
 <!-- Agents: the open workspace's. A task assigned to one runs its instructions on its runtime chain
      (failover order) with its skills; each runtime of the chain may pin a host and set a model and an
      effort level, from what that host's CLI reports. Ready = some runtime of the chain is logged in on an online host;
-     not ready says why per runtime. Creating, editing and archiving need manage_runtimes; an edit gives
-     running tasks nothing new (they keep their version). -->
+     not ready says why per runtime. Its permission mode applies to every runtime of the chain; unset, it
+     inherits the first runtime's. "Anything" (bypass) needs the deployment's allow_bypass and a container or
+     VM host to run on. Creating, editing and archiving need manage_runtimes; an edit gives running tasks
+     nothing new (they keep their version). -->
 <script lang="ts">
-  import { Badge, Button, Dialog, Icon, Input, Tag } from '@hryer/madlabs-design-system/svelte';
+  import { Badge, Button, Dialog, Icon, Input, Select, Tag } from '@hryer/madlabs-design-system/svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import Loaded from '../lib/ui/Loaded.svelte';
   import Chips from '../lib/ui/Chips.svelte';
   import ChainSettings from '../lib/ui/ChainSettings.svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
   import { api } from '../lib/api/client';
-  import type { Agent, AgentFields, ChainEntry, Runtime } from '../lib/api/types';
+  import { PERMISSION_MODES, type Agent, type AgentFields, type ChainEntry, type PermissionMode, type Runtime } from '../lib/api/types';
   import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
-  import { chain_names, entry_name } from '../lib/format';
+  import { PERMISSION_MODE_COPY as MODE, chain_names, entry_name } from '../lib/format';
 
   const workspace = current_workspace();
   const manage = $derived(can('manage_runtimes'));
@@ -28,12 +30,37 @@
     (rows) => (runtimes = rows),
     () => {},
   );
+  /** Some online host has a container or VM ready: where a bypass session may run. */
+  let isolated = $state(true);
+  api.list_hosts(workspace).then(
+    (hosts) =>
+      (isolated = hosts.some(
+        (h) => h.status === 'online' && (h.capabilities.exec_envs ?? []).some((e) => e.ready && e.kind !== 'bare'),
+      )),
+    () => {},
+  );
+  /** The operator's `runtimes.allow_bypass`, as every runtime reports it. */
+  const allow_bypass = $derived(runtimes.some((r) => r.allow_bypass));
+  const mode_options = $derived([
+    { value: '', label: 'Inherit from the runtime' },
+    ...PERMISSION_MODES.filter((m) => m !== 'bypass_permissions' || allow_bypass).map((m) => ({ value: m, label: MODE[m][0] })),
+  ]);
+  /** The agent row's mode: its own, or the inherited one. */
+  const mode_line = (a: Agent) =>
+    a.effective_permission_mode && `${MODE[a.effective_permission_mode][0]}${a.permission_mode ? '' : ' (inherited)'}`;
   api.list_catalog('', '', workspace).then(
     (c) => (skills = c.entries.filter((e) => e.kind === 'skill' && e.installed).map((e) => e.id)),
     () => {},
   );
 
-  const empty_form = () => ({ name: '', description: '', instructions: '', runtime_chain: [] as ChainEntry[], skill_ids: [] as string[] });
+  const empty_form = () => ({
+    name: '',
+    description: '',
+    instructions: '',
+    runtime_chain: [] as ChainEntry[],
+    skill_ids: [] as string[],
+    permission_mode: '' as PermissionMode | '',
+  });
   /** The agent being edited; `null` with `editing` open: a new one. */
   let editing = $state<Agent | null>(null);
   let open = $state(false);
@@ -45,7 +72,14 @@
   function start(a: Agent | null) {
     editing = a;
     form = a
-      ? { name: a.name, description: a.description, instructions: a.instructions, runtime_chain: [...a.runtime_chain], skill_ids: [...a.skill_ids] }
+      ? {
+          name: a.name,
+          description: a.description,
+          instructions: a.instructions,
+          runtime_chain: [...a.runtime_chain],
+          skill_ids: [...a.skill_ids],
+          permission_mode: a.permission_mode ?? '',
+        }
       : empty_form();
     error = '';
     open = true;
@@ -57,7 +91,7 @@
     if (!form.runtime_chain.length) return void (error = 'Add at least one runtime.');
     saving = true;
     error = '';
-    const fields: AgentFields = { ...$state.snapshot(form), name: form.name.trim() };
+    const fields: AgentFields = { ...$state.snapshot(form), name: form.name.trim(), permission_mode: form.permission_mode || null };
     try {
       if (editing) {
         await api.update_agent(editing.id, fields);
@@ -88,6 +122,16 @@
   }
 
   const tasks = (n: number) => (n === 1 ? '1 open task' : `${n} open tasks`);
+
+  const mode_hint = $derived.by(() => {
+    const mode = form.permission_mode;
+    if (mode === 'bypass_permissions' && !isolated)
+      return `${MODE[mode][1]} No online host has a container or VM ready, so its runs are refused until one does.`;
+    if (mode) return MODE[mode][1];
+    const inherited = editing?.permission_mode === null ? editing.effective_permission_mode : null;
+    const why_no_bypass = allow_bypass ? '' : ' “Anything” is off on this deployment (sun.yaml runtimes.allow_bypass).';
+    return `${inherited ? `Inherited: ${MODE[inherited][0]}.` : 'Each runtime’s mode, else the host’s sun.yaml.'}${why_no_bypass}`;
+  });
 </script>
 
 <PageHeader title="Agents" subtitle="The agents of this workspace. Assign one to a task and it works with these instructions, runtimes and skills.">
@@ -111,6 +155,7 @@
               {/each}
             </span>
             · {tasks(a.task_count)}
+            {#if mode_line(a)}· <span>{mode_line(a)}</span>{/if}
           </div>
           {#if a.description}<p class="agent__text">{a.description}</p>{/if}
           {#if a.skill_ids.length}
@@ -160,6 +205,7 @@
       bind:items={form.runtime_chain}
     />
     <ChainSettings {runtimes} bind:chain={form.runtime_chain} />
+    <Select label="Permissions" options={mode_options} bind:value={form.permission_mode} hint={mode_hint} />
     <Chips label="Skills" placeholder="tdd" suggestions={skills} hint="Installed skills from the Catalog." bind:items={form.skill_ids} />
     {#if error}<p class="agent-form__error" role="alert">{error}</p>{/if}
   </form>

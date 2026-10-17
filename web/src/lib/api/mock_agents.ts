@@ -17,6 +17,8 @@ const agent = (name: string, description: string, instructions: string, runtime_
   instructions,
   runtime_chain,
   skill_ids,
+  permission_mode: null,
+  effective_permission_mode: null,
   created_at: new Date().toISOString(),
   archived_at: null,
   ready: false,
@@ -41,7 +43,11 @@ function view(a: Agent): Agent {
     return of_name.length ? (ready ? null : `${id}: log in to ${id} on a host`) : `${id}: no host reports it`;
   });
   const ready = reasons.some((r) => r === null);
-  return clone({ ...a, ready, ready_reason: ready ? null : reasons.join('; ') });
+  // Its own mode, else the first runtime's policy, like the kernel.
+  const first = a.runtime_chain[0];
+  const inherited = first ? (RUNTIMES.find((r) => r.name === entry_name(first))?.permission_mode ?? null) : null;
+  const effective_permission_mode = a.permission_mode ?? inherited;
+  return clone({ ...a, effective_permission_mode, ready, ready_reason: ready ? null : reasons.join('; ') });
 }
 
 /** A `{tool, host, model, effort}` entry checked like the kernel: the host reported the tool, the effort is in its catalog. */
@@ -62,6 +68,8 @@ function apply(a: Agent, fields: AgentFields): Agent {
   if ([...next.instructions].length > 20_000) throw invalid('Keep the instructions to 20000 characters.');
   if (!next.runtime_chain.length || next.runtime_chain.length > 32) throw invalid('Pick 1 to 32 runtimes for the agent.');
   next.runtime_chain.forEach(check_entry);
+  if (fields.permission_mode === 'bypass_permissions' && !RUNTIMES[0]?.allow_bypass)
+    throw invalid('bypass_permissions lets the agent run anything. Set `runtimes.allow_bypass: true` in sun.yaml first.');
   if (agents.some((x) => x.id !== a.id && !x.archived_at && x.name.toLowerCase() === next.name.toLowerCase()))
     throw invalid(`There is already an agent named \`${next.name}\`.`);
   return next;
