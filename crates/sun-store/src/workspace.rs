@@ -14,6 +14,7 @@ use sqlx::sqlite::{SqliteConnection, SqliteRow};
 use sun_core::model::Workspace;
 use sun_core::{HostId, MemberId, WorkspaceId};
 
+use crate::agent::HIDDEN;
 use crate::repo::{json, parse, parse_ts, ts};
 use crate::{BlobStore, Result, StoreError, Tx};
 
@@ -210,9 +211,9 @@ impl WorkspaceRepo for Tx {
     }
 
     async fn delete_workspace(&mut self, id: WorkspaceId) -> Result<()> {
-        let workflows: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM workflow WHERE workspace_id = $1 AND system_agent_id IS NULL",
-        )
+        let workflows: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM workflow WHERE workspace_id = $1 AND NOT {HIDDEN}"
+        ))
         .bind(id.to_string())
         .fetch_one(self.conn())
         .await?;
@@ -232,9 +233,8 @@ impl WorkspaceRepo for Tx {
             ))
             .into());
         }
-        // Agents' system workflows here ran no task (there is none): they go too.
-        let system =
-            "SELECT id FROM workflow WHERE workspace_id = $1 AND system_agent_id IS NOT NULL";
+        // Hidden workflows here ran no task (there is none): they go too.
+        let system = format!("SELECT id FROM workflow WHERE workspace_id = $1 AND {HIDDEN}");
         // So do its agents, runtimes (their cooldowns and gateway models) and
         // memory.
         let runtimes = "SELECT id FROM runtime WHERE workspace_id = $1";

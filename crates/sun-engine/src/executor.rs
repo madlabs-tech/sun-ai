@@ -46,7 +46,7 @@ use sun_core::host_protocol::{
 };
 use sun_core::model::{
     AuditAction, EventRecord, HostRuntime, Note, NoteKind, OutboxStatus, Run, RuntimeSource,
-    SecretScope, Step,
+    SecretScope, Step, WorkflowOwner,
 };
 use sun_core::{
     BoxStream, EngineHandle, Error, ExecEnvSpec, HostEvent, HostId, HostLink, IdemKey, ModLink,
@@ -54,9 +54,9 @@ use sun_core::{
     StepBrief, StepId, StepKey, StepStatus, StopMode, SunEvent, TaskId, WorkflowId,
 };
 use sun_store::{
-    ArtifactRepo, AuditRepo, ContextRepo, EventLog, HostRepo, NewEvent, NoteRepo, OutboxRepo,
-    RepoRepo, RunRepo, RuntimeRepo, SecretRepo, SessionRepo, SettingRepo, Store, TaskRepo, Tx,
-    WorkflowRepo, WorkspaceRepo,
+    AgentRepo, ArtifactRepo, AuditRepo, ContextRepo, EventLog, HostRepo, NewEvent, NoteRepo,
+    OutboxRepo, RepoRepo, RunRepo, RuntimeRepo, SecretRepo, SessionRepo, SettingRepo, Store,
+    TaskRepo, Tx, WorkflowRepo, WorkspaceRepo,
 };
 use sun_workflow::{Step as StepDef, StepKind, Workflow};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -2492,9 +2492,14 @@ impl Executor {
                 let mcp_config = context.mcp_config.clone();
                 delivered = Some(context);
                 let mut read = self.store.read().await?;
-                // Only the skills the run's workspace installed.
+                // Only the skills the run's workspace installed; none in a
+                // chat without an agent (`None` would sync every skill).
                 let workspace = read.workspace_of_run(step.run_id).await?;
-                let skills = Some(read.catalog_installs(workspace).await?);
+                let workflow = read.get_run(step.run_id).await?.workflow_id;
+                let skills = Some(match read.workflow_owner(workflow).await? {
+                    WorkflowOwner::DirectChat => Vec::new(),
+                    _ => read.catalog_installs(workspace).await?,
+                });
                 drop(read);
                 let spec = SessionSpec {
                     skills,

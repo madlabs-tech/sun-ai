@@ -22,6 +22,7 @@ use sun_core::{
 };
 use tokio::sync::broadcast;
 
+use crate::agent::HIDDEN;
 use crate::{MasterKey, Result, SecretRepo, StoreError};
 
 /// The broadcasts a write [`Tx`] publishes to on commit (**Observer**).
@@ -116,10 +117,10 @@ pub trait WorkflowRepo {
         &mut self,
         workflow_id: WorkflowId,
     ) -> Result<Option<WorkflowVersion>>;
-    /// Every workflow, oldest first; agents' system workflows are left out
-    /// (`AgentRepo::system_workflows`).
+    /// Every workflow, oldest first; hidden ones are left out
+    /// (`AgentRepo::hidden_workflows`).
     async fn workflows(&mut self) -> Result<Vec<Workflow>>;
-    /// The workflows of one workspace, oldest first, without system workflows.
+    /// The workflows of one workspace, oldest first, without hidden ones.
     async fn workflows_of_workspace(&mut self, workspace_id: WorkspaceId) -> Result<Vec<Workflow>>;
 }
 
@@ -421,9 +422,9 @@ impl WorkflowRepo for Tx {
     }
 
     async fn workflows(&mut self) -> Result<Vec<Workflow>> {
-        sqlx::query(
-            "SELECT id, name, workspace_id FROM workflow WHERE system_agent_id IS NULL ORDER BY id",
-        )
+        sqlx::query(&format!(
+            "SELECT id, name, workspace_id FROM workflow WHERE NOT {HIDDEN} ORDER BY id"
+        ))
         .fetch_all(self.conn())
         .await?
         .iter()
@@ -432,10 +433,10 @@ impl WorkflowRepo for Tx {
     }
 
     async fn workflows_of_workspace(&mut self, workspace_id: WorkspaceId) -> Result<Vec<Workflow>> {
-        sqlx::query(
+        sqlx::query(&format!(
             "SELECT id, name, workspace_id FROM workflow
-             WHERE workspace_id = $1 AND system_agent_id IS NULL ORDER BY id",
-        )
+             WHERE workspace_id = $1 AND NOT {HIDDEN} ORDER BY id"
+        ))
         .bind(workspace_id.to_string())
         .fetch_all(self.conn())
         .await?

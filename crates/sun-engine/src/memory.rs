@@ -39,15 +39,15 @@ use serde_json::json;
 use sun_core::host_protocol::{ExecRequest, Worktree};
 use sun_core::model::{
     Correction, CorrectionCause, CorrectionKind, EventRecord, MemoryItem, MemoryScope,
-    MemoryStatus, NoteKind, OutboxItem, OutboxStatus, Task,
+    MemoryStatus, NoteKind, OutboxItem, OutboxStatus, Task, WorkflowOwner,
 };
 use sun_core::{
     CorrectionId, Error, IdemKey, MemoryItemId, NoteId, OutboxId, RepoId, Result, RunId, StepKey,
     TaskId, Timestamp, WorkflowId, WorkspaceId,
 };
 use sun_store::{
-    CorrectionRepo, EventLog, MemoryRepo, NoteRepo, OutboxRepo, RepoRepo, RunRepo, RuntimeRepo, Tx,
-    WorkflowRepo,
+    AgentRepo, CorrectionRepo, EventLog, MemoryRepo, NoteRepo, OutboxRepo, RepoRepo, RunRepo,
+    RuntimeRepo, Tx, WorkflowRepo,
 };
 
 use sun_workflow::StepKind;
@@ -75,6 +75,9 @@ const WEEKS: i64 = 8;
 /// proposed; once it is rejected or retired, the next proposal waits for
 /// [`REPEAT`] more corrections (the mistake keeps recurring).
 pub(crate) async fn on_correction(tx: &mut Tx, c: &Correction) -> Result<()> {
+    if tx.workflow_owner(c.workflow_id).await? == WorkflowOwner::DirectChat {
+        return Ok(());
+    }
     let seen = tx.count_corrections(c.workflow_id, c.cause_label).await?;
     let base = format!("repeat:{}:{}", c.workflow_id, c.cause_label);
     let mut key = base.clone();
@@ -676,6 +679,11 @@ impl Engine {
             )));
         }
         let run = tx.get_run(note.run_id).await?;
+        if tx.workflow_owner(run.workflow_id).await? == WorkflowOwner::DirectChat {
+            return Err(Error::InvalidInput(
+                "A chat without an agent writes no memory.".into(),
+            ));
+        }
         let (scope, scope_id) = scope_of(&run.repo_ids, MemoryScope::Ecosystem, run.workflow_id);
         let step = Some(&note.step_key);
         let target = target_for(&mut tx, note.run_id, step, scope, &note.body).await?;

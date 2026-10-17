@@ -27,7 +27,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sun_core::model::{
     ActivityKind, GitSettings, PrSnapshot, PrState, PullRequest, Task, TaskKey, TaskPullRequest,
-    VcsConnection, VcsProvider, Workspace,
+    VcsConnection, VcsProvider, WorkflowOwner, Workspace,
 };
 use sun_core::{
     Error, MemberId, PullRequestId, Result, TaskId, TaskStatus, Timestamp, WorkspaceId,
@@ -420,12 +420,14 @@ pub(crate) fn decide(
 }
 
 /// Where a merge moves `task` (decision 6): `done` when its latest run was
-/// a workflow's, `needs_you` when an agent's system workflow did the work
-/// or nothing ran yet (a person confirms).
+/// a person's workflow's, `needs_you` when a hidden one did the work or
+/// nothing ran yet (a person confirms).
 async fn target_of(tx: &mut Tx, task: &Task) -> Result<TaskStatus> {
     let latest = tx.runs_of_task(task.id).await?.pop();
     Ok(match latest {
-        Some(run) if tx.system_agent_of(run.workflow_id).await?.is_none() => TaskStatus::Done,
+        Some(run) if tx.workflow_owner(run.workflow_id).await? == WorkflowOwner::Person => {
+            TaskStatus::Done
+        }
         _ => TaskStatus::NeedsYou,
     })
 }

@@ -569,3 +569,30 @@ async fn old_logos_move_from(before: i64) {
     drop(store);
     assert_eq!(columns().await.1, applied, "no migration ran twice");
 }
+
+/// BLO-162: a direct chat's hidden workflow doesn't block deleting its
+/// workspace and goes with it, versions too.
+#[tokio::test]
+async fn a_direct_chats_workflow_goes_with_its_workspace() {
+    use sun_store::AgentRepo;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let mut tx = store.begin().await.unwrap();
+    let ops = workspace("Ops");
+    tx.insert_workspace(&ops).await.unwrap();
+    let chat = Workflow {
+        id: WorkflowId::generate(),
+        workspace_id: ops.id,
+        name: "codex".into(),
+    };
+    tx.insert_direct_chat_workflow(&chat).await.unwrap();
+    tx.save_workflow_version(chat.id, "name: agent", "h")
+        .await
+        .unwrap();
+    tx.delete_workspace(ops.id).await.unwrap();
+    assert!(matches!(
+        tx.get_workflow(chat.id).await,
+        Err(StoreError::Core(Error::NotFound(_)))
+    ));
+}

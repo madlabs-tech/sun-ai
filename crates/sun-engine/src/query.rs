@@ -10,7 +10,7 @@ use serde_json::Value;
 use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::{
     Artifact, EventRecord, Host, HostRuntime, Repo, Run, SecretScope, Step, Task, Workflow,
-    WorkflowVersion,
+    WorkflowOwner, WorkflowVersion,
 };
 use sun_core::{
     ArtifactId, BlobHash, Error, HostId, MemberId, Result, RunId, StepKey, TaskId, Timestamp,
@@ -180,11 +180,11 @@ impl Engine {
     }
 
     /// A workflow with its latest saved version (the builder edits this);
-    /// an agent's system workflow answers `NotFound`.
+    /// a hidden one answers `NotFound`.
     pub async fn workflow(&self, id: WorkflowId) -> Result<(Workflow, WorkflowVersion)> {
         let mut tx = self.store.read().await?;
         let workflow = tx.get_workflow(id).await?;
-        if tx.system_agent_of(id).await?.is_some() {
+        if tx.workflow_owner(id).await? != WorkflowOwner::Person {
             return Err(Error::NotFound(format!("workflow {id}")));
         }
         let version = tx
@@ -220,8 +220,8 @@ impl Engine {
         let workflow = match id {
             Some(id) => {
                 let mut workflow = tx.get_workflow(id).await?;
-                // Only the engine saves an agent's system workflow.
-                if tx.system_agent_of(id).await?.is_some() {
+                // Only the engine saves a hidden workflow.
+                if tx.workflow_owner(id).await? != WorkflowOwner::Person {
                     return Err(Error::NotFound(format!("workflow {id}")));
                 }
                 if workflow.name != parsed.name {

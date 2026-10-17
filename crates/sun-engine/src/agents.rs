@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 use sun_core::entitlement::{Entitlement, Quota};
-use sun_core::model::{Agent, AuditAction, Run, TaskKind, Workflow};
+use sun_core::model::{Agent, AuditAction, Run, TaskKind, Workflow, WorkflowOwner};
 use sun_core::{AgentId, Error, Result, WorkflowId, WorkspaceId};
 use sun_store::{AgentRepo, AuditRepo, RepoRepo, TaskRepo, Tx, WorkflowRepo, WorkspaceRepo};
 
@@ -85,10 +85,22 @@ impl AgentFields {
 /// (left out when it inherits, so older agents keep their source). `InvalidInput`
 /// when the parser refuses a runtime or skill name.
 pub(crate) fn system_source(agent: &Agent) -> Result<(String, sun_workflow::Workflow)> {
+    let (chain, skills) = (&agent.runtime_chain, &agent.skill_ids);
+    one_step_source(chain, &agent.instructions, skills, agent.permission_mode)
+}
+
+/// The source of a hidden workflow with one `agent` step, with its parse
+/// (see [`system_source`]; a direct chat's has no instructions or skills).
+pub(crate) fn one_step_source(
+    chain: &[sun_core::ChainEntry],
+    instructions: &str,
+    skills: &[String],
+    mode: Option<sun_core::PermissionMode>,
+) -> Result<(String, sun_workflow::Workflow)> {
     // No instructions: an empty prompt, the session gets its task alone.
     // The newline keeps a one-word prompt like `fix.md` from reading as a
     // prompt file.
-    let prompt = match agent.instructions.trim() {
+    let prompt = match instructions.trim() {
         "" => String::new(),
         text => format!("{text}\n"),
     };
@@ -96,18 +108,18 @@ pub(crate) fn system_source(agent: &Agent) -> Result<(String, sun_workflow::Work
         "id": AGENT_STEP,
         "type": "agent",
         "prompt": prompt,
-        "skills": agent.skill_ids,
+        "skills": skills,
     });
-    if let Some(mode) = agent.permission_mode {
+    if let Some(mode) = mode {
         step["permission_mode"] = json!(mode);
     }
     let source = json!({
         "name": AGENT_STEP,
-        "runtime": { "chain": agent.runtime_chain },
+        "runtime": { "chain": chain },
         "steps": [step],
     });
     let source = serde_json::to_string_pretty(&source)
-        .map_err(|e| Error::InvalidInput(format!("agent {}: {e}", agent.name)))?;
+        .map_err(|e| Error::InvalidInput(format!("workflow source: {e}")))?;
     let parsed = parse(&source)?;
     Ok((source, parsed))
 }
@@ -126,22 +138,23 @@ pub(crate) async fn step_mode(
     if let Some(mode) = workflow.permission_mode(step) {
         return Ok(Some(mode));
     }
-    match tx.system_agent_of(workflow_id).await? {
-        Some(agent) => Ok(tx.get_agent(agent).await?.permission_mode),
-        None => Ok(None),
+    match tx.workflow_owner(workflow_id).await? {
+        WorkflowOwner::Agent(agent) => Ok(tx.get_agent(agent).await?.permission_mode),
+        // A direct chat's step always carries the mode it was given.
+        WorkflowOwner::Person | WorkflowOwner::DirectChat => Ok(None),
     }
 }
 
-/// `prompt` (a step's) for a session of `run`: on an agent's system
-/// workflow, its instructions followed by the task's key, title and
-/// description (a mention chat's: the task it was mentioned on, and no
+/// `prompt` (a step's) for a session of `run`: on a direct chat's workflow,
+/// the chat brief; on an agent's system workflow, its instructions
+/// followed by the task's key, title and description (a mention chat's: the task it was mentioned on, and no
 /// repositories), then the workspace's repositories and how to work in them
 /// (the session runs in an empty folder and clones what it needs with the
 /// host machine's own git credentials); any other workflow's as it is.
 // ponytail: add `sun repo checkout <url>` reusing `Worktrees::fetch`'s bare
 // cache when clone time hurts.
 pub(crate) async fn with_task(tx: &mut Tx, run: &Run, prompt: String) -> Result<String> {
-    if tx.system_agent_of(run.workflow_id).await?.is_none() {
+    if tx.workflow_owner(run.workflow_id).await? == WorkflowOwner::Person {
         return Ok(prompt);
     }
     let mut task = tx.get_task(run.task_id).await?;
@@ -257,12 +270,12 @@ impl Engine {
         Ok(counts)
     }
 
-    /// Every agent's system workflows with their latest version numbers
-    /// (task views name them; the lists leave them out).
-    pub async fn system_workflows(&self) -> Result<Vec<(Workflow, u32)>> {
+    /// Every hidden workflow with its latest version number (task views
+    /// name them; the lists leave them out).
+    pub async fn hidden_workflows(&self) -> Result<Vec<(Workflow, u32)>> {
         let mut tx = self.store.read().await?;
         let mut out = Vec::new();
-        for workflow in tx.system_workflows().await? {
+        for workflow in tx.hidden_workflows().await? {
             let version = tx
                 .latest_workflow_version(workflow.id)
                 .await?

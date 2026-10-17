@@ -14,7 +14,7 @@
 use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::{
     AuditAction, GitSettings, GitSettingsPatch, OutboxStatus, Role, SignupPolicy, Task, Workflow,
-    Workspace,
+    WorkflowOwner, Workspace,
 };
 use sun_core::{
     AgentId, ArtifactId, CorrectionId, Error, EvalRunId, EvalSetId, MemberId, MemoryItemId, NoteId,
@@ -320,11 +320,13 @@ impl Engine {
             fields.push("context");
         }
         if let Some(workflow) = change.default_workflow_id {
-            // A workflow elsewhere, or an agent's system workflow, answers
-            // like a missing one.
+            // A workflow elsewhere, or a hidden one, answers like a missing one.
             if let Some(workflow) = workflow {
                 let on_it = match tx.get_workflow(workflow).await {
-                    Ok(w) => w.workspace_id == id && tx.system_agent_of(workflow).await?.is_none(),
+                    Ok(w) => {
+                        w.workspace_id == id
+                            && tx.workflow_owner(workflow).await? == WorkflowOwner::Person
+                    }
                     Err(sun_store::StoreError::Core(Error::NotFound(_))) => false,
                     Err(e) => return Err(e.into()),
                 };

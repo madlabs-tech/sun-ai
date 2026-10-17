@@ -250,8 +250,8 @@ async fn agents_runtimes_secrets_and_memory_move_into_workspaces_on_an_old_datab
         Some(SYS_OPS.parse().unwrap())
     );
     assert_eq!(
-        tx.system_agent_of(SYS_MAIN.parse().unwrap()).await.unwrap(),
-        Some(ada)
+        tx.workflow_owner(SYS_MAIN.parse().unwrap()).await.unwrap(),
+        sun_core::model::WorkflowOwner::Agent(ada)
     );
     assert_eq!(tx.system_workflow(ada, ops).await.unwrap(), None);
 
