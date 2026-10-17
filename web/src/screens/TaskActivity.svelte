@@ -2,7 +2,8 @@
      a run", "{runner} completed a run", "Run 2 failed"), merged by time (the page streams the log live).
      A comment box sticks to the bottom: ⌘↵ / Ctrl+↵ sends, and on an agent's task the comment wakes it.
      Typing @ lists the workspace's agents: a picked one is mentioned, and the mentioned agents wake
-     instead of the assignee (each answers in the thread). -->
+     instead of the assignee (each answers in the thread). `chat`: a chat's messages, for the Chat screen —
+     only comments, no @ list. -->
 <script lang="ts">
   import { Button, Icon } from '@hryer/madlabs-design-system/svelte';
   import TextArea from '../lib/ui/TextArea.svelte';
@@ -20,8 +21,9 @@
     workflows,
     projects,
     on_comment,
+    chat = false,
   }: {
-    task: TaskDetail;
+    task: Pick<TaskDetail, 'id' | 'assignee' | 'workspace_id'>;
     activity: TaskActivity[];
     runs: TaskRun[];
     /** Who runs the task: its agent's or workflow's name. */
@@ -29,6 +31,8 @@
     workflows: Workflow[];
     projects: Project[];
     on_comment: (entry: TaskActivity) => void;
+    /** A chat: its messages only (no moves or runs), and nobody to mention. */
+    chat?: boolean;
   } = $props();
 
   type Entry = {
@@ -107,7 +111,9 @@
   };
 
   const entries = $derived(
-    [...activity.map(describe), ...runs.map(ended).filter((e): e is Entry => !!e)].sort((a, b) => a.at.localeCompare(b.at)),
+    chat
+      ? activity.filter((a) => a.kind === 'comment').map(describe)
+      : [...activity.map(describe), ...runs.map(ended).filter((e): e is Entry => !!e)].sort((a, b) => a.at.localeCompare(b.at)),
   );
 
   let draft = $state('');
@@ -126,7 +132,7 @@
   let active = $state(0);
   let field: HTMLTextAreaElement | null = null;
   const options = $derived(
-    query === null
+    query === null || chat
       ? []
       : app.agents.filter((a) => a.workspace_id === task.workspace_id && a.name.toLowerCase().startsWith(query!.toLowerCase())).slice(0, 8),
   );
@@ -180,7 +186,7 @@
 </script>
 
 <section class="activity" aria-labelledby="activity-head">
-  <h2 class="sun-label" id="activity-head">Activity</h2>
+  <h2 class="sun-label" id="activity-head">{chat ? 'Messages' : 'Activity'}</h2>
   <ol class="activity__list">
     {#each entries as e (e.key)}
       <li class="entry" class:entry--comment={e.comment !== undefined}>
@@ -214,23 +220,29 @@
       </ul>
     {/if}
     <TextArea
-      aria-label="Comment"
+      aria-label={chat ? 'Message' : 'Comment'}
       aria-describedby="comment-hint"
       aria-controls={listing ? 'mention-list' : undefined}
       aria-expanded={listing}
       aria-autocomplete="list"
       aria-activedescendant={listing ? `mention-${options[active]?.id}` : undefined}
-      placeholder="Leave a comment… @ mentions an agent"
+      placeholder={chat ? `Message ${runner}…` : 'Leave a comment… @ mentions an agent'}
       rows={2}
       maxlength={10000}
       bind:value={draft}
     />
     <div class="composer__row">
       <p class="composer__hint" id="comment-hint">
-        {mentions.length ? `Wakes ${wakes}: each answers here.` : wakes ? `A comment wakes ${runner}: it reads it and picks the task up.` : 'Comments stay on the task for people to read.'}
+        {chat
+          ? `${runner} answers here.`
+          : mentions.length
+            ? `Wakes ${wakes}: each answers here.`
+            : wakes
+              ? `A comment wakes ${runner}: it reads it and picks the task up.`
+              : 'Comments stay on the task for people to read.'}
       </p>
       <Button size="sm" variant="ice" iconLeft="send" type="submit" loading={sending} disabled={!draft.trim()} aria-keyshortcuts="Meta+Enter Control+Enter">
-        Comment <kbd class="composer__kbd" aria-hidden="true">{SEND_KEY}</kbd>
+        {chat ? 'Send' : 'Comment'} <kbd class="composer__kbd" aria-hidden="true">{SEND_KEY}</kbd>
       </Button>
     </div>
   </form>

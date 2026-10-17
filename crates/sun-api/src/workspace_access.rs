@@ -20,8 +20,12 @@
 //! - `?workspace=` (or Main for the routes that default to it), `?run_id=` and
 //!   `?repo_id=`;
 //! - JSON body keys anywhere in the body: `workspace_id`, `workflow_id`,
-//!   `task_id(s)`, `repo_id(s)`, `project_id`, `set_id`, an eval `pick` and a
-//!   task's `assignee` (a workflow or an agent).
+//!   `task_id(s)`, `repo_id(s)`, `project_id`, `set_id`, `agent_id`, an eval
+//!   `pick` and a task's `assignee` (a workflow or an agent).
+//!
+//! For every caller, deployment owners too, a task or run named anywhere
+//! above that is someone else's direct chat answers 404 as well
+//! ([`sun_engine::Engine::chat_hidden`]).
 //!
 //! Lists without `?workspace=` filter themselves with [`Caller::sees`], or
 //! need one from anyone but a deployment owner ([`listed_workspace`]).
@@ -128,19 +132,16 @@ pub(crate) fn hidden() -> ApiError {
 /// Middleware: 404 when the request names anything that doesn't exist or is
 /// on a workspace the caller can't see, else stores [`NamedWorkspaces`].
 /// Malformed ids name nothing (the handler answers 422). Deployment owners
-/// pass without a lookup.
+/// pass after the chat check.
 pub(crate) async fn guard(
     State(api): State<Api>,
     request: Request,
     next: Next,
 ) -> ApiResult<Response> {
-    let restricted = request
-        .extensions()
-        .get::<Caller>()
-        .is_some_and(|c| c.workspaces.is_some());
-    if !restricted {
-        return Ok(next.run(request).await);
-    }
+    let Some(caller) = request.extensions().get::<Caller>() else {
+        return Err(ApiError::unauthorized());
+    };
+    let (restricted, member) = (caller.workspaces.is_some(), caller.member_id);
     let (mut parts, body) = request.into_parts();
     let path = parts
         .extensions
@@ -193,6 +194,14 @@ pub(crate) async fn guard(
             axum::body::Body::from(bytes)
         }
     };
+    for thing in &named {
+        if api.engine.chat_hidden(thing.on_workspace(), member).await? {
+            return Err(hidden());
+        }
+    }
+    if !restricted {
+        return Ok(next.run(Request::from_parts(parts, body)).await);
+    }
     let defaults = DEFAULTS_TO_MAIN
         .iter()
         .any(|(method, p)| *method == parts.method && *p == path);
@@ -329,6 +338,7 @@ fn from_json(json: &Value, named: &mut Vec<Named>, depth: u32) {
                     "task_id" | "task_ids" => ids.iter().for_each(|i| push(named, i, Named::Task)),
                     "repo_id" | "repo_ids" => ids.iter().for_each(|i| push(named, i, Named::Repo)),
                     "set_id" => ids.iter().for_each(|i| push(named, i, Named::EvalSet)),
+                    "agent_id" => ids.iter().for_each(|i| push(named, i, Named::Agent)),
                     "project_id" => ids.iter().for_each(|i| push(named, i, Named::Project)),
                     // A task's `{kind: "workflow" | "agent", id}`.
                     "assignee" if value["kind"] == "workflow" => {

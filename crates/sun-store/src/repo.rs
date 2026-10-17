@@ -158,6 +158,13 @@ pub trait TaskRepo {
     async fn tasks_of_workspace(&mut self, workspace_id: WorkspaceId) -> Result<Vec<Task>>;
     /// The chat `agent` was @mentioned into on `source`, if any.
     async fn mention_chat(&mut self, source: TaskId, agent: AgentId) -> Result<Option<Task>>;
+    /// The direct chats (no source task) `creator` started on `workspace`
+    /// (`None`: the token holder's), last changed first.
+    async fn chats_of(
+        &mut self,
+        workspace_id: WorkspaceId,
+        creator: Option<MemberId>,
+    ) -> Result<Vec<Task>>;
     /// Saves the task's title, body, workflow, priority, assignee, project
     /// and position, and sets `updated_at`. `NotFound` if there is no task;
     /// `InvalidInput` when the project is on another workspace.
@@ -629,6 +636,26 @@ impl TaskRepo for Tx {
         .fetch_optional(self.conn())
         .await?;
         row.as_ref().map(task_from).transpose()
+    }
+
+    async fn chats_of(
+        &mut self,
+        workspace_id: WorkspaceId,
+        creator: Option<MemberId>,
+    ) -> Result<Vec<Task>> {
+        sqlx::query(&format!(
+            "SELECT {TASK_COLUMNS} FROM task
+             WHERE kind = 'chat' AND source_task_id IS NULL AND workspace_id = $1
+               AND created_by IS $2
+             ORDER BY updated_at DESC, id DESC"
+        ))
+        .bind(workspace_id.to_string())
+        .bind(creator.map(|m| m.to_string()))
+        .fetch_all(self.conn())
+        .await?
+        .iter()
+        .map(task_from)
+        .collect()
     }
 
     async fn update_task(&mut self, task: &Task) -> Result<()> {

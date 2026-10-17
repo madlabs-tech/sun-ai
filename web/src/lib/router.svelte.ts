@@ -20,6 +20,7 @@ export const NAV: NavItem[] = [
   { id: 'tasks', label: 'Tasks', icon: 'kanban', section: 'Work' },
   { id: 'approvals', label: 'Approvals', icon: 'user-check', section: '' },
   { id: 'agents', label: 'Agents', icon: 'bot', section: 'AI Team' },
+  { id: 'chat', label: 'Chat', icon: 'messages-square', section: 'AI Team' },
   { id: 'projects', label: 'Projects', icon: 'folder-kanban', section: 'Work' },
   { id: 'workflows', label: 'Workflows', icon: 'workflow', section: 'Work' },
   { id: 'knowledge', label: 'Knowledge', icon: 'library', section: 'Work' },

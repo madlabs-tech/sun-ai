@@ -3,7 +3,7 @@
 //! triggers (create, Backlog, comments, reassignment), a comment storm, the
 //! hidden system workflow, and the conversation on a task's thread (the
 //! agent's reply as a comment, a comment resuming its session, @mentions
-//! and their chats).
+//! and their chats, direct chats).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashSet;
@@ -24,8 +24,8 @@ use sun_core::{
     TaskId, TaskStatus, WorkflowId, WorkspaceId,
 };
 use sun_engine::{
-    Actor, AgentFields, Engine, EngineConfig, NewTask, Queue, QueueConfig, Slot, WatchdogConfig,
-    WorkflowPick,
+    Actor, AgentFields, Caps, Engine, EngineConfig, NewTask, Queue, QueueConfig, Slot,
+    WatchdogConfig, WorkflowPick,
 };
 use sun_store::{
     HostRepo, RunRepo, RuntimeRepo, Store, TaskRepo, WorkflowRepo, WorkspaceItem, WorkspaceRepo,
@@ -52,6 +52,8 @@ struct HoldHost {
     /// The done claims a finishing session sends, in order (default: one
     /// `done`).
     claims: Mutex<Vec<String>>,
+    /// Sessions repeat one tool call until the watchdog stops them.
+    looping: AtomicBool,
     /// Each host event is delivered twice (a host redelivering unacked).
     redeliver: AtomicBool,
     /// Hosts that are not connected now.
@@ -104,6 +106,7 @@ impl HostLink for HoldHost {
         if claims.is_empty() {
             claims.push("done".into());
         }
+        let looping = self.looping.load(Ordering::SeqCst);
         let copies = if self.redeliver.load(Ordering::SeqCst) {
             2
         } else {
@@ -127,7 +130,17 @@ impl HostLink for HoldHost {
                 text: "working".into(),
             };
             send(1, working);
-            while !finish.load(Ordering::SeqCst) {
+            if looping {
+                for seq in 2..5 {
+                    let call = SunEvent::ToolCall {
+                        name: "Bash".into(),
+                        args_hash: 7,
+                        summary: "cargo test".into(),
+                    };
+                    send(seq, call);
+                }
+            }
+            while looping || !finish.load(Ordering::SeqCst) {
                 if !alive.lock().unwrap().contains(&id) {
                     return;
                 }
@@ -975,6 +988,76 @@ async fn mentions_name_up_to_five_active_agents_of_the_workspace_and_never_in_a_
     assert_eq!(k.comments(task).await.len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_answers_its_creator_and_says_what_it_waits_behind() {
+    let one_at_a_time = Caps {
+        per_ecosystem: Some(1),
+        ..Caps::default()
+    };
+    let k = kernel_on(&[("box", None)], one_at_a_time).await;
+    let ada = k.agent("Ada").await;
+    let task = k.task(ada, TaskStatus::Todo).await;
+    k.until(task, TaskStatus::InProgress).await;
+    k.working(task).await;
+
+    let chat = k.engine.create_chat(ada, None).await.unwrap();
+    assert_eq!(
+        (chat.kind, chat.number, chat.status, chat.source_task_id),
+        (TaskKind::Chat, None, TaskStatus::NeedsYou, None)
+    );
+    k.engine
+        .comment(chat.id, "What are you on?", ana(), &[])
+        .await
+        .unwrap();
+    // The only slot is Ada's task: the chat waits behind it, and says so.
+    let chats = k.engine.chats(WorkspaceId::MAIN, None).await.unwrap();
+    assert_eq!(chats.len(), 1);
+    assert_eq!(chats[0].run.as_ref().unwrap().status, RunStatus::Queued);
+    let behind: Vec<String> = chats[0]
+        .queued_behind
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(behind, ["MAIN-1"]);
+    assert_eq!(
+        chats[0].last.as_ref().unwrap().body["text"],
+        "What are you on?"
+    );
+
+    // The task ends; the chat's session gets the chat brief and answers in the chat.
+    k.host.finish.store(true, Ordering::SeqCst);
+    eventually("the chat's session", || async {
+        k.host.envelopes().len() == 2
+    })
+    .await;
+    let asked = k.host.envelopes()[1].clone();
+    assert!(
+        asked.contains("You are Ada.\n\nYou are chatting with a person."),
+        "{asked}"
+    );
+    assert!(asked.contains("- ana: What are you on?"), "{asked}");
+    assert!(!asked.contains("Your task:"), "{asked}");
+    eventually("Ada's reply in the chat", || async {
+        let comments = k.comments(chat.id).await;
+        comments.iter().any(|c| c["by_agent"] == json!(ada))
+    })
+    .await;
+    // Someone else's list doesn't have it; no task list does.
+    let theirs = k
+        .engine
+        .chats(WorkspaceId::MAIN, Some(sun_core::MemberId::generate()));
+    assert!(theirs.await.unwrap().is_empty());
+    let listed: Vec<TaskId> = k
+        .engine
+        .tasks()
+        .await
+        .unwrap()
+        .iter()
+        .map(|t| t.id)
+        .collect();
+    assert_eq!(listed, [task]);
+}
+
 /// Runs of `task` still going (queued, running or paused).
 async fn live_runs(k: &Kernel, task: TaskId) -> usize {
     use sun_core::StateMachine;
@@ -1673,6 +1756,30 @@ async fn resume_is_refused_when_the_previous_run_was_another_runtime() {
     assert_eq!(k.session(2).0, second);
 }
 
+/// 3. The watchdog stopped the previous run (here: looping): the
+/// comment-woken run starts fresh with the thread instead of carrying that
+/// session on.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_is_refused_when_the_watchdog_stopped_the_previous_run() {
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    k.host.looping.store(true, Ordering::SeqCst);
+    let ada = k.agent("Ada").await;
+    let task = k.task(ada, TaskStatus::Todo).await;
+    eventually("a looping run", || async {
+        k.runs(task).await.first().map(|r| r.status) == Some(RunStatus::Looping)
+    })
+    .await;
+    k.host.looping.store(false, Ordering::SeqCst);
+    k.host.finish.store(true, Ordering::SeqCst);
+    k.say(task, "user:ana", "Try again").await;
+    k.sessions(2).await;
+    assert_eq!(k.session(1).0, None, "fresh after a watchdog stop");
+    let fresh = k.host.envelopes()[1].clone();
+    assert!(fresh.contains("Your task: MAIN-1"), "{fresh}");
+    assert_eq!(thread_lines(&fresh), ["- ana: Try again"]);
+}
+
 /// 3 and 5. Two hosts: a comment-woken run goes to the previous run's host
 /// while it has room, even when that one is busier, and resumes there;
 /// when that host is full it runs elsewhere, fresh; when it is offline,
@@ -1951,7 +2058,6 @@ async fn a_queued_message_names_its_author_and_a_steer_does_not() {
 /// secret filter runs, so a secret straddling the cut is no longer whole
 /// (or no longer long enough) and its head is posted in clear.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BLO-146 defect: conversation::reply truncates before redaction; a secret cut at MAX_COMMENT leaks its prefix"]
 async fn a_secret_cut_by_the_comment_limit_is_still_redacted() {
     use sun_core::model::{SecretScope, TaskActivity};
     let k = kernel().await;
@@ -1992,7 +2098,6 @@ async fn a_secret_cut_by_the_comment_limit_is_still_redacted() {
 /// 4. Defect probe: the thread's 16k budget counts bytes, not chars, so a
 /// non-ASCII thread well under 16k chars is trimmed anyway.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BLO-146 defect: conversation::thread sums String::len (bytes) against THREAD_CHARS; non-ASCII threads are cut at ~half the stated 16k chars"]
 async fn the_thread_budget_counts_chars_not_bytes() {
     let k = kernel().await;
     let ada = k.agent("Ada").await;

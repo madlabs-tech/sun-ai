@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 use sun_core::entitlement::{Entitlement, Quota};
-use sun_core::model::{Agent, AuditAction, Run, Workflow};
+use sun_core::model::{Agent, AuditAction, Run, TaskKind, Workflow};
 use sun_core::{AgentId, Error, Result, WorkflowId, WorkspaceId};
 use sun_store::{AgentRepo, AuditRepo, RepoRepo, TaskRepo, Tx, WorkflowRepo, WorkspaceRepo};
 
@@ -117,6 +117,13 @@ pub(crate) async fn with_task(tx: &mut Tx, run: &Run, prompt: String) -> Result<
         "" => String::new(),
         instructions => format!("{instructions}\n\n"),
     };
+    if task.kind == TaskKind::Chat && task.source_task_id.is_none() {
+        out.push_str(
+            "You are chatting with a person. Answer their messages; your final \
+             message is posted in the chat as your reply.",
+        );
+        return Ok(out);
+    }
     // A mention chat: the task it came from, without its repos (a chat
     // answers; the task's own agent does its work).
     let mentioned = task.source_task_id.is_some();

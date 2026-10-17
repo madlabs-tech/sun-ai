@@ -22,6 +22,7 @@ test('sidebar: sections in order, Projects and Agents open their pages, no runti
     'Memory',
     'Evals',
     'Agents',
+    'Chat',
     'Runtimes',
     'Hosts',
     'Catalog',

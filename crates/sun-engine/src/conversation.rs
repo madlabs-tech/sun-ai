@@ -8,21 +8,29 @@
 //! - **A comment continues the conversation.** A run a comment queued
 //!   ([`woken_by_comment`]) resumes the CLI session of the task's previous
 //!   run (`executor::dispatch`); when it can't, the fresh session reads the
-//!   thread ([`thread`]) before the messages left for it.
+//!   thread ([`thread`]) before the messages left for it. Only comments
+//!   resume: any other run (a move to Todo, a reassign) starts fresh with
+//!   the thread.
 //! - **An @mention brings an agent in.** A person's comment on a task may
 //!   name agents ([`mentioned`]); then only they wake, not the assignee
 //!   unless named. The assignee wakes on the task itself; any other agent in
 //!   its mention chat ([`mention_chat`]): a hidden `chat` task, one per
 //!   (task, agent), whose replies go to the task's thread and whose sessions
 //!   read it.
+//! - **A direct chat** ([`Engine::create_chat`]) is a `chat` task with no
+//!   source: a person's own conversation with an agent, its messages the
+//!   chat's comments. Only its creator sees it ([`Engine::chat_hidden`]).
 
 use serde_json::json;
-use sun_core::model::{ActivityKind, Run, Task, TaskActivity, TaskKind};
-use sun_core::{AgentId, Error, Result, RunId, TaskId, TaskStatus};
-use sun_store::{AgentRepo, EventLog, RunRepo, TaskRepo, Tx};
+use sun_core::model::{ActivityKind, Run, Task, TaskActivity, TaskKey, TaskKind};
+use sun_core::redact::redact;
+use sun_core::{
+    AgentId, Error, MemberId, Result, RunId, RunStatus, TaskId, TaskStatus, WorkspaceId,
+};
+use sun_store::{AgentRepo, EventLog, RunRepo, SecretRepo, TaskRepo, Tx};
 
-use crate::agents;
 use crate::executor::tasks;
+use crate::{Engine, OnWorkspace, agents};
 
 /// The `run_status` reason of a run a comment queued.
 pub(crate) const COMMENT: &str = "comment";
@@ -45,7 +53,13 @@ pub(crate) async fn reply(tx: &mut Tx, run_id: RunId, summary: &str) -> Result<(
     if text.is_empty() {
         return Ok(());
     }
-    let text: String = text.chars().take(TaskActivity::MAX_COMMENT).collect();
+    // Redact before the cut: a secret split by it would no longer match.
+    let secrets = tx.known_secrets().await?;
+    let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
+    let text: String = redact(text, &secrets)
+        .chars()
+        .take(TaskActivity::MAX_COMMENT)
+        .collect();
     let body = json!({ "text": text, "by_agent": agent, "run_id": run_id });
     let on = thread_of(tx, run.task_id).await?;
     tasks::log(tx, on, ActivityKind::Comment, None, body).await?;
@@ -128,13 +142,21 @@ pub(crate) async fn woken_by_comment(tx: &mut Tx, run_id: RunId) -> Result<bool>
         .is_some_and(|e| e.payload["reason"] == COMMENT))
 }
 
-/// The run of the same workflow just before `run` on its task.
+/// The run of the same workflow just before `run` on its task, unless the
+/// watchdog stopped it: resuming a stalled, looping or over-budget session
+/// would carry that context on, so those start fresh with the thread.
 pub(crate) async fn previous_run(tx: &mut Tx, run: &Run) -> Result<Option<Run>> {
     let runs = tx.runs_of_task(run.task_id).await?;
     let before = runs.iter().take_while(|r| r.id != run.id);
     Ok(before
         .last()
         .filter(|r| r.workflow_id == run.workflow_id)
+        .filter(|r| {
+            !matches!(
+                r.status,
+                RunStatus::Stalled | RunStatus::Looping | RunStatus::BudgetExceeded
+            )
+        })
         .cloned())
 }
 
@@ -156,7 +178,12 @@ pub(crate) async fn thread(tx: &mut Tx, task_id: TaskId, me: Option<AgentId>) ->
         lines.push(format!("- {who}: {text}"));
     }
     let mut keep = lines.len().saturating_sub(THREAD_COMMENTS);
-    while keep < lines.len() && lines[keep..].iter().map(String::len).sum::<usize>() > THREAD_CHARS
+    while keep < lines.len()
+        && lines[keep..]
+            .iter()
+            .map(|l| l.chars().count())
+            .sum::<usize>()
+            > THREAD_CHARS
     {
         keep += 1;
     }
@@ -172,4 +199,117 @@ pub(crate) async fn thread(tx: &mut Tx, task_id: TaskId, me: Option<AgentId>) ->
 /// A person's name from their audit actor (`user:ana` → `ana`).
 pub(crate) fn person(actor: &str) -> &str {
     actor.split_once(':').map_or(actor, |(_, name)| name)
+}
+
+/// A direct chat as its list shows it ([`Engine::chats`]).
+#[derive(Debug, Clone)]
+pub struct Chat {
+    /// The chat.
+    pub task: Task,
+    /// Its latest run.
+    pub run: Option<Run>,
+    /// Its latest message.
+    pub last: Option<TaskActivity>,
+    /// While its run waits: the agent's tasks with a run going, which hold
+    /// the slots it waits for.
+    pub queued_behind: Vec<TaskKey>,
+}
+
+impl Engine {
+    /// A new chat of `creator` (`None`: the token holder) with `agent`, on
+    /// the agent's workspace. It waits in Needs you for its first message.
+    /// `InvalidInput` for an archived agent.
+    pub async fn create_chat(&self, agent: AgentId, creator: Option<MemberId>) -> Result<Task> {
+        let mut tx = self.store.begin().await?;
+        let agent = tx.get_agent(agent).await?;
+        let workflow = agents::system_workflow(&mut tx, agent.id, agent.workspace_id).await?;
+        let chat = Task {
+            kind: TaskKind::Chat,
+            workflow_id: Some(workflow),
+            assignee_agent_id: Some(agent.id),
+            status: TaskStatus::NeedsYou,
+            created_by: creator,
+            ..Task::new(agent.workspace_id, format!("Chat with {}", agent.name))
+        };
+        tx.insert_task(&chat).await?;
+        let chat = tx.get_task(chat.id).await?;
+        tx.commit().await?;
+        Ok(chat)
+    }
+
+    /// The direct chats `creator` started on `workspace`, last active first.
+    // ponytail: a few reads per chat; batch them when people keep many chats.
+    pub async fn chats(
+        &self,
+        workspace: WorkspaceId,
+        creator: Option<MemberId>,
+    ) -> Result<Vec<Chat>> {
+        let mut tx = self.store.read().await?;
+        let mut out = Vec::new();
+        for task in tx.chats_of(workspace, creator).await? {
+            let run = tx.runs_of_task(task.id).await?.pop();
+            let last = tx
+                .activity_of(task.id, 0)
+                .await?
+                .into_iter()
+                .rfind(|a| a.kind == ActivityKind::Comment);
+            let queued_behind = match (&run, task.assignee_agent_id) {
+                (Some(run), Some(agent)) if run.status == RunStatus::Queued => {
+                    busy(&mut tx, workspace, agent).await?
+                }
+                _ => Vec::new(),
+            };
+            out.push(Chat {
+                task,
+                run,
+                last,
+                queued_behind,
+            });
+        }
+        Ok(out)
+    }
+
+    /// True when `thing` is a direct chat, or a run of one, that `member`
+    /// didn't start: it is hidden from them like a missing one.
+    pub async fn chat_hidden(
+        &self,
+        thing: OnWorkspace<'_>,
+        member: Option<MemberId>,
+    ) -> Result<bool> {
+        let mut tx = self.store.read().await?;
+        let found = match thing {
+            OnWorkspace::Task(id) => tx.get_task(id).await,
+            OnWorkspace::Run(id) => match tx.get_run(id).await {
+                Ok(run) => tx.get_task(run.task_id).await,
+                Err(e) => Err(e),
+            },
+            _ => return Ok(false),
+        };
+        match found.map_err(Error::from) {
+            Ok(task) => Ok(task.kind == TaskKind::Chat
+                && task.source_task_id.is_none()
+                && task.created_by != member),
+            Err(Error::NotFound(_)) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// The keys of `agent`'s board tasks on `workspace` whose latest run is running.
+async fn busy(tx: &mut Tx, workspace: WorkspaceId, agent: AgentId) -> Result<Vec<TaskKey>> {
+    let mut keys = Vec::new();
+    for task in tx.tasks_of_workspace(workspace).await? {
+        if task.assignee_agent_id != Some(agent) {
+            continue;
+        }
+        let running = tx
+            .runs_of_task(task.id)
+            .await?
+            .pop()
+            .is_some_and(|r| r.status == RunStatus::Running);
+        if running {
+            keys.push(tasks::key_of(tx, &task).await?);
+        }
+    }
+    Ok(keys)
 }

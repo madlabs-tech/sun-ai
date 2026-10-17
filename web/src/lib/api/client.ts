@@ -2,6 +2,7 @@
 // when the page has ?mock=1 or the build sets VITE_MOCK=1 (UI runs without the kernel).
 import type { OnLimit, OutboxItem, Resolution,
   Agent,
+  Chat,
   AgentFields,
   Workspace,
   WorkspaceProfileChange,
@@ -183,6 +184,10 @@ export const api = {
    *  five) wake instead of the assignee. */
   comment_task: (id: string, body: string, mentions: string[] = []) =>
     request<TaskActivity>('POST', `/tasks/${id_path(id)}/comments`, mentions.length ? { body, mentions } : { body }),
+  /** The caller's chats on `workspace`, last active first. */
+  list_chats: (workspace: string) => request<Chat[]>('GET', '/chats' + query({ workspace })),
+  /** A new chat with `agent_id`; it waits for its first message. */
+  create_chat: (agent_id: string) => request<Chat>('POST', '/chats', { agent_id }),
   task_activity: (id: string, after = 0) => request<TaskActivity[]>('GET', `/tasks/${id_path(id)}/activity?after=${after}`),
   task_runs: (id: string) => request<TaskRun[]>('GET', `/tasks/${id_path(id)}/runs`),
   /** Any run of a task (not only the latest), with its steps and gates. */
