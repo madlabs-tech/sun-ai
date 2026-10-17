@@ -35,6 +35,8 @@ pub(crate) struct LocalHost {
     work: PathBuf,
     agent: Agent,
     envelopes: Mutex<Vec<String>>,
+    /// Each started session's permission mode, in start order.
+    pub(crate) modes: Mutex<Vec<Option<String>>>,
     /// Tasks whose worktrees were removed (recorded only).
     pub(crate) removed: Mutex<Vec<TaskId>>,
     sink: Arc<Mutex<Option<mpsc::UnboundedSender<HostEvent>>>>,
@@ -49,6 +51,7 @@ impl LocalHost {
             work: dir.join("work"),
             agent: Box::new(agent),
             envelopes: Mutex::default(),
+            modes: Mutex::default(),
             removed: Mutex::default(),
             sink: Arc::default(),
         })
@@ -99,6 +102,7 @@ impl HostLink for LocalHost {
     async fn start_session(&self, _: HostId, _: &str, spec: SessionSpec) -> Result<SessionHandle> {
         (self.agent)(&self.worktree(), &spec.envelope);
         self.envelopes.lock().unwrap().push(spec.envelope);
+        self.modes.lock().unwrap().push(spec.permission_mode);
         let (id, sink) = (spec.session_id, self.sink.clone());
         tokio::spawn(async move {
             // Real output first: the watchdog fails an empty done claim.
@@ -228,6 +232,7 @@ async fn start(
     mods: Arc<Mods>,
 ) -> (Engine, tokio::task::JoinHandle<Result<()>>) {
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),

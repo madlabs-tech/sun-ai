@@ -279,6 +279,7 @@ async fn run_workflow(
         host.clone(),
         Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host: HostId::generate(),
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),

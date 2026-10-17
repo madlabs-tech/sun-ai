@@ -145,6 +145,10 @@ pub struct EngineConfig {
     pub delivery_timeout: Duration,
     /// Stall, loop and budget rules.
     pub watchdog: WatchdogConfig,
+    /// The operator allows `bypass_permissions` (sun.yaml
+    /// `runtimes.allow_bypass`). Off, no session runs in it, whatever was
+    /// saved while it was on ([`failover::bypass_disabled`]).
+    pub allow_bypass: bool,
 }
 
 /// Handle to the running executor. Cheap to clone.
@@ -159,6 +163,8 @@ pub struct Engine {
     pub(crate) mods: Arc<dyn ModLink>,
     /// `EngineConfig::host`: where engine-side checks run (`quality`).
     pub(crate) host: HostId,
+    /// `EngineConfig::allow_bypass`, for placement (`queue`).
+    pub(crate) allow_bypass: bool,
     /// Wakes the knowledge worker after an ingest (`knowledge`).
     pub(crate) knowledge_wake: Arc<Notify>,
     /// Wakes the outbox worker after a row enqueued outside the executor (`memory`).
@@ -541,6 +547,7 @@ impl Engine {
         let wake = Arc::new(Notify::new());
         let delivery_timeout = config.delivery_timeout;
         let default_host = config.host;
+        let allow_bypass = config.allow_bypass;
         let decisions =
             decision::Backend::new(decision::switched(&mut store.read().await?, decisions).await?);
         let vcs = crate::vcs::Vcs::new(store.clone());
@@ -594,6 +601,7 @@ impl Engine {
                 hosts: link,
                 mods: mods_handle,
                 host: default_host,
+                allow_bypass,
                 knowledge_wake: Arc::default(),
                 outbox_wake: wake,
                 decisions,
@@ -2454,6 +2462,12 @@ impl Executor {
         let started = match self.worktree(step.run_id).await {
             Ok(worktree) => 'start: {
                 path = worktree.display().to_string();
+                // Behind placement and failover: a bypass session the operator
+                // turned off never reaches the host, failed like its own refusal.
+                let mode = start.permission_mode.as_deref();
+                if let Some(why) = failover::bypass_disabled(mode, self.config.allow_bypass) {
+                    break 'start Err(Error::Forbidden(why));
+                }
                 let handoff = start.handoff.as_deref().cloned();
                 let host = self.host(step.run_id);
                 let mcp_file = match &self.mcp {
@@ -3346,6 +3360,7 @@ mod removal_tests {
 
         let local = LocalHost::new(dir.path(), |_, _| {});
         let config = crate::EngineConfig {
+            allow_bypass: false,
             host,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -3362,5 +3377,57 @@ mod removal_tests {
         }
         assert_eq!(*local.removed.lock().unwrap(), [task_id]);
         assert!(pending(&store).await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod bypass_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::gates::tests::{LocalHost, mods, seed, until_run_ends};
+
+    /// BLO-139 third path, past the queue: a run started directly (no
+    /// placement) of an agent saved in `bypass_permissions` gets no session
+    /// while sun.yaml `runtimes.allow_bypass` is off, container or not, and
+    /// fails with the reason. With allow on it runs in bypass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_bypass_session_never_starts_while_the_operator_turned_it_off() {
+        let agent = "name: agent
+exec_env: { kind: container, image: 'node:22' }
+steps:
+  - id: implement
+    type: agent
+    prompt: fix it
+    permission_mode: bypass_permissions
+";
+        for allow_bypass in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path()).await.unwrap();
+            let local = LocalHost::new(dir.path(), |_, _| {});
+            let config = crate::EngineConfig {
+                allow_bypass,
+                host: HostId::generate(),
+                adapter: "fake".into(),
+                delivery_timeout: Duration::from_secs(5),
+                watchdog: crate::WatchdogConfig::default(),
+            };
+            let (engine, _task) =
+                Engine::start(store.clone(), local.clone(), mods(json!({})), config)
+                    .await
+                    .unwrap();
+            let run_id = seed(&store, agent).await;
+
+            engine.start_run(run_id).await.unwrap();
+            let run = until_run_ends(&store, run_id).await;
+            let modes = local.modes.lock().unwrap().clone();
+            if allow_bypass {
+                assert_eq!(run.status, RunStatus::Succeeded, "{:?}", run.end_reason);
+                assert_eq!(modes, [Some("bypass_permissions".to_owned())]);
+                continue;
+            }
+            assert_eq!((run.status, modes.len()), (RunStatus::Failed, 0));
+            let reason = run.end_reason.unwrap_or_default();
+            assert!(reason.contains("runtimes.allow_bypass: false"), "{reason}");
+        }
     }
 }

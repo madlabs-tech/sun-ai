@@ -27,7 +27,9 @@
 //!   container or VM: outside one, a chain entry with it is passed over, and
 //!   a run whose every usable entry has it fails at once
 //!   (`placement_refused_bypass_bare`); it is never placed with a lower
-//!   mode. The host refuses it again on its side.
+//!   mode. The host refuses it again on its side. While the operator's
+//!   `allow_bypass` is off ([`crate::EngineConfig::allow_bypass`]) the same
+//!   holds in every env, journalled as `placement_refused_bypass_disabled`.
 //! - Under `runtimes.model: v2` ([`crate::RUNTIMES_MODEL`]) hosts' runtimes
 //!   come from `host_runtime`, and each host takes at most its reported
 //!   `max_sessions` (else `Caps::max_sessions`) runs of one runtime.
@@ -335,6 +337,11 @@ pub(crate) const RUN_PLACED: &str = "run_placed";
 /// `{runtime, exec_env, reason}`. The run fails; the mode is never lowered.
 pub(crate) const PLACEMENT_REFUSED_BYPASS_BARE: &str = "placement_refused_bypass_bare";
 
+/// Event kind of a run placement refused because it would run
+/// `bypass_permissions` while the operator's `allow_bypass` is off; payload
+/// as [`PLACEMENT_REFUSED_BYPASS_BARE`]'s.
+pub(crate) const PLACEMENT_REFUSED_BYPASS_DISABLED: &str = "placement_refused_bypass_disabled";
+
 /// Where `run_id` was placed, if the queue placed it. `run_placed` is
 /// written with the run's start, among its first few events.
 /// A run that moved hosts mid-step ([`moved_key`]) is placed on the new one.
@@ -629,7 +636,8 @@ impl Scheduler {
         let mut leased = Vec::new();
         // Runs whose chain reached a `market:` entry.
         let mut to_market = Vec::new();
-        // Runs placement refuses (bypass outside a container or VM).
+        // Runs placement refuses (bypass turned off, or outside a container
+        // or VM), with the refusal's event kind.
         let mut refused = Vec::new();
         // Runs whose picked entry only some hosts may take (`host:`,
         // `effort:`), with those hosts.
@@ -682,10 +690,11 @@ impl Scheduler {
                     .map(|w| w.exec_env.clone())
                     .unwrap_or_default(),
             };
-            // Bypass runs only in a container or VM: a chain entry that would
-            // get it in any other env is passed over, and a run with no other
-            // entry fails here instead of starting (a container or VM run
-            // already goes only to hosts with that env ready).
+            // Bypass runs only while the operator allows it, and only in a
+            // container or VM: a chain entry that would get it otherwise is
+            // passed over, and a run with no other entry fails here instead
+            // of starting (a container or VM run already goes only to hosts
+            // with that env ready).
             let mut runtime = None;
             let mut refusal = None;
             for name in &chain {
@@ -736,12 +745,16 @@ impl Scheduler {
                     }
                 }
                 if spends && local {
+                    let allow = self.engine.allow_bypass;
                     let refusal_of = |mode| {
                         let mode = failover::effective_mode(mode, &modes, adapter);
-                        sun_core::mode_refusal(mode, &env)
+                        let disabled = failover::bypass_disabled(mode, allow);
+                        let disabled = disabled.map(|why| (PLACEMENT_REFUSED_BYPASS_DISABLED, why));
+                        let bare = sun_core::mode_refusal(mode, &env);
+                        disabled.or_else(|| bare.map(|why| (PLACEMENT_REFUSED_BYPASS_BARE, why)))
                     };
-                    if let Some(why) = step_modes.iter().find_map(|m| refusal_of(*m)) {
-                        refusal.get_or_insert((name, why));
+                    if let Some((kind, why)) = step_modes.iter().find_map(|m| refusal_of(*m)) {
+                        refusal.get_or_insert((name, kind, why));
                         continue;
                     }
                 }
@@ -753,11 +766,11 @@ impl Scheduler {
             }
             let (runtime, account) = match (runtime, refusal) {
                 (Some(picked), _) => picked,
-                (None, Some((name, why))) => {
+                (None, Some((name, kind, why))) => {
                     let payload = json!({
                         "runtime": name, "exec_env": env.kind(), "reason": why,
                     });
-                    refused.push((w.run.id, payload));
+                    refused.push((w.run.id, kind, payload));
                     continue;
                 }
                 // Every entry is cooling: count it as the first.
@@ -844,12 +857,10 @@ impl Scheduler {
                 tx.commit().await?;
             }
         }
-        for (run_id, payload) in refused {
+        for (run_id, kind, payload) in refused {
             // As for a start: a run cancelled since the read is no error.
-            if let Err(e @ Error::Unavailable(_)) = self
-                .engine
-                .refuse_run(run_id, PLACEMENT_REFUSED_BYPASS_BARE, payload)
-                .await
+            if let Err(e @ Error::Unavailable(_)) =
+                self.engine.refuse_run(run_id, kind, payload).await
             {
                 return Err(e);
             }

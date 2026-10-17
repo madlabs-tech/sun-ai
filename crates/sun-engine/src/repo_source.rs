@@ -315,6 +315,7 @@ mod tests {
 
     async fn engine(store: &Store, host: Arc<LocalHost>, mods: Arc<dyn ModLink>) -> Engine {
         let config = EngineConfig {
+            allow_bypass: false,
             host: HostId::generate(),
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),

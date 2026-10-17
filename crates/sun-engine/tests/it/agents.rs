@@ -267,6 +267,7 @@ async fn kernel_on(hosts: &[(&str, Option<&[&str]>)], caps: sun_engine::Caps) ->
     let host_id = ids[0];
     let host = Arc::new(HoldHost::default());
     let config = EngineConfig {
+        allow_bypass: false,
         host: host_id,
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),

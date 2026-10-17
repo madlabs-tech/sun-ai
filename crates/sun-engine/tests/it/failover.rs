@@ -465,7 +465,9 @@ impl Harness {
             assert_eq!(sh(&worktree, &origin).0, Some(0));
         }
 
+        // The operator allows bypass: the bare-host rule is what skips it.
         let config = EngineConfig {
+            allow_bypass: true,
             host: HostId::generate(),
             adapter: "unused".into(),
             delivery_timeout: Duration::from_secs(5),

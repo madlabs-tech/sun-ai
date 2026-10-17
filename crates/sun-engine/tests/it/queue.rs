@@ -189,6 +189,7 @@ async fn queue_respects_priority_fifo_caps_and_cooldown() {
         std::sync::Arc::new(NoHost),
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -368,6 +369,7 @@ async fn queue_places_runs_on_ready_online_hosts_within_host_caps() {
         link.clone(),
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host: offline,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -523,6 +525,7 @@ async fn marketplace_hold_keeps_a_queued_task_off_free_buyer_hosts() {
         link.clone(),
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host: buyer,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -663,6 +666,7 @@ async fn chain_fails_over_to_market_runtime() {
         link.clone(),
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host: buyer,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -825,6 +829,7 @@ steps:
         std::sync::Arc::new(NoHost),
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -931,6 +936,7 @@ steps:
         std::sync::Arc::new(NoHost),
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -1046,6 +1052,7 @@ async fn lagged_queue_reloads_cooldowns_from_the_store() {
         std::sync::Arc::new(NoHost),
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -1159,6 +1166,7 @@ async fn cooling_runtime_never_starts_a_run_under_random_interleavings() {
         std::sync::Arc::new(NoHost),
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass: false,
             host,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -1242,18 +1250,31 @@ async fn cooling_runtime_never_starts_a_run_under_random_interleavings() {
     }
 }
 
-/// An engine and queue on `link`'s hosts, runtime `fake`.
+/// An engine and queue on `link`'s hosts, runtime `fake`, whose operator
+/// allows `bypass_permissions` (so the bare-host rule is what refuses it).
 async fn kernel_on(
     store: &Store,
     link: std::sync::Arc<Online>,
     fallback: HostId,
     caps: Caps,
 ) -> (Engine, Queue) {
+    kernel_allowing(store, link, fallback, caps, true).await
+}
+
+/// [`kernel_on`] with sun.yaml `runtimes.allow_bypass` set to `allow_bypass`.
+async fn kernel_allowing(
+    store: &Store,
+    link: std::sync::Arc<Online>,
+    fallback: HostId,
+    caps: Caps,
+    allow_bypass: bool,
+) -> (Engine, Queue) {
     let (engine, _engine_task) = Engine::start(
         store.clone(),
         link,
         std::sync::Arc::new(NoMods),
         EngineConfig {
+            allow_bypass,
             host: fallback,
             adapter: "fake".into(),
             delivery_timeout: Duration::from_secs(5),
@@ -1455,6 +1476,78 @@ async fn queue_places_bypass_runs_only_in_a_container_or_vm() {
         .unwrap();
     let placed = events.iter().find(|e| e.kind == "run_placed").unwrap();
     assert_eq!(placed.payload["runtime"], "plain");
+}
+
+/// BLO-139 third path: an agent saved in `bypass_permissions` while the
+/// operator allowed it (its system workflow's step carries the mode) stops
+/// running bypass once sun.yaml `runtimes.allow_bypass` is off, even in a
+/// container: placement refuses it with its own reason and it never gets a
+/// session. With allow on, the same run is placed on the container host.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_refuses_bypass_while_the_operator_turned_it_off() {
+    const AGENT: &str = "name: agent\nexec_env: {kind: container, image: 'node:22'}\nsteps:\n  \
+                         - {id: implement, type: agent, prompt: do it, permission_mode: bypass_permissions}\n";
+    for allow_bypass in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let task = tasks_of(&store, AGENT, 1).await.remove(0);
+        let docker_host = add_host(&store, "docker", true).await;
+        let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![docker_host])));
+        let (engine, queue) =
+            kernel_allowing(&store, link, docker_host, Caps::default(), allow_bypass).await;
+        let docker_ready = serde_json::json!({
+            "os": "linux", "arch": "x86_64", "cpus": 4,
+            "runtimes": [{"adapter": "fake", "readiness":
+                {"installed": true, "version": "1", "logged_in": true, "detail": null}}],
+            "exec_envs": [{"kind": "container", "ready": true, "version": "27", "detail": null}],
+        });
+        engine
+            .set_host_capabilities(docker_host, &docker_ready)
+            .await
+            .unwrap();
+
+        queue.enqueue(task.id).await.unwrap();
+        if allow_bypass {
+            eventually("the bypass run placed", || async {
+                placed_on(&store, task.id).await.is_some()
+            })
+            .await;
+            assert_eq!(placed_on(&store, task.id).await, Some(docker_host));
+            continue;
+        }
+        let failed = || async {
+            let mut read = store.read().await.unwrap();
+            let run = read.runs_of_task(task.id).await.unwrap().pop();
+            run.filter(|r| r.status == RunStatus::Failed)
+        };
+        eventually("the bypass run refused", || async {
+            failed().await.is_some()
+        })
+        .await;
+        let run = failed().await.unwrap();
+        let reason = run.end_reason.unwrap_or_default();
+        assert!(reason.contains("runtimes.allow_bypass: false"), "{reason}");
+        let events = store
+            .read()
+            .await
+            .unwrap()
+            .events_after(Some(run.id), 0, 32)
+            .await
+            .unwrap();
+        let refused = events
+            .iter()
+            .find(|e| e.kind == "placement_refused_bypass_disabled")
+            .expect("journalled");
+        assert_eq!(refused.payload["exec_env"], "container");
+        assert_eq!(refused.payload["runtime"], "fake");
+        for never in [
+            "placement_refused_bypass_bare",
+            "run_placed",
+            "session_assigned",
+        ] {
+            assert!(!events.iter().any(|e| e.kind == never), "{never}");
+        }
+    }
 }
 
 /// `runtimes.model: v2` caps each host at its reported `max_sessions` of a

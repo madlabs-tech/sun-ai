@@ -55,6 +55,7 @@ async fn waiting_run(dir: &std::path::Path) -> (Store, Engine, RunId) {
     tx.insert_run(&run).await.unwrap();
     tx.commit().await.unwrap();
     let config = EngineConfig {
+        allow_bypass: false,
         host: HostId::generate(),
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),
