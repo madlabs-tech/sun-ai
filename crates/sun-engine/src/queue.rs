@@ -671,16 +671,21 @@ impl Scheduler {
                 .map(|workflow| failover::entries(workflow, &slot.runtime))
                 .unwrap_or_else(|| vec![ChainEntry::from(slot.runtime.as_str())]);
             let chain = sun_core::chain_names(&entries);
-            // Each agent step's own mode; the tool's policy fills a `None`.
-            let step_modes: Vec<Option<PermissionMode>> = match &workflow {
-                Some(w) => w
-                    .steps
-                    .iter()
-                    .filter(|s| matches!(s.kind, sun_workflow::StepKind::Agent { .. }))
-                    .map(|s| w.permission_mode(&s.id))
-                    .collect(),
-                None => vec![None],
-            };
+            // Each agent step's mode; the host's default fills a `None`.
+            let mut step_modes: Vec<Option<PermissionMode>> = Vec::new();
+            match &workflow {
+                Some(parsed) => {
+                    for s in &parsed.steps {
+                        if matches!(s.kind, sun_workflow::StepKind::Agent { .. }) {
+                            step_modes.push(
+                                crate::agents::step_mode(&mut tx, w.run.workflow_id, parsed, &s.id)
+                                    .await?,
+                            );
+                        }
+                    }
+                }
+                None => step_modes.push(None),
+            }
             let own = tx.setting(&task_exec_env_key(w.run.task_id)).await?;
             let env = match own.filter(|v| !v.is_null()) {
                 Some(spec) => serde_json::from_value::<ExecEnvSpec>(spec).unwrap_or_default(),
