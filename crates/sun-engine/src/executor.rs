@@ -2155,10 +2155,9 @@ impl Executor {
         let (model, effort, effort_ignored) =
             self.entry_settings(tx, step, runtime, &row.adapter).await?;
         let run = tx.get_run(step.run_id).await?;
-        let step_mode = self
-            .workflow(tx, &run)
-            .await?
-            .permission_mode(&step.step_key);
+        let workflow = self.workflow(tx, &run).await?;
+        let step_mode =
+            crate::agents::step_mode(tx, run.workflow_id, &workflow, &step.step_key).await?;
         let permission_mode = step_mode.map(|m| m.as_str().to_owned());
         append(
             tx,

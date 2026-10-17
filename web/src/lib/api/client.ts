@@ -340,7 +340,6 @@ export const api = {
   update_agent: (id: string, fields: AgentFields) => request<Agent>('PATCH', `/agents/${id_path(id)}`, fields),
   /** `manage_runtimes`: archives it; its tasks keep it, new tasks can't pick it. */
   archive_agent: (id: string) => request<null>('DELETE', `/agents/${id_path(id)}`),
-  /** Admin: the permission mode every new session of runtime `id` gets (audited). */
   kernel_use: () => request<KernelUse>('GET', '/kernel'),
   /** Admin: stops a live session; its run pauses and records `reason`. */
   kill_session: (session_id: string, reason: string) =>

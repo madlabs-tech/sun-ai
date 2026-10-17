@@ -134,19 +134,20 @@ pub(crate) async fn pin(
     let pinned = tx
         .get_workflow_version(run.workflow_id, run.workflow_version)
         .await?;
-    if let Some(step) = raised_to_bypass(&pinned.source_yaml, &source.workflow) {
-        return Ok(Err(format!(
-            "{}: step `{step}` sets permission_mode: bypass_permissions and the saved \
-             workflow doesn't; save it in Sun to allow that",
-            source.path
-        )));
-    }
     let version = if same(&pinned.source_yaml) {
         pinned.version
     } else {
         match tx.latest_workflow_version(run.workflow_id).await? {
+            // Already saved, through Sun or past the check below.
             Some(latest) if same(&latest.source_yaml) => latest.version,
             _ => {
+                if let Some(step) = raised_to_bypass(&pinned.source_yaml, &source.workflow) {
+                    return Ok(Err(format!(
+                        "{}: step `{step}` sets permission_mode: bypass_permissions and the \
+                         saved workflow doesn't; save it in Sun to allow that",
+                        source.path
+                    )));
+                }
                 tx.save_workflow_version(run.workflow_id, &source.yaml, &source.workflow.hash)
                     .await?
                     .version

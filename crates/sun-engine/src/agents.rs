@@ -112,6 +112,26 @@ pub(crate) fn system_source(agent: &Agent) -> Result<(String, sun_workflow::Work
     Ok((source, parsed))
 }
 
+/// The mode a session of `step` (of `workflow`, a version of `workflow_id`)
+/// runs in: the step's own `permission_mode:`, else, on an agent's system
+/// workflow, the agent's (it owns its mode: a version saved before it had
+/// one, such as every agent that ran before `runtime_policy` was fanned out
+/// into `agent.permission_mode`, still gets it); `None`: the host's default.
+pub(crate) async fn step_mode(
+    tx: &mut Tx,
+    workflow_id: WorkflowId,
+    workflow: &sun_workflow::Workflow,
+    step: &sun_core::StepKey,
+) -> Result<Option<sun_core::PermissionMode>> {
+    if let Some(mode) = workflow.permission_mode(step) {
+        return Ok(Some(mode));
+    }
+    match tx.system_agent_of(workflow_id).await? {
+        Some(agent) => Ok(tx.get_agent(agent).await?.permission_mode),
+        None => Ok(None),
+    }
+}
+
 /// `prompt` (a step's) for a session of `run`: on an agent's system
 /// workflow, its instructions followed by the task's key, title and
 /// description (a mention chat's: the task it was mentioned on, and no
@@ -408,5 +428,84 @@ mod tests {
         ada.permission_mode = Some(sun_core::PermissionMode::Plan);
         let (_, parsed) = system_source(&ada).unwrap();
         assert_eq!(parsed.permission_mode(&key), ada.permission_mode);
+    }
+
+    /// BLO-159: an agent that ran before `runtime_policy` was fanned out
+    /// keeps a system workflow version without a mode; its sessions get the
+    /// agent's mode (`plan` stays `plan`, not the host default), and a
+    /// fanned-out bypass is refused while the operator turned it off.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_modeless_system_step_runs_in_the_agents_mode() {
+        use crate::gates::tests::{LocalHost, mods, until_run_ends};
+        use sun_core::model::{Run, Task};
+        use sun_core::{HostId, PermissionMode, RunId, RunStatus, TaskStatus};
+        use sun_store::RunRepo;
+        let v1 = "name: agent\nsteps:\n  - id: agent\n    type: agent\n    prompt: fix it\n";
+        for (mode, allow_bypass) in [
+            (PermissionMode::Plan, false),
+            (PermissionMode::BypassPermissions, false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = sun_store::Store::open(dir.path()).await.unwrap();
+            let local = LocalHost::new(dir.path(), |_, _| {});
+            let config = crate::EngineConfig {
+                allow_bypass,
+                host: HostId::generate(),
+                adapter: "fake".into(),
+                delivery_timeout: std::time::Duration::from_secs(5),
+                watchdog: crate::WatchdogConfig::default(),
+            };
+            let (engine, _task) =
+                Engine::start(store.clone(), local.clone(), mods(json!({})), config)
+                    .await
+                    .unwrap();
+            let mut ada = agent("", &["claude-code"]);
+            ada.permission_mode = Some(mode);
+            let workflow = Workflow {
+                id: WorkflowId::generate(),
+                workspace_id: WorkspaceId::MAIN,
+                name: ada.name.clone(),
+            };
+            let task = Task {
+                workflow_id: Some(workflow.id),
+                status: TaskStatus::Todo,
+                ..Task::new(WorkspaceId::MAIN, "t")
+            };
+            let run = Run {
+                id: RunId::generate(),
+                task_id: task.id,
+                workflow_id: workflow.id,
+                workflow_version: 1,
+                status: RunStatus::Queued,
+                end_reason: None,
+                budget: Default::default(),
+                repo_ids: vec![],
+            };
+            let mut tx = store.begin().await.unwrap();
+            tx.insert_agent(&ada).await.unwrap();
+            tx.insert_system_workflow(&workflow, ada.id).await.unwrap();
+            let hash = parse(v1).unwrap().hash;
+            tx.save_workflow_version(workflow.id, v1, &hash)
+                .await
+                .unwrap();
+            tx.insert_task(&task).await.unwrap();
+            tx.insert_run(&run).await.unwrap();
+            tx.commit().await.unwrap();
+
+            engine.start_run(run.id).await.unwrap();
+            let ended = until_run_ends(&store, run.id).await;
+            let modes = local.modes.lock().unwrap().clone();
+            match mode {
+                PermissionMode::Plan => {
+                    assert_eq!(ended.status, RunStatus::Succeeded, "{:?}", ended.end_reason);
+                    assert_eq!(modes, [Some("plan".to_owned())]);
+                }
+                _ => {
+                    assert_eq!((ended.status, modes.len()), (RunStatus::Failed, 0));
+                    let reason = ended.end_reason.unwrap_or_default();
+                    assert!(reason.contains("runtimes.allow_bypass: false"), "{reason}");
+                }
+            }
+        }
     }
 }

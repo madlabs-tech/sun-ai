@@ -478,8 +478,8 @@ impl Executor {
         let run = tx.get_run(step.run_id).await?;
         let workflow = self.workflow(tx, &run).await?;
         let entries = entries(&workflow, &self.config.adapter);
-        let mode = workflow
-            .permission_mode(&step.step_key)
+        let mode = crate::agents::step_mode(tx, run.workflow_id, &workflow, &step.step_key)
+            .await?
             .map(sun_core::PermissionMode::as_str);
         // A `market:` runtime runs on the seller's host, not this one.
         for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
