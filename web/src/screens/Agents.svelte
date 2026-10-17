@@ -13,9 +13,10 @@
   import ChainSettings from '../lib/ui/ChainSettings.svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
   import { api } from '../lib/api/client';
-  import { PERMISSION_MODES, type Agent, type AgentFields, type ChainEntry, type PermissionMode, type Runtime } from '../lib/api/types';
+  import type { Agent, AgentFields, ChainEntry, PermissionMode, Runtime } from '../lib/api/types';
   import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
   import { PERMISSION_MODE_COPY as MODE, chain_modes, chain_names, entry_name } from '../lib/format';
+  import { bypass_off, isolated as has_isolation, mode_hint, mode_options } from '../lib/permission_mode';
 
   const workspace = current_workspace();
   const manage = $derived(can('manage_runtimes'));
@@ -33,26 +34,9 @@
   /** Some online host has a container or VM ready: where a bypass session may run. */
   let isolated = $state(true);
   api.list_hosts(workspace).then(
-    (hosts) =>
-      (isolated = hosts.some(
-        (h) => h.status === 'online' && (h.capabilities.exec_envs ?? []).some((e) => e.ready && e.kind !== 'bare'),
-      )),
+    (hosts) => (isolated = has_isolation(hosts)),
     () => {},
   );
-  /** The operator's `runtimes.allow_bypass`, as every runtime reports it. */
-  const allow_bypass = $derived(runtimes.some((r) => r.allow_bypass));
-  /** What every runtime of the chain can enforce on its hosts (BLO-163). */
-  const offered = $derived.by(() => chain_modes(runtimes, form.runtime_chain));
-  const mode_options = $derived([
-    { value: '', label: 'Host default' },
-    // An agent already in a mode keeps showing it, even once bypass is off or its chain can't run it.
-    ...PERMISSION_MODES.filter(
-      (m) => editing?.permission_mode === m || form.permission_mode === m || ((m !== 'bypass_permissions' || allow_bypass) && offered.includes(m)),
-    ).map((m) => ({
-      value: m,
-      label: MODE[m][0],
-    })),
-  ]);
   /** The agent row's mode, when it sets one. */
   const mode_line = (a: Agent) => a.permission_mode && MODE[a.permission_mode][0];
   api.list_catalog('', '', workspace).then(
@@ -75,6 +59,11 @@
   let saving = $state(false);
   let error = $state('');
   let archiving = $state<Agent | null>(null);
+  const off = $derived(bypass_off(runtimes));
+  /** What every runtime of the chain can enforce on its hosts (BLO-163). */
+  const offered = $derived(chain_modes(runtimes, form.runtime_chain));
+  // The picked mode keeps showing, even once bypass is off or the chain can't run it, so `mode_error` can say why.
+  const modes = $derived(mode_options(offered, !off, isolated, form.permission_mode));
 
   function start(a: Agent | null) {
     editing = a;
@@ -138,16 +127,6 @@
       ? `${MODE[form.permission_mode][0]} isn’t available on the hosts of every runtime here. Pick another mode or runtime.`
       : undefined,
   );
-  const mode_hint = $derived.by(() => {
-    const mode = form.permission_mode;
-    if (mode === 'bypass_permissions' && !allow_bypass)
-      return '“Anything” is off on this deployment (sun.yaml runtimes.allow_bypass). Pick another mode and you can’t pick it back.';
-    if (mode === 'bypass_permissions' && !isolated)
-      return `${MODE[mode][1]} No online host has a container or VM ready, so its runs are refused until one does.`;
-    if (mode) return MODE[mode][1];
-    const why_no_bypass = allow_bypass ? '' : ' “Anything” is off on this deployment (sun.yaml runtimes.allow_bypass).';
-    return `Each host’s sun.yaml default.${why_no_bypass}`;
-  });
 </script>
 
 <PageHeader title="Agents" subtitle="The agents of this workspace. Assign one to a task and it works with these instructions, runtimes and skills.">
@@ -221,7 +200,7 @@
       bind:items={form.runtime_chain}
     />
     <ChainSettings {runtimes} bind:chain={form.runtime_chain} />
-    <Select label="Permissions" options={mode_options} bind:value={form.permission_mode} hint={mode_hint} error={mode_error} />
+    <Select label="Permissions" options={modes} bind:value={form.permission_mode} hint={mode_hint(form.permission_mode, off, isolated)} error={mode_error} />
     <Chips label="Skills" placeholder="tdd" suggestions={skills} hint="Installed skills from the Catalog." bind:items={form.skill_ids} />
     {#if error}<p class="agent-form__error" role="alert">{error}</p>{/if}
   </form>

@@ -1,6 +1,6 @@
 // In-memory fake of the /api/v1 kernel API (Fake transport for the client).
 // Sample data mirrors the Madlabs orchestrator UI kit. State resets on reload.
-import type { OutboxItem, Agent, Chat, MemoryItem,
+import type { OutboxItem, Agent, Chat, ChainSpec, PermissionMode, MemoryItem,
   Workspace,
   Project,
   ApiError,
@@ -57,7 +57,7 @@ import { is_vcs_route, vcs_route } from './mock_vcs';
 import { pull_request_route } from './mock_pull_requests';
 import { agents_route, find_agent } from './mock_agents';
 import { budget_route, has_ecosystem_secret, on_limit_route, settings_route } from './mock_settings';
-import { chain_names, entry_name, runtime_name } from '../format';
+import { chain_modes, chain_names, entry_name, runtime_name } from '../format';
 
 type StepDef = [key: string, name: string, type: StepType];
 
@@ -713,15 +713,34 @@ function start_agent_run(t: TaskDetail, trigger: string) {
   follow_run(t);
 }
 
-/** Chats (`GET|POST /chats`, and a chat's comments and activity under `/tasks/{id}`): each message runs the
- *  agent, which "types" for a moment (a `text` event) and then replies in the chat. */
+/** Chats (`GET|POST /chats`, `PATCH /chats/{id}` without an agent, and a chat's comments and activity under
+ *  `/tasks/{id}`): each message runs the agent (or the tool), which "types" for a moment (a `text` event) and
+ *  then replies in the chat. */
 const chats: Chat[] = [];
 const find_chat = (id: string) => chats.find((c) => c.id === id);
+/** The kernel's 422 for a mode the chat's tool can't enforce on its hosts (BLO-163). */
+function check_mode(runtime: ChainSpec, mode: PermissionMode | null) {
+  if (mode && !chain_modes(RUNTIMES, [runtime]).includes(mode))
+    throw invalid(`invalid input: permission_mode: the chain can't run in \`${mode}\` on its hosts`);
+}
 
 function chat_route(method: string, parts: string[], params: URLSearchParams, input: Record<string, unknown>): unknown {
   if (parts[0] === 'chats' && method === 'GET') {
     const workspace = params.get('workspace') ?? MAIN_WORKSPACE;
     return clone(chats.filter((c) => c.workspace_id === workspace).sort((a, b) => b.updated_at.localeCompare(a.updated_at)));
+  }
+  if (parts[0] === 'chats' && method === 'POST' && input.runtime) {
+    const runtime = input.runtime as ChainSpec;
+    const permission_mode = (input.permission_mode ?? null) as PermissionMode | null;
+    if (permission_mode === 'bypass_permissions' && !allow_bypass) throw invalid('bypass_permissions is off: set `runtimes.allow_bypass: true` in sun.yaml first.');
+    check_mode(runtime, permission_mode);
+    const now = new Date().toISOString();
+    const chat: Chat = {
+      id: fake_id('H', 700 + next_seq++), workspace_id: String(input.workspace_id), agent_id: null, title: runtime.model ? `${runtime.tool} · ${runtime.model}` : runtime.tool,
+      status: 'needs_you', run: null, last: null, queued_behind: [], runtime, permission_mode, created_at: now, updated_at: now,
+    };
+    chats.push(chat);
+    return clone(chat);
   }
   if (parts[0] === 'chats' && method === 'POST') {
     const agent = find_agent(String(input.agent_id ?? ''));
@@ -730,7 +749,7 @@ function chat_route(method: string, parts: string[], params: URLSearchParams, in
     const now = new Date().toISOString();
     const chat: Chat = {
       id: fake_id('H', 700 + next_seq++), workspace_id: agent.workspace_id, agent_id: agent.id, title: `Chat with ${agent.name}`,
-      status: 'needs_you', run: null, last: null, queued_behind: [], created_at: now, updated_at: now,
+      status: 'needs_you', run: null, last: null, queued_behind: [], runtime: null, permission_mode: null, created_at: now, updated_at: now,
     };
     chats.push(chat);
     return clone(chat);
@@ -739,6 +758,18 @@ function chat_route(method: string, parts: string[], params: URLSearchParams, in
   if (!chat) throw not_found('task');
   // `log` reads only the id.
   const as_task = chat as unknown as TaskDetail;
+  if (parts[0] === 'chats' && method === 'PATCH') {
+    if (!chat.runtime) throw invalid('Only a chat without an agent has settings to switch.');
+    const from = { runtime: chat.runtime, permission_mode: chat.permission_mode };
+    const to = { runtime: (input.runtime ?? from.runtime) as ChainSpec, permission_mode: (input.permission_mode === undefined ? from.permission_mode : input.permission_mode) as PermissionMode | null };
+    const [a, b] = [from.runtime, to.runtime];
+    if (a.tool !== b.tool || a.credential !== b.credential || a.host !== b.host) throw invalid('Start a new chat to use another tool, credential or host.');
+    if (chat.run && chat.run.status === 'running') throw invalid('Wait for the reply or stop it, then switch.');
+    check_mode(b, to.permission_mode);
+    log(as_task, 'settings', { from, to }, undefined, true);
+    Object.assign(chat, { ...to, title: b.model ? `${b.tool} · ${b.model}` : b.tool });
+    return clone(chat);
+  }
   if (method === 'GET' && parts[2] === 'activity') return clone((activity.get(chat.id) ?? []).filter((a) => a.seq > Number(params.get('after') ?? 0)));
   if (method !== 'POST' || parts[2] !== 'comments') throw not_found('route');
   const text = String(input.body ?? '').trim();
@@ -749,8 +780,9 @@ function chat_route(method: string, parts: string[], params: URLSearchParams, in
   Object.assign(chat, { last: entry, run, status: 'in_progress', updated_at: entry.created_at });
   event(run.id, 'text', 'Looking into it…');
   setTimeout(() => {
-    const name = find_agent(chat.agent_id)?.name ?? 'The agent';
-    const reply = log(as_task, 'comment', { text: `${name} here: noted. Ask me anything else.`, by_agent: chat.agent_id, run_id: run.id });
+    const by = chat.runtime ? { by_tool: chat.runtime.tool } : { by_agent: chat.agent_id };
+    const name = chat.runtime ? runtime_label(chat.runtime.tool) : (find_agent(chat.agent_id ?? '')?.name ?? 'The agent');
+    const reply = log(as_task, 'comment', { text: `${name} here: noted. Ask me anything else.`, ...by, run_id: run.id });
     Object.assign(chat, { last: reply, status: 'needs_you', updated_at: reply.created_at });
     run.status = 'succeeded';
   }, 2500);

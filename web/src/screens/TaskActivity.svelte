@@ -3,15 +3,15 @@
      A comment box sticks to the bottom: ⌘↵ / Ctrl+↵ sends, and on an agent's task the comment wakes it.
      Typing @ lists the workspace's agents: a picked one is mentioned, and the mentioned agents wake
      instead of the assignee (each answers in the thread). `chat`: a chat's messages, for the Chat screen —
-     only comments, no @ list. -->
+     only comments and its switches of model, effort or mode, no @ list. -->
 <script lang="ts">
   import { Button, Icon } from '@hryer/madlabs-design-system/svelte';
   import TextArea from '../lib/ui/TextArea.svelte';
   import { api } from '../lib/api/client';
-  import type { Assignee, Project, TaskActivity, TaskDetail, TaskRun, TaskStatus, Workflow } from '../lib/api/types';
+  import type { Assignee, DirectSettings, Project, TaskActivity, TaskDetail, TaskRun, TaskStatus, Workflow } from '../lib/api/types';
   import { SIDEBAR_SHORTCUT, app, can, error_text, toast } from '../lib/app_state.svelte';
   import { assignee_name } from '../lib/assignee';
-  import { STATUS_BADGE, STATUS_ICON, actor_name, priority_of, stamp } from '../lib/format';
+  import { STATUS_BADGE, STATUS_ICON, actor_name, direct_line, priority_of, stamp, tool_label } from '../lib/format';
 
   let {
     task,
@@ -67,6 +67,7 @@
       case 'comment': {
         const comment = String(b.text ?? '');
         if (b.by_agent) return { ...base, who: agent_name(b.by_agent) ?? runner, icon: 'bot', text: 'replied', comment };
+        if (b.by_tool) return { ...base, who: tool_label(String(b.by_tool)), icon: 'terminal', text: 'replied', comment };
         const mentioned = ((b.mentions as string[] | undefined) ?? []).map(agent_name).filter((n): n is string => !!n);
         return { ...base, icon: 'message-square', text: 'commented', comment, mentioned };
       }
@@ -97,6 +98,8 @@
         const how = ({ title: ' by its title', branch: ' by its branch name', auto: ' by a closing keyword' } as Record<string, string>)[String(b.source)] ?? '';
         return { ...base, icon: 'git-pull-request-arrow', text: `linked ${pr}${how}` };
       }
+      case 'settings':
+        return { ...base, icon: 'sliders-horizontal', text: `switched to ${direct_line(b.to as DirectSettings)}. A new session reads the last 20 messages.` };
     }
   }
 
@@ -112,7 +115,7 @@
 
   const entries = $derived(
     chat
-      ? activity.filter((a) => a.kind === 'comment').map(describe)
+      ? activity.filter((a) => a.kind === 'comment' || a.kind === 'settings').map(describe)
       : [...activity.map(describe), ...runs.map(ended).filter((e): e is Entry => !!e)].sort((a, b) => a.at.localeCompare(b.at)),
   );
 
