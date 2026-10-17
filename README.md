@@ -138,7 +138,7 @@ listen: 127.0.0.1:7700                  # where `sun serve` listens
 public_url: https://sun.example.com     # how hosts and links reach the kernel
 default_runtime: claude-code            # for workflows without `runtime:`
 runtimes:
-  permission_mode: accept_edits         # default | accept_edits | plan | bypass_permissions
+  permission_mode: accept_edits         # default | accept_edits | plan | auto | bypass_permissions
   allow_bypass: false                   # required before bypass_permissions can be chosen
 caps:
   per_runtime: { claude-code: 2 }       # active runs per runtime; extra tasks queue
@@ -149,7 +149,7 @@ event_retention_days: 90                # default: keep forever
 notify_to: ["slack:#eng"]               # where approvals and stalls are announced
 ```
 
-**Permissions.** Each agent CLI has a permission mode. `runtimes.permission_mode` in a host's `sun.yaml` is that host's default (`accept_edits`). A deployment owner can set the mode per runtime on the **Runtimes** page, which applies to every new session of that runtime on any host. Claude Code takes the mode as a flag. OpenCode's permission requests are answered by it. Codex runs in its own `workspace-write` sandbox. `bypass_permissions` lets the agent run any command, so it needs `allow_bypass: true` first, and it only runs in a container or VM: the queue fails a run that would get it bare (`placement_refused_bypass_bare`), and a host refuses such a session on its own too. Turning `allow_bypass` off later stops agents and workflows already saved in bypass: the queue fails their next run (`placement_refused_bypass_disabled`) and the engine never starts such a session.
+**Permissions.** Each agent CLI has a permission mode. `runtimes.permission_mode` in a host's `sun.yaml` is that host's default (`accept_edits`). Each agent (or workflow step) can name its own mode instead. Claude Code takes the mode as `--permission-mode`. Codex gets a sandbox and approval policy per mode (`plan`/`default`: read-only; `auto`: its automatic reviewer). OpenCode is made to ask for edits, commands and fetches, and Sun answers by the mode. Each host reports only the modes its installed CLIs enforce exactly: Claude Code all five (`auto` needs a CLI that has it), Codex all but `accept_edits` (its sandbox can't allow edits without commands), OpenCode all but `auto` (it has no reviewer). An agent or workflow step saved in a mode its chain's hosts don't report is refused, never run in another mode. The full per-tool table is in each adapter's module doc in `sun-runtime`. `bypass_permissions` lets the agent run any command, so it needs `allow_bypass: true` first, and it only runs in a container or VM: the queue fails a run that would get it bare (`placement_refused_bypass_bare`), and a host refuses such a session on its own too. Turning `allow_bypass` off later stops agents and workflows already saved in bypass: the queue fails their next run (`placement_refused_bypass_disabled`) and the engine never starts such a session.
 
 **Secrets** never go in `sun.yaml`. `sun secret set` seals them in the store, with the key in `<data dir>/master.key` or `SUN_MASTER_KEY`. Back that key up: losing it loses every secret. Sign-in providers (Google, GitHub, any OIDC) and SMTP are set in **Settings**.
 

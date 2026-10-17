@@ -2720,3 +2720,105 @@ async fn an_agent_edited_mid_chat_answers_fresh_with_its_new_instructions() {
         ["- ana: Hi", "- Ada (you): done", "- ana: Still there?"]
     );
 }
+
+/// `fake` ready, reporting `modes` as the permission modes it can enforce
+/// (none: a 2.1 host, which reports the four legacy ones).
+fn with_modes(modes: Option<&[&str]>) -> Value {
+    let mut runtime = json!({
+        "adapter": "fake",
+        "readiness": {"installed": true, "version": "1", "logged_in": true, "detail": null},
+    });
+    if let Some(modes) = modes {
+        runtime["permission_modes"] = json!(modes);
+    }
+    json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4, "runtimes": [runtime],
+        "exec_envs": [{"kind": "bare", "ready": true, "version": "1", "detail": null}],
+    })
+}
+
+/// BLO-163: an agent's mode must be one every tool of its chain reports on
+/// some host (the pinned one when pinned); saving another is refused,
+/// naming the field and what the tool offers. Never a silent fallback.
+#[tokio::test]
+async fn an_agents_mode_is_one_its_tools_report() {
+    let k = kernel_on(
+        &[("old", Some(&["bare"])), ("new", Some(&["bare"]))],
+        Caps::default(),
+    )
+    .await;
+    let (old, new) = (k.hosts[0], k.hosts[1]);
+    k.engine
+        .set_host_capabilities(old, &with_modes(None))
+        .await
+        .unwrap();
+    let all = sun_core::PERMISSION_MODES;
+    k.engine
+        .set_host_capabilities(new, &with_modes(Some(&all)))
+        .await
+        .unwrap();
+    let save = |name: &str, chain: Value, mode: &str| {
+        let engine = k.engine.clone();
+        let fields = AgentFields {
+            name: Some(name.into()),
+            runtime_chain: Some(serde_json::from_value(chain).unwrap()),
+            permission_mode: Some(Some(mode.parse().unwrap())),
+            ..AgentFields::default()
+        };
+        async move {
+            let plan = crate::support::unlimited();
+            engine
+                .create_agent(WorkspaceId::MAIN, fields, "user:me", &plan)
+                .await
+        }
+    };
+    // Some host of the workspace can run `fake` in `auto`.
+    let ada = save("ada", json!(["fake"]), "auto").await.unwrap();
+    // Pinned to the 2.1 host: refused, saying what it offers.
+    let pinned = json!([{"tool": "fake", "host": old.to_string()}]);
+    let Err(Error::InvalidInput(why)) = save("bob", pinned.clone(), "auto").await else {
+        panic!("auto on a 2.1 host was saved")
+    };
+    assert_eq!(
+        why,
+        "permission_mode: fake can't run in `auto` on its pinned host; \
+         it offers default, accept_edits, plan, bypass_permissions"
+    );
+    save("bob", pinned.clone(), "plan").await.unwrap();
+    // An update that pins the auto agent to the old host is refused too.
+    let update = AgentFields {
+        runtime_chain: Some(serde_json::from_value(pinned).unwrap()),
+        ..AgentFields::default()
+    };
+    let refused = k.engine.update_agent(ada.id, update, "user:me").await;
+    assert!(
+        matches!(refused, Err(Error::InvalidInput(ref why)) if why.starts_with("permission_mode: ")),
+        "{refused:?}"
+    );
+    // A tool no host reported has nothing to check against: the CLI decides.
+    save("cy", json!(["not-reported"]), "auto").await.unwrap();
+}
+
+/// BLO-163: a workflow step's `permission_mode:` is checked against the
+/// workflow's chain the same way, named by the step.
+#[tokio::test]
+async fn a_workflow_steps_mode_is_one_its_tools_report() {
+    let k = kernel_on(&[("old", Some(&["bare"]))], Caps::default()).await;
+    k.engine
+        .set_host_capabilities(k.hosts[0], &with_modes(None))
+        .await
+        .unwrap();
+    let yaml = |mode: &str| {
+        format!(
+            "name: w\nruntime: {{chain: [fake]}}\nsteps:\n  - id: build\n    type: agent\n    \
+             prompt: go\n    permission_mode: {mode}\n"
+        )
+    };
+    let refused = k.engine.save_workflow(None, &yaml("auto")).await;
+    assert!(
+        matches!(refused, Err(Error::InvalidInput(ref why))
+            if why.starts_with("steps.build.permission_mode: fake can't run in `auto`")),
+        "{refused:?}"
+    );
+    k.engine.save_workflow(None, &yaml("plan")).await.unwrap();
+}

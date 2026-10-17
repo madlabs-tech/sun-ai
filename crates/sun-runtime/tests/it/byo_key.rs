@@ -128,7 +128,7 @@ async fn byo_key_session_keeps_the_key_out_of_files_envelope_and_events() {
     // The config references the key; the process got the value via env only.
     let config: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("out.config")).unwrap()).unwrap();
-    assert_eq!(config, opencode_config(&openrouter(), None));
+    assert_eq!(config, asking(opencode_config(&openrouter(), None)));
     assert_eq!(
         std::fs::read_to_string(dir.join("out.key")).unwrap(),
         "set\n"
@@ -166,7 +166,7 @@ async fn byo_key_start_needs_the_key_value_when_a_secret_is_named() {
     assert!(!dir.join("out.key").exists());
     let config: Value =
         serde_json::from_str(&std::fs::read_to_string(dir.join("out.config")).unwrap()).unwrap();
-    assert_eq!(config, opencode_config(&ollama(), None));
+    assert_eq!(config, asking(opencode_config(&ollama(), None)));
 }
 
 #[tokio::test]
@@ -259,4 +259,11 @@ fn spec_for(dir: &std::path::Path, byo: ByoKey) -> sun_core::SessionSpec {
     let mut spec = spec(dir, &[(KEY_ENV, KEY)]);
     spec.byo_key = Some(byo);
     spec
+}
+
+/// The BYO key config as the session gets it: with OpenCode asking for
+/// edits, commands and fetches (Sun answers by mode, BLO-163).
+fn asking(mut config: Value) -> Value {
+    config["permission"] = serde_json::json!({"bash": "ask", "edit": "ask", "webfetch": "ask"});
+    config
 }

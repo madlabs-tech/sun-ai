@@ -87,6 +87,8 @@ cli_argv() { # prints one arg per line for the CLI's headless/ACP entry point
 transport() { case $1 in opencode) echo acp ;; *) echo headless-json ;; esac; }
 done_pattern() { case $1 in claude-code) echo '"type":"result"' ;; codex) echo '"type":"turn\.(completed|failed)"' ;; opencode) echo '"id":3,' ;; esac; }
 mid_pattern() { case $1 in claude-code) echo '"type":"tool_use"' ;; codex) echo '"type":"item\.started"' ;; opencode) echo '"sessionUpdate":"tool_call"' ;; esac; }
+# The help text the adapter's permission-mode probe reads (none for opencode: ACP, no flag).
+cli_help() { case $1 in claude-code) claude --help ;; codex) codex exec --help ;; esac; }
 cli_version() { case $1 in claude-code) claude --version ;; codex) codex --version ;; opencode) npx -y "opencode-ai@$OPENCODE_VERSION" --version ;; esac | head -1; }
 # `2.1.291 (Claude Code)`, `codex-cli 0.160.0` → the version (process::parse_version).
 version_of() { cli_version "$1" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]/) { print $i; exit } }'; }
@@ -182,6 +184,8 @@ record() {
   for case in ${RECORD_CASES:-normal tool-error crash}; do
     record_case "$cli" "$case" "$(prompt_for "$cli" "$case")"
   done
+  # Replayed by the contract tests: the version must still offer every permission mode.
+  [ "$cli" = opencode ] || cli_help "$cli" >"$DIR/help.txt" # --check greps it for home paths
 }
 
 command -v jq >/dev/null || die "jq is required"

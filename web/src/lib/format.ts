@@ -1,5 +1,6 @@
 // Display rules shared by every screen: task columns, status labels, money, time.
 import type { Agent, ChainEntry, OnLimit, PermissionMode, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
+import { PERMISSION_MODES } from './api/types';
 
 /** `list` with `item` added (`on`) or removed, once. */
 export const toggle = <T,>(list: T[], item: T, on: boolean) => (on ? [...list.filter((x) => x !== item), item] : list.filter((x) => x !== item));
@@ -130,6 +131,7 @@ export const PERMISSION_MODE_COPY: Record<PermissionMode, [string, string]> = {
   default: ['Ask first', 'Asks before edits and commands; unattended sessions get no answer.'],
   accept_edits: ['Edit files', 'Edits files freely; runs only the allowed commands.'],
   plan: ['Plan only', 'Reads and plans; changes nothing.'],
+  auto: ['Auto', 'Approves safe actions itself, asks for the rest.'],
   bypass_permissions: ['Anything', 'Runs any command without asking.'],
 };
 
@@ -146,6 +148,16 @@ export const runtime_name = (runtimes: Runtime[], name: string | null) => {
 
 /** A chain entry's runtime name (the kernel's `ChainEntry::name`): the credential's, else the tool's. */
 export const entry_name = (e: ChainEntry) => (typeof e === 'string' ? e : (e.credential ?? e.tool));
+
+/** The modes every tool of `chain` can enforce on some host (the pinned one when pinned), as the kernel checks on save; a tool no host reported doesn't narrow it. */
+export function chain_modes(runtimes: Runtime[], chain: ChainEntry[]): PermissionMode[] {
+  const reports = chain.map((e) => {
+    const tool = typeof e === 'string' ? (runtimes.find((r) => r.name === e)?.tool ?? e) : e.tool;
+    const pin = typeof e === 'string' ? undefined : e.host;
+    return runtimes.filter((r) => r.host && r.tool === tool && (!pin || r.host.id === pin)).flatMap((r) => (r.permission_modes ? [r.permission_modes] : []));
+  });
+  return PERMISSION_MODES.filter((m) => reports.every((modes) => !modes.length || modes.some((x) => x.includes(m))));
+}
 
 /** The distinct chain names of a runtime list (one per tool, however many hosts have it). */
 export const chain_names = (runtimes: Runtime[]) => [...new Set(runtimes.map((r) => r.name))];

@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EffortCatalog, Error, HostEvent, HostId, Readiness, SessionHandle, SessionId, SessionSpec,
-    StopMode, TaskId,
+    EffortCatalog, Error, HostEvent, HostId, PermissionMode, Readiness, SessionHandle, SessionId,
+    SessionSpec, StopMode, TaskId,
 };
 
 /// Protocol version sent in [`HostFrame::Hello`]. The kernel rejects a major it
@@ -795,6 +795,11 @@ pub struct RuntimeCapability {
     /// (`effort_options`, `models`). Absent from older hosts (= none).
     #[serde(flatten)]
     pub effort: EffortCatalog,
+    /// The permission modes the installed CLI can enforce
+    /// (`RuntimeAdapter::permission_modes`). Absent from 2.1 hosts: the four
+    /// modes before `auto`.
+    #[serde(default = "PermissionMode::legacy")]
+    pub permission_modes: Vec<PermissionMode>,
 }
 
 /// Resource use of a session's process tree.
@@ -955,6 +960,7 @@ mod tests {
                     default_effort: Some("high".into()),
                 }],
             },
+            permission_modes: PermissionMode::ALL.to_vec(),
         };
         let frame = HostFrame::Capabilities {
             capabilities: Capabilities {
@@ -985,6 +991,13 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(old.effort, EffortCatalog::default());
+        // ... and the four modes it could take, never `auto`.
+        assert_eq!(old.permission_modes, PermissionMode::LEGACY);
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap()["capabilities"]["runtimes"][0]["permission_modes"]
+                [3],
+            "auto"
+        );
     }
 
     #[test]

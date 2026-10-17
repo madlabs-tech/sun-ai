@@ -45,7 +45,7 @@ import type { OutboxItem, Agent, Chat, MemoryItem,
   WorkflowIssue,
   WorkflowTemplate,
 } from './types';
-import { BYO_KEY_ADAPTERS, MAIN_WORKSPACE, TASK_MOVES } from './types';
+import { BYO_KEY_ADAPTERS, MAIN_WORKSPACE, PERMISSION_MODES, TASK_MOVES } from './types';
 import { LineCounter, isMap, isSeq, parse, parseDocument, stringify } from 'yaml';
 import { DESIGN_WORKSPACE, mock_join, mock_me, need } from './auth';
 import { eval_route } from './mock_evals';
@@ -257,18 +257,21 @@ for (const s of SEEDS) {
 /** `?no_bypass`: the operator left `runtimes.allow_bypass` off. */
 const allow_bypass = !new URLSearchParams(location.search).has('no_bypass');
 /** One per (host, tool), one in each state of the Runtimes page, then the key-backed ones (`host: null`). */
+/** Modes a host doesn't report for a tool (BLO-163): Codex has no exact `accept_edits`, OpenCode no `auto`, and build-box-01 is a 2.1 host without `auto`. */
+const lacks = (host: number, tool: string, mode: string) =>
+  (tool === 'codex' && mode === 'accept_edits') || (mode === 'auto' && (tool === 'opencode' || host === 2));
 const on_host = (host: number, host_name: string, tool: string, r: Partial<Runtime>): Runtime => ({
   id: `${fake_id('H', host)}:${tool}`, name: tool, tool, adapter: tool, family: null, version: '1.0.0',
   host: { id: fake_id('H', host), name: host_name }, presence: 'online', availability: 'ready', load: { active: 0, max: null },
   state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: today('10:12'),
   workspace_id: null, source: 'byo_runtime', allow_bypass, config: null, model: null,
-  effort_options: [], models: [], ...r,
+  effort_options: [], models: [], permission_modes: PERMISSION_MODES.filter((m) => !lacks(host, tool, m)), ...r,
 });
 const keyed = (name: string, r: Partial<Runtime>): Runtime => ({
   id: name, name, tool: 'opencode', adapter: 'opencode', family: null, version: null, host: null, presence: 'online',
   availability: 'ready', load: null, state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: null,
   workspace_id: MAIN_WORKSPACE, source: 'byo_key', allow_bypass, config: null, model: null,
-  effort_options: [], models: [], ...r,
+  effort_options: [], models: [], permission_modes: null, ...r,
 });
 /** Effort catalogs as the CLIs report them (BLO-119): Claude Code one list per session, Codex per model. */
 const level = (value: string, label: string) => ({ value, label });

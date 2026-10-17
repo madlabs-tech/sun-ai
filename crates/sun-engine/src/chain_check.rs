@@ -12,10 +12,14 @@
 //!   (BLO-119): the pinned host's, else any attached host's. The kernel
 //!   checks it again at session start against the host that runs it.
 //!
+//! - a `permission_mode` (an agent's, a workflow step's) is one every tool
+//!   of the chain reports it can enforce (BLO-163) on some host, the pinned
+//!   one for a pinned entry ([`check_mode`]).
+//!
 //! Errors name the field: `runtime_chain[1].effort: ...`.
 
 use sun_core::model::{Host, RuntimeSource};
-use sun_core::{ChainEntry, ChainSpec, Error, Result, WorkspaceId};
+use sun_core::{ChainEntry, ChainSpec, Error, PermissionMode, Result, WorkspaceId};
 use sun_store::{HostRepo, RuntimeRepo, Tx};
 
 use crate::executor::failover::Reported;
@@ -104,6 +108,56 @@ pub(crate) async fn check(
                 return Err(invalid("effort", why));
             }
         }
+    }
+    Ok(())
+}
+
+/// Checks that every tool of `chain` can run in `mode` (`field` names the
+/// mode in errors): some attached host (the pinned one, for a pinned entry)
+/// reports the mode for the tool. A tool no attached host reported, or a
+/// `market:` entry, has nothing to check against: the CLI itself refuses an
+/// unknown mode at session start, so the run fails visibly.
+pub(crate) async fn check_mode(
+    tx: &mut Tx,
+    workspace: WorkspaceId,
+    chain: &[ChainEntry],
+    mode: Option<PermissionMode>,
+    field: &str,
+) -> Result<()> {
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    let hosts = tx.hosts_in(workspace).await?;
+    for entry in chain {
+        let tool = match entry {
+            ChainEntry::Spec(spec) => spec.tool.clone(),
+            ChainEntry::Name(name) if name.starts_with(crate::market::MARKET_PREFIX) => continue,
+            ChainEntry::Name(name) => match tx.runtime_by_name(workspace, name).await? {
+                Some(row) => row.adapter,
+                None => name.clone(),
+            },
+        };
+        let reports: Vec<Vec<PermissionMode>> = hosts
+            .iter()
+            .filter(|h| entry.host().is_none_or(|pin| h.id.to_string() == pin))
+            .filter_map(|h| h.permission_modes(&tool))
+            .collect();
+        if reports.is_empty() || reports.iter().any(|modes| modes.contains(&mode)) {
+            continue;
+        }
+        let offered: Vec<&str> = PermissionMode::ALL
+            .into_iter()
+            .filter(|m| reports.iter().any(|modes| modes.contains(m)))
+            .map(PermissionMode::as_str)
+            .collect();
+        return Err(Error::InvalidInput(format!(
+            "{field}: {tool} can't run in `{mode}` on {}; it offers {}",
+            match entry.host() {
+                Some(_) => "its pinned host",
+                None => "any host of this workspace",
+            },
+            offered.join(", ")
+        )));
     }
     Ok(())
 }
