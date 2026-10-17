@@ -236,6 +236,15 @@ async fn kernel() -> Kernel {
 /// A kernel over `hosts` (name, and the capabilities it reports: `fake`
 /// ready with these exec env kinds, or none), each attached to Main.
 async fn kernel_on(hosts: &[(&str, Option<&[&str]>)], caps: sun_engine::Caps) -> Kernel {
+    kernel_with(hosts, caps, false).await
+}
+
+/// [`kernel_on`] with sun.yaml `runtimes.allow_bypass` set to `allow_bypass`.
+async fn kernel_with(
+    hosts: &[(&str, Option<&[&str]>)],
+    caps: sun_engine::Caps,
+    allow_bypass: bool,
+) -> Kernel {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
     let mut ids = Vec::new();
@@ -268,7 +277,7 @@ async fn kernel_on(hosts: &[(&str, Option<&[&str]>)], caps: sun_engine::Caps) ->
     let host_id = ids[0];
     let host = Arc::new(HoldHost::default());
     let config = EngineConfig {
-        allow_bypass: false,
+        allow_bypass,
         host: host_id,
         adapter: "fake".into(),
         delivery_timeout: Duration::from_secs(5),
@@ -2859,4 +2868,482 @@ async fn a_direct_chats_mode_is_one_its_tool_reports() {
         matches!(refused, Err(Error::InvalidInput(ref why)) if why.starts_with("permission_mode: ")),
         "{refused:?}"
     );
+}
+
+// BLO-166: Shion's pass over BLO-162 PR 1 (direct chat engine and store).
+// Each test names the BLO-166 case it covers.
+
+impl Kernel {
+    /// A direct chat on Main with the `fake` tool on model `m1`, in `mode`.
+    async fn direct_chat(&self, mode: Option<sun_core::PermissionMode>) -> Task {
+        self.direct_chat_on(WorkspaceId::MAIN, mode).await
+    }
+
+    async fn direct_chat_on(
+        &self,
+        workspace: WorkspaceId,
+        mode: Option<sun_core::PermissionMode>,
+    ) -> Task {
+        let runtime = sun_core::ChainSpec {
+            tool: "fake".into(),
+            credential: None,
+            host: None,
+            model: Some("m1".into()),
+            effort: None,
+        };
+        self.engine
+            .create_direct_chat(workspace, runtime, mode, None)
+            .await
+            .unwrap()
+            .task
+    }
+
+    /// The memory items on every workspace, as `(status, body)`.
+    async fn memory_items(&self) -> Vec<(sun_core::model::MemoryStatus, String)> {
+        let items = self.engine.memory(None).await.unwrap();
+        items
+            .into_iter()
+            .map(|m| (m.item.status, m.item.body))
+            .collect()
+    }
+}
+
+/// Case 1: a direct chat's workflow is never offered where a person picks or
+/// edits a workflow: both lists, the builder, saving (on any workspace), the
+/// default-workflow setter, a new task and assignment all answer like a
+/// missing workflow. Task views still name it (`hidden_workflows`).
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_a_direct_chats_workflow_is_hidden_wherever_a_person_picks_one() {
+    let k = kernel().await;
+    let chat = k.direct_chat(None).await;
+    let hidden = chat.workflow_id.unwrap();
+
+    let listed = k.engine.workflows().await.unwrap();
+    assert!(listed.iter().all(|(w, _)| w.id != hidden), "workflows()");
+    let on_main = k
+        .engine
+        .workflows_of_workspace(WorkspaceId::MAIN)
+        .await
+        .unwrap();
+    assert!(
+        on_main.iter().all(|(w, _)| w.id != hidden),
+        "workflows_of_workspace()"
+    );
+    let named = k.engine.hidden_workflows().await.unwrap();
+    assert!(
+        named.iter().any(|(w, _)| w.id == hidden),
+        "task views name it"
+    );
+
+    let builder = k.engine.workflow(hidden).await;
+    assert!(matches!(builder, Err(Error::NotFound(_))), "{builder:?}");
+    let source = "name: hijack\nsteps:\n  - {id: a, type: agent, prompt: hi}\n";
+    let saved = k.engine.save_workflow(Some(hidden), source).await;
+    assert!(matches!(saved, Err(Error::NotFound(_))), "{saved:?}");
+    let saved_on = k
+        .engine
+        .save_workflow_on(WorkspaceId::MAIN, Some(hidden), source)
+        .await;
+    assert!(matches!(saved_on, Err(Error::NotFound(_))), "{saved_on:?}");
+
+    let default = sun_engine::ProfileChange {
+        default_workflow_id: Some(Some(hidden)),
+        ..Default::default()
+    };
+    let set = k
+        .engine
+        .update_workspace_profile(WorkspaceId::MAIN, &default, "user:me")
+        .await;
+    assert!(
+        set.is_err(),
+        "default workflow set to a hidden one: {set:?}"
+    );
+    let profile = k.engine.workspace(WorkspaceId::MAIN).await.unwrap();
+    assert_ne!(profile.default_workflow_id, Some(hidden));
+
+    let new = NewTask {
+        workspace_id: Some(WorkspaceId::MAIN),
+        title: "Ride the chat's workflow".into(),
+        body: String::new(),
+        workflow: WorkflowPick::Id(hidden),
+        exec_env: None,
+        priority: Priority::None,
+        status: TaskStatus::Backlog,
+        project_id: None,
+        actor: None,
+    };
+    let created = k.engine.create_task(new).await;
+    assert!(matches!(created, Err(Error::NotFound(_))), "{created:?}");
+
+    let plain = NewTask {
+        workspace_id: Some(WorkspaceId::MAIN),
+        title: "Plain".into(),
+        body: String::new(),
+        workflow: WorkflowPick::None,
+        exec_env: None,
+        priority: Priority::None,
+        status: TaskStatus::Backlog,
+        project_id: None,
+        actor: None,
+    };
+    let plain = k.engine.create_task(plain).await.unwrap();
+    let to = Some(Assignee::Workflow { id: hidden });
+    let assigned = k.engine.assign_task(plain.id, to, None).await;
+    assert!(matches!(assigned, Err(Error::NotFound(_))), "{assigned:?}");
+    assert_eq!(k.get(plain.id).await.workflow_id, None);
+}
+
+/// Case 1: deleting a workspace that holds a direct chat. Tasks can't be
+/// deleted, so the chat's task keeps the workspace (the pre-existing "empty
+/// workspace" rule); the refusal names the task, never the hidden workflow,
+/// and leaves the chat and its workflow whole. (The store test
+/// `a_direct_chats_workflow_goes_with_its_workspace` covers the delete once
+/// no task is left.)
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_deleting_a_workspace_with_a_direct_chat_names_the_task_and_keeps_the_chat() {
+    let k = kernel().await;
+    let ops = k
+        .engine
+        .create_workspace("Ops", None, None, &Default::default(), "owner")
+        .await
+        .unwrap();
+    let chat = k.direct_chat_on(ops.id, None).await;
+    let hidden = chat.workflow_id.unwrap();
+
+    let deleted = k.engine.delete_workspace(ops.id, "user:me").await;
+    let Err(Error::InvalidInput(why)) = deleted else {
+        panic!("{deleted:?}");
+    };
+    assert!(why.contains("1 task(s)"), "{why}");
+    assert!(
+        !why.contains("workflow"),
+        "the hidden workflow counted: {why}"
+    );
+    assert_eq!(k.get(chat.id).await.workflow_id, Some(hidden));
+    let mut tx = k.store.read().await.unwrap();
+    assert!(tx.get_workflow(hidden).await.is_ok());
+    assert!(tx.latest_workflow_version(hidden).await.unwrap().is_some());
+}
+
+/// Case 2: the bare tool gets no knowledge hits. The same workspace source
+/// does reach an agent chat's session, so the absence is the guard's doing.
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_a_direct_chat_gets_no_knowledge_where_an_agent_chat_does() {
+    use sun_context::knowledge::{DocContent, SourceDoc};
+
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    k.host.finish.store(true, Ordering::SeqCst);
+    let source = k
+        .engine
+        .add_knowledge_source("upload", "wiki", &json!({}), WorkspaceId::MAIN)
+        .await
+        .unwrap();
+    let words = "fake m1 chat with Ada zanzibar rollout";
+    let doc = SourceDoc {
+        external_id: "runbook".into(),
+        title: "runbook".into(),
+        version: "1".into(),
+        updated_at: None,
+        url: None,
+        acl: Vec::new(),
+        content: DocContent::Markdown(format!("# runbook\n\n{words}: KNOWLEDGE-MARKER-7")),
+    };
+    k.engine
+        .ingest_knowledge(&source.id, vec![doc])
+        .await
+        .unwrap();
+
+    let ada = k.agent("Ada").await;
+    let agent_chat = k.engine.create_chat(ada, None).await.unwrap();
+    k.say(agent_chat.id, "ana", "Explain the zanzibar rollout")
+        .await;
+    k.answered(agent_chat.id, 1).await;
+    let control = k.host.envelopes()[0].clone();
+    assert!(
+        control.contains("KNOWLEDGE-MARKER-7"),
+        "control: the agent chat should see the source: {control}"
+    );
+
+    let chat = k.direct_chat(None).await;
+    k.say(chat.id, "ana", "Explain the zanzibar rollout").await;
+    k.answered(chat.id, 1).await;
+    let bare = k.host.envelopes()[1].clone();
+    assert!(!bare.contains("KNOWLEDGE-MARKER-7"), "{bare}");
+    assert!(!bare.contains("You are Ada"), "{bare}");
+}
+
+/// Case 2: corrections on a direct chat (a person contradicting the tool
+/// mid-run, three times: the repeat threshold) are recorded but propose no
+/// memory, while the same corrections on an agent chat do; a learning note
+/// from the chat can't be starred into memory.
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_a_direct_chat_proposes_no_memory_from_corrections_or_notes() {
+    use sun_core::model::{Note, NoteKind};
+    use sun_store::NoteRepo;
+
+    let k = kernel().await;
+    let chat = k.direct_chat(None).await;
+    k.say(chat.id, "ana", "Hi").await;
+    k.working(chat.id).await;
+    for text in ["No, that's wrong.", "No, stop.", "That is wrong, undo it."] {
+        k.say(chat.id, "ana", text).await;
+    }
+    let corrections = k.engine.corrections_of(chat.id).await.unwrap();
+    assert_eq!(corrections.len(), 3, "the steers were recorded");
+    assert!(
+        k.memory_items().await.is_empty(),
+        "{:?}",
+        k.memory_items().await
+    );
+
+    let run = k.runs(chat.id).await.pop().unwrap();
+    let note = Note {
+        id: sun_core::NoteId::generate(),
+        run_id: run.id,
+        step_key: sun_core::StepKey::new(sun_engine::AGENT_STEP).unwrap(),
+        kind: NoteKind::Learning,
+        body: "Always deploy blue-green.".into(),
+        superseded_by: None,
+    };
+    let mut tx = k.store.begin().await.unwrap();
+    tx.insert_note(&note).await.unwrap();
+    tx.commit().await.unwrap();
+    let starred = k.engine.star_note(note.id, "user:ana").await;
+    assert!(
+        matches!(starred, Err(Error::InvalidInput(_))),
+        "{starred:?}"
+    );
+    assert!(k.memory_items().await.is_empty());
+
+    // Control: the same three corrections on an agent chat propose a rule.
+    let ada = k.agent("Ada").await;
+    let agent_chat = k.engine.create_chat(ada, None).await.unwrap();
+    k.say(agent_chat.id, "ana", "Hi").await;
+    eventually("the agent chat working", || async {
+        k.host.envelopes().len() == 2
+    })
+    .await;
+    for text in ["No, that's wrong.", "No, stop.", "That is wrong, undo it."] {
+        k.say(agent_chat.id, "ana", text).await;
+    }
+    let proposed = k.memory_items().await;
+    assert_eq!(proposed.len(), 1, "control: {proposed:?}");
+}
+
+/// Case 2: starring a correction recorded on a direct chat must not propose
+/// memory either ("no memory writes" in the BLO-162 spec §3).
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_starring_a_direct_chats_correction_proposes_no_memory() {
+    let k = kernel().await;
+    let chat = k.direct_chat(None).await;
+    k.say(chat.id, "ana", "Hi").await;
+    k.working(chat.id).await;
+    k.say(chat.id, "ana", "No, that's wrong.").await;
+    let corrections = k.engine.corrections_of(chat.id).await.unwrap();
+    assert_eq!(corrections.len(), 1);
+
+    let starred = k
+        .engine
+        .star_correction(corrections[0].id, "user:ana")
+        .await;
+    let items = k.memory_items().await;
+    assert!(
+        matches!(starred, Err(Error::InvalidInput(_))) && items.is_empty(),
+        "starred: {starred:?}; memory: {items:?}"
+    );
+}
+
+/// Case 3: a direct chat keeps its tool: assigning it to an agent, to a
+/// person's workflow or to nobody is refused, and its workflow stays.
+/// "Assigning" it to its own hidden workflow (what `Task::assignee` reports
+/// for it) is the same-assignee no-op, which changes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_a_direct_chat_refuses_assignment_to_every_target() {
+    let k = kernel().await;
+    let ada = k.agent("Ada").await;
+    let (mine, _) = k
+        .engine
+        .save_workflow(
+            None,
+            "name: mine\nsteps:\n  - {id: a, type: agent, prompt: hi}\n",
+        )
+        .await
+        .unwrap();
+    let chat = k.direct_chat(None).await;
+    let hidden = chat.workflow_id;
+    for to in [
+        None,
+        Some(Assignee::Agent { id: ada }),
+        Some(Assignee::Workflow { id: mine.id }),
+    ] {
+        let moved = k.engine.assign_task(chat.id, to, None).await;
+        assert!(
+            matches!(moved, Err(Error::InvalidInput(_))),
+            "{to:?}: {moved:?}"
+        );
+        let after = k.get(chat.id).await;
+        assert_eq!((after.workflow_id, after.assignee_agent_id), (hidden, None));
+    }
+    let own = Some(Assignee::Workflow {
+        id: hidden.unwrap(),
+    });
+    assert_eq!(k.get(chat.id).await.assignee(), own);
+    let before = k.engine.activity(chat.id, 0).await.unwrap().len();
+    k.engine.assign_task(chat.id, own, None).await.unwrap();
+    assert_eq!(k.get(chat.id).await.workflow_id, hidden);
+    let after = k.engine.activity(chat.id, 0).await.unwrap().len();
+    assert_eq!(before, after, "the no-op logged an assignment");
+}
+
+/// Case 3: a comment wakes a direct chat in Needs you, Blocked or Failed,
+/// but on a Done or Cancelled one it is kept and wakes nothing (what
+/// `on_comment` does for every task; reported on BLO-166).
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_a_comment_on_a_done_or_cancelled_direct_chat_wakes_nothing() {
+    let k = kernel().await;
+    k.host.finish.store(true, Ordering::SeqCst);
+
+    // Control: in Needs you, the comment queues a run before it returns.
+    let woken = k.direct_chat(None).await;
+    k.say(woken.id, "ana", "Hi").await;
+    assert_eq!(k.runs(woken.id).await.len(), 1, "control");
+
+    for end in [TaskStatus::Done, TaskStatus::Cancelled] {
+        let chat = k.direct_chat(None).await;
+        k.engine
+            .move_task_manually(chat.id, end, None)
+            .await
+            .unwrap();
+        k.say(chat.id, "ana", "Still there?").await;
+        assert!(k.runs(chat.id).await.is_empty(), "{end}: woke a run");
+        assert_eq!(k.get(chat.id).await.status, end);
+        assert_eq!(k.texts(chat.id).await, ["Still there?"], "{end}");
+    }
+}
+
+/// Case 4: a direct chat whose workflow gets a new version (what PR 2's
+/// PATCH saves on a model switch) answers the next message in a fresh
+/// session on the new model, with the thread, instead of resuming.
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_a_direct_chat_on_a_new_version_answers_fresh() {
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    k.host.finish.store(true, Ordering::SeqCst);
+    let chat = k.direct_chat(None).await;
+    let workflow = chat.workflow_id.unwrap();
+    k.say(chat.id, "ana", "Hi").await;
+    k.answered(chat.id, 1).await;
+
+    // Same version: resumes (the boundary's other side).
+    k.say(chat.id, "ana", "Again").await;
+    k.answered(chat.id, 2).await;
+    assert_eq!(k.session(1).0, k.host.natives.lock().unwrap()[0].1);
+
+    let mut tx = k.store.begin().await.unwrap();
+    let v1 = tx.latest_workflow_version(workflow).await.unwrap().unwrap();
+    let v2 = v1.source_yaml.replace("\"m1\"", "\"m2\"");
+    assert_ne!(v1.source_yaml, v2, "the model is in the source");
+    tx.save_workflow_version(workflow, &v2, "h2").await.unwrap();
+    tx.commit().await.unwrap();
+
+    k.say(chat.id, "ana", "Switched?").await;
+    k.sessions(3).await;
+    assert_eq!(k.session(2).0, None, "no resume across versions");
+    let settings = k.host.settings.lock().unwrap()[2].clone();
+    assert_eq!(settings.0.as_deref(), Some("m2"));
+    assert_eq!(
+        thread_lines(&k.host.envelopes()[2]),
+        [
+            "- ana: Hi",
+            "- fake (you): done",
+            "- ana: Again",
+            "- fake (you): done",
+            "- ana: Switched?",
+        ]
+    );
+}
+
+/// Case 5: a direct chat created in `bypass_permissions` never gets a
+/// session on a bare host, even with sun.yaml allowing bypass: placement
+/// refuses it (`placement_refused_bypass_bare`) and the run fails unplaced.
+/// With bypass turned off it is refused too, for that reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn blo166_a_bypass_direct_chat_never_starts_on_a_bare_host() {
+    for (allow, kind) in [
+        (true, "placement_refused_bypass_bare"),
+        (false, "placement_refused_bypass_disabled"),
+    ] {
+        use sun_store::EventLog;
+
+        let k = kernel_with(&[("bare", Some(&["bare"]))], Caps::default(), allow).await;
+        k.host.finish.store(true, Ordering::SeqCst);
+        let bypass = Some(sun_core::PermissionMode::BypassPermissions);
+        let chat = k.direct_chat(bypass).await;
+        k.say(chat.id, "ana", "rm -rf, please").await;
+        eventually("the run refused", || async {
+            k.runs(chat.id)
+                .await
+                .pop()
+                .is_some_and(|r| r.status == RunStatus::Failed)
+        })
+        .await;
+        let run = k.runs(chat.id).await.pop().unwrap();
+        let events = k
+            .store
+            .read()
+            .await
+            .unwrap()
+            .events_after(Some(run.id), 0, 64)
+            .await
+            .unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert!(kinds.contains(&kind), "allow {allow}: {kinds:?}");
+        assert!(!kinds.contains(&"run_placed"), "allow {allow}: {kinds:?}");
+        assert!(k.host.envelopes().is_empty(), "allow {allow}: a session");
+    }
+}
+
+/// Case 5, every spelling: a bypass mode spelled any way but
+/// `bypass_permissions` is not a mode. The typed API (`PermissionMode`, as
+/// PR 2's body will deserialize it) refuses it, and the backstop refuses a
+/// session carrying it whatever the exec env, container included.
+#[test]
+fn blo166_no_other_spelling_of_bypass_gets_past_the_backstop() {
+    use sun_core::{ExecEnvSpec, PermissionMode};
+
+    let container: ExecEnvSpec =
+        serde_json::from_value(json!({"kind": "container", "image": "node:22"})).unwrap();
+    let bare: ExecEnvSpec = serde_json::from_value(json!({"kind": "bare"})).unwrap();
+    for spelling in [
+        "bypassPermissions",
+        "BypassPermissions",
+        "BYPASS_PERMISSIONS",
+        "Bypass_Permissions",
+        "bypass-permissions",
+        "bypass permissions",
+        " bypass_permissions",
+        "bypass_permissions ",
+        "bypass_permissions\n",
+        "bypass",
+        "dangerously-skip-permissions",
+        "dangerously_skip_permissions",
+        "yolo",
+        "full-auto",
+        "",
+    ] {
+        assert!(
+            spelling.parse::<PermissionMode>().is_err(),
+            "parsed {spelling:?}"
+        );
+        let typed = serde_json::from_value::<PermissionMode>(json!(spelling));
+        assert!(typed.is_err(), "deserialized {spelling:?}: {typed:?}");
+        for env in [&bare, &container] {
+            let refused = sun_core::mode_refusal(Some(spelling), env);
+            assert!(refused.is_some(), "{spelling:?} on {env:?}");
+        }
+    }
+    let exact = Some(PermissionMode::BypassPermissions.as_str());
+    assert!(sun_core::mode_refusal(exact, &bare).is_some());
+    assert!(sun_core::mode_refusal(exact, &container).is_none());
 }
