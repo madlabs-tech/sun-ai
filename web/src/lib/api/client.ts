@@ -3,6 +3,7 @@
 import type { OnLimit, OutboxItem, Resolution,
   Agent,
   Chat,
+  DirectSettings,
   AgentFields,
   Workspace,
   WorkspaceProfileChange,
@@ -187,6 +188,10 @@ export const api = {
   list_chats: (workspace: string) => request<Chat[]>('GET', '/chats' + query({ workspace })),
   /** A new chat with `agent_id`; it waits for its first message. */
   create_chat: (agent_id: string) => request<Chat>('POST', '/chats', { agent_id }),
+  /** A new chat straight with a tool on `workspace_id`, no agent. */
+  create_direct_chat: (workspace_id: string, settings: DirectSettings) => request<Chat>('POST', '/chats', { workspace_id, ...settings }),
+  /** A chat without an agent on another model, effort or mode: its next message starts a fresh session. */
+  update_chat: (id: string, change: Partial<DirectSettings>) => request<Chat>('PATCH', `/chats/${id_path(id)}`, change),
   task_activity: (id: string, after = 0) => request<TaskActivity[]>('GET', `/tasks/${id_path(id)}/activity?after=${after}`),
   task_runs: (id: string) => request<TaskRun[]>('GET', `/tasks/${id_path(id)}/runs`),
   /** Any run of a task (not only the latest), with its steps and gates. */

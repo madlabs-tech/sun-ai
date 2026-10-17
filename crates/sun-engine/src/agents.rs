@@ -30,6 +30,9 @@ use crate::query::parse;
 /// workflow row is named after the agent).
 pub const AGENT_STEP: &str = "agent";
 
+/// How errors name an agent's mode.
+pub(crate) const MODE_FIELD: &str = "permission_mode";
+
 /// `POST /agents` and `PATCH /agents/{id}`: the fields to set; absent ones
 /// stay (a new agent needs a name and a runtime).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -311,6 +314,9 @@ impl Engine {
         tx.get_workspace(workspace).await?;
         crate::chain_check::check(&mut tx, workspace, &agent.runtime_chain, "runtime_chain")
             .await?;
+        let mode = agent.permission_mode;
+        crate::chain_check::check_mode(&mut tx, workspace, &agent.runtime_chain, mode, MODE_FIELD)
+            .await?;
         plan.check(Quota::Agents, tx.agents(Some(workspace)).await?.len())?;
         tx.insert_agent(&agent).await?;
         audit(&mut tx, &agent, actor, "created").await?;
@@ -341,6 +347,13 @@ impl Engine {
         if agent.runtime_chain != before.runtime_chain {
             let chain = &agent.runtime_chain;
             crate::chain_check::check(&mut tx, agent.workspace_id, chain, "runtime_chain").await?;
+        }
+        if (&agent.runtime_chain, agent.permission_mode)
+            != (&before.runtime_chain, before.permission_mode)
+        {
+            let (chain, mode) = (&agent.runtime_chain, agent.permission_mode);
+            crate::chain_check::check_mode(&mut tx, agent.workspace_id, chain, mode, MODE_FIELD)
+                .await?;
         }
         let (source, parsed) = system_source(&agent)?;
         for workflow in tx.system_workflows_of(id).await? {

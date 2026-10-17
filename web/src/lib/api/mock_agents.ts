@@ -1,7 +1,7 @@
 // In-memory agents for the mock: GET/POST /agents, PATCH/DELETE /agents/{id} (DELETE archives).
 // Ready when a runtime of the chain is known and not offline, like the kernel's "logged in on an online host".
 import type { Agent, AgentFields, ChainEntry } from './types';
-import { entry_name } from '../format';
+import { chain_modes, entry_name } from '../format';
 import { MAIN_WORKSPACE } from './types';
 import { MockError, RUNTIMES, clone, not_found } from './mock';
 
@@ -65,6 +65,8 @@ function apply(a: Agent, fields: AgentFields): Agent {
   if ([...next.instructions].length > 20_000) throw invalid('Keep the instructions to 20000 characters.');
   if (!next.runtime_chain.length || next.runtime_chain.length > 32) throw invalid('Pick 1 to 32 runtimes for the agent.');
   next.runtime_chain.forEach(check_entry);
+  if (next.permission_mode && !chain_modes(RUNTIMES, next.runtime_chain).includes(next.permission_mode))
+    throw invalid(`invalid input: permission_mode: the chain can't run in \`${next.permission_mode}\` on its hosts`);
   if (fields.permission_mode === 'bypass_permissions' && !RUNTIMES[0]?.allow_bypass)
     throw invalid('bypass_permissions lets the agent run anything. Set `runtimes.allow_bypass: true` in sun.yaml first.');
   if (agents.some((x) => x.id !== a.id && !x.archived_at && x.name.toLowerCase() === next.name.toLowerCase()))

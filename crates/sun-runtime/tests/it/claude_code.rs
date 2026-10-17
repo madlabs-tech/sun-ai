@@ -603,3 +603,30 @@ async fn an_effort_that_is_not_a_token_never_reaches_the_cli() {
     assert!(adapter.start(spec).await.is_err());
     assert!(!dir.join("out.args").exists(), "the CLI was not started");
 }
+
+/// BLO-163: every Sun mode launches with its own `--permission-mode`.
+#[tokio::test]
+async fn every_permission_mode_reaches_the_cli() {
+    let expected = [
+        ("default", "default"),
+        ("accept_edits", "acceptEdits"),
+        ("plan", "plan"),
+        ("auto", "auto"),
+        ("bypass_permissions", "bypassPermissions"),
+    ];
+    assert_eq!(expected.len(), sun_core::PERMISSION_MODES.len());
+    for (mode, flag) in expected {
+        let dir = sandbox(&format!("mode-{mode}"));
+        let adapter = ClaudeCode::new(dir.join("claude"));
+        let fixture = format!("{}/normal.jsonl", fixtures());
+        let mut spec = spec(&dir, &[("SUN_FIXTURE", &fixture)]);
+        spec.permission_mode = Some(mode.into());
+        let handle = adapter.start(spec).await.unwrap();
+        collect(adapter.events(&handle)).await;
+        let args = std::fs::read_to_string(dir.join("out.args")).unwrap();
+        assert!(
+            args.contains(&format!("--permission-mode {flag} ")),
+            "{mode}: {args}"
+        );
+    }
+}

@@ -244,6 +244,12 @@ impl Engine {
         if let Some(runtime) = &parsed.runtime {
             let workspace = workflow.workspace_id;
             crate::chain_check::check(&mut tx, workspace, &runtime.chain, "runtime.chain").await?;
+            for step in &parsed.steps {
+                let mode = parsed.permission_mode(&step.id);
+                let field = format!("steps.{}.permission_mode", step.id);
+                crate::chain_check::check_mode(&mut tx, workspace, &runtime.chain, mode, &field)
+                    .await?;
+            }
         }
         let version = tx
             .save_workflow_version(workflow.id, source_yaml, &parsed.hash)

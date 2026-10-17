@@ -91,6 +91,38 @@ test('an agent’s permission mode: the host default until set, set from the edi
   await expect(row(page, 'Ada')).not.toContainText('Plan only');
 });
 
+test('the permission picker offers only the modes the chain’s hosts report (BLO-163)', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'New agent' }).click();
+  const dialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'New agent' }) });
+  await dialog.getByLabel('Name', { exact: true }).fill('Planner');
+  const chain = dialog.getByRole('combobox', { name: 'Add to Runtimes, in failover order' });
+  const mode = dialog.getByLabel('Permissions');
+  const labels = () => mode.locator('option').allTextContents();
+  // Claude Code on hery-mbp reports `auto`.
+  await chain.fill('claude-code');
+  await chain.press('Enter');
+  expect(await labels()).toEqual(['Host default', 'Ask first', 'Edit files', 'Plan only', 'Auto', 'Anything']);
+  await mode.selectOption({ label: 'Auto' });
+  await expect(dialog).toContainText('Approves safe actions itself, asks for the rest.');
+  // OpenCode doesn't report `auto`: a visible error, and saving is refused.
+  await chain.fill('opencode');
+  await chain.press('Enter');
+  await expect(dialog).toContainText('Auto isn’t available on the hosts of every runtime here.');
+  await dialog.getByRole('button', { name: 'Create agent' }).click();
+  await expect(dialog.getByRole('alert')).toContainText('permission_mode');
+  await mode.selectOption({ label: 'Plan only' });
+  // Once another mode is picked, Auto is no longer offered for this chain.
+  expect(await labels()).not.toContain('Auto');
+  // Codex reports no `accept_edits`: Edit files goes too.
+  await chain.fill('codex');
+  await chain.press('Enter');
+  expect(await labels()).toEqual(['Host default', 'Ask first', 'Plan only', 'Anything']);
+  await dialog.getByRole('button', { name: 'Create agent' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(row(page, 'Planner')).toContainText('Plan only');
+});
+
 test('a member sees agents but no write controls', async ({ page }) => {
   await open(page, '&mock_role=member');
   await expect(row(page, 'Ada')).toBeVisible();

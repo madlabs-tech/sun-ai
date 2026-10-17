@@ -8,6 +8,22 @@
 //! crate would bring its own process and connection runtime instead.
 //! Runs on whatever login or provider config OpenCode has (BYO runtime),
 //! or on a [`ByoKey`] endpoint rendered per session (BYO key).
+//!
+//! Permission modes: every session's config sets `edit`, `bash` and
+//! `webfetch` to `ask` (OpenCode 1.18.34 allows all three by default), and
+//! Sun answers each request by the mode ([`AcpStream::with_permissions`]).
+//!
+//! | Sun mode | Allowed request kinds | Effect |
+//! |---|---|---|
+//! | `plan` | read, search, think | never edits, runs or fetches, even with `allow_shell` |
+//! | `default` | read, search, think (+ execute with `allow_shell`) | edits refused |
+//! | `accept_edits` | + edit, delete, move | edits freely |
+//! | `bypass_permissions` | every kind | everything |
+//!
+//! `auto` is not reported (the four [`PermissionMode::LEGACY`] modes are):
+//! OpenCode has no reviewer to approve "safe" commands. A session can still
+//! get it from a host's own `runtimes.permission_mode` default; it then
+//! answers as `accept_edits`, never more.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,6 +50,9 @@ use crate::{envelope, limit};
 
 /// Adapter id.
 pub const ID: &str = "opencode";
+
+/// The env var OpenCode merges over its own config.
+const CONFIG_ENV: &str = "OPENCODE_CONFIG_CONTENT";
 
 /// JSON-RPC ids of the handshake; the first prompt is 3, steers count on from 4.
 const INITIALIZE: u64 = 1;
@@ -124,7 +143,7 @@ impl RuntimeAdapter for OpenCode {
         // Merged over the user's own OpenCode config; an env var, so nothing
         // lands in the worktree. A stored `byo_key` runtime comes in the
         // spec (from the engine); the adapter's own field is the fallback.
-        let config = match spec.byo_key.as_ref().or(self.byo_key.as_ref()) {
+        let mut config = match spec.byo_key.as_ref().or(self.byo_key.as_ref()) {
             Some(byo) => {
                 byo.validate()?;
                 if byo.key_secret.is_some() && !spec.env.contains_key(byo_key::KEY_ENV) {
@@ -133,15 +152,28 @@ impl RuntimeAdapter for OpenCode {
                         byo_key::KEY_ENV
                     )));
                 }
-                Some(byo_key::opencode_config(byo, spec.model.as_deref()))
+                byo_key::opencode_config(byo, spec.model.as_deref())
             }
             // A provider config in the session env (Sun credits) wins.
-            None if spec.env.contains_key("OPENCODE_CONFIG_CONTENT") => None,
-            None => spec.model.as_ref().map(|model| json!({ "model": model })),
+            None => match spec.env.get(CONFIG_ENV) {
+                Some(content) => serde_json::from_str(content)
+                    .map_err(|e| Error::InvalidInput(format!("{CONFIG_ENV} is not JSON: {e}")))?,
+                None => spec
+                    .model
+                    .as_ref()
+                    .map_or_else(|| json!({}), |model| json!({ "model": model })),
+            },
         };
-        if let Some(config) = config {
-            cmd.env("OPENCODE_CONFIG_CONTENT", config.to_string());
-        }
+        let Some(fields) = config.as_object_mut() else {
+            return Err(Error::InvalidInput(format!(
+                "{CONFIG_ENV} is not a JSON object"
+            )));
+        };
+        // OpenCode's own default allows every tool without asking, so the
+        // requests Sun answers by mode would never come.
+        let ask = json!({"edit": "ask", "bash": "ask", "webfetch": "ask"});
+        fields.insert("permission".into(), ask);
+        cmd.env(CONFIG_ENV, config.to_string());
         let (tx, mut rx) = watch::channel(None);
         let mcp_servers = match &spec.mcp_config {
             Some(path) => crate::mcp::read_mcp_config(path)?
@@ -307,19 +339,23 @@ impl AcpStream {
         self
     }
 
-    /// Answers permission requests by Sun's `mode` names: reads always,
-    /// edits unless `default`/`plan`, everything on `bypass_permissions`,
-    /// shell commands only with `allow_shell`.
+    /// Answers permission requests by Sun's `mode` names (the module doc
+    /// has the table): reads always, edits on `accept_edits`/`auto`,
+    /// everything on `bypass_permissions`, shell commands with `allow_shell`
+    /// except in `plan`.
     pub fn with_permissions(mut self, mode: PermissionMode, allow_shell: bool) -> Self {
         let mut kinds = vec!["read", "search", "think"];
         match mode {
             PermissionMode::BypassPermissions => {
                 kinds.extend(["edit", "delete", "move", "execute", "fetch", "other"]);
             }
-            PermissionMode::AcceptEdits => kinds.extend(["edit", "delete", "move"]),
+            // Not reported (module doc): only a host default reaches `auto`.
+            PermissionMode::AcceptEdits | PermissionMode::Auto => {
+                kinds.extend(["edit", "delete", "move"]);
+            }
             PermissionMode::Default | PermissionMode::Plan => {}
         }
-        if allow_shell && !kinds.contains(&"execute") {
+        if allow_shell && mode != PermissionMode::Plan && !kinds.contains(&"execute") {
             kinds.push("execute");
         }
         self.allowed_kinds = kinds;
@@ -633,5 +669,26 @@ mod tests {
         let mut all =
             AcpStream::default().with_permissions(PermissionMode::BypassPermissions, false);
         assert_eq!(reply(&mut all, "fetch"), "a");
+    }
+
+    /// BLO-163: the mode table of the module doc, kind by kind, with
+    /// `allow_shell` on (the gates' commands), for every mode.
+    #[test]
+    fn every_mode_answers_by_its_table() {
+        let kinds = ["read", "edit", "execute", "fetch"];
+        let table = [
+            (PermissionMode::Plan, ["a", "r", "r", "r"]),
+            (PermissionMode::Default, ["a", "r", "a", "r"]),
+            (PermissionMode::AcceptEdits, ["a", "a", "a", "r"]),
+            (PermissionMode::Auto, ["a", "a", "a", "r"]),
+            (PermissionMode::BypassPermissions, ["a", "a", "a", "a"]),
+        ];
+        assert_eq!(table.len(), PermissionMode::ALL.len());
+        for (mode, answers) in table {
+            let mut stream = AcpStream::default().with_permissions(mode, true);
+            for (kind, answer) in kinds.into_iter().zip(answers) {
+                assert_eq!(reply(&mut stream, kind), answer, "{mode} {kind}");
+            }
+        }
     }
 }

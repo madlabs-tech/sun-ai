@@ -109,6 +109,7 @@ pub fn adapters(config: &Config) -> Vec<Arc<dyn RuntimeAdapter>> {
     claude.allowed_tools = policy.allowed_tools.clone();
     claude.template_dir = policy.template_dir.clone();
     let mut codex = sun_runtime::Codex::default();
+    codex.permission_mode = policy.permission_mode;
     codex.template_dir = policy.template_dir.clone();
     let mut opencode = sun_runtime::OpenCode::default();
     opencode.permission_mode = policy.permission_mode;

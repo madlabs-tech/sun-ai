@@ -530,3 +530,129 @@ async fn fan_out_reaches_an_agent_that_already_has_a_system_workflow() {
             .unwrap();
     assert_eq!(agent_mode.as_deref(), Some("plan"));
 }
+
+/// BLO-166 case 6 (BLO-162 PR 1): `20261109090000_direct_chat` replayed on a
+/// database from before it, holding an agent's system workflow (with a
+/// version) and a person's workflow. Both rows get `direct_chat = 0`, keep
+/// their owner and their place (listed / hidden), and a second open applies
+/// nothing.
+#[tokio::test]
+async fn direct_chat_migration_leaves_existing_workflows_owned_as_before() {
+    use sqlx::migrate::Migrate;
+    use sun_core::model::WorkflowOwner;
+    use sun_store::{AgentRepo, WorkflowRepo};
+
+    const DIRECT_CHAT: i64 = 20261109090000;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    conn.ensure_migrations_table().await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    assert!(
+        migrator.iter().any(|m| m.version == DIRECT_CHAT),
+        "the migration under test exists"
+    );
+    for migration in migrator.iter().filter(|m| m.version < DIRECT_CHAT) {
+        conn.apply(migration).await.unwrap();
+    }
+    let workspace = "00000000000000000000000001";
+    let agent = sun_core::AgentId::generate();
+    let system = sun_core::WorkflowId::generate();
+    let mine = sun_core::WorkflowId::generate();
+    sqlx::query(
+        "INSERT INTO agent (id, workspace_id, name, runtime_chain, created_at)
+         VALUES ($1, $2, 'ada', '[\"claude-code\"]', '2026-10-17T10:00:00+00:00')",
+    )
+    .bind(agent.to_string())
+    .bind(workspace)
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow (id, name, workspace_id, system_agent_id) VALUES ($1, 'ada', $2, $3)",
+    )
+    .bind(system.to_string())
+    .bind(workspace)
+    .bind(agent.to_string())
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO workflow (id, name, workspace_id) VALUES ($1, 'mine', $2)")
+        .bind(mine.to_string())
+        .bind(workspace)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO workflow_version (workflow_id, version, source_yaml, schema_hash)
+         VALUES ($1, 1, 'name: agent', 'h1')",
+    )
+    .bind(system.to_string())
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+
+    let snapshot = || async {
+        let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+        let rows: Vec<(String, Option<String>, i64)> =
+            sqlx::query_as("SELECT id, system_agent_id, direct_chat FROM workflow ORDER BY id")
+                .fetch_all(&mut conn)
+                .await
+                .unwrap();
+        let applied: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&mut conn)
+                .await
+                .unwrap();
+        conn.close().await.unwrap();
+        (rows, applied)
+    };
+
+    let store = Store::open(dir.path()).await.unwrap();
+    let (rows, applied) = snapshot().await;
+    let mut want = vec![
+        (system.to_string(), Some(agent.to_string()), 0),
+        (mine.to_string(), None, 0),
+    ];
+    want.sort();
+    assert_eq!(rows, want, "existing rows default to direct_chat = 0");
+    assert_eq!(
+        applied.iter().filter(|v| **v == DIRECT_CHAT).count(),
+        1,
+        "{applied:?}"
+    );
+    let mut tx = store.read().await.unwrap();
+    assert_eq!(
+        tx.workflow_owner(system).await.unwrap(),
+        WorkflowOwner::Agent(agent)
+    );
+    assert_eq!(
+        tx.workflow_owner(mine).await.unwrap(),
+        WorkflowOwner::Person
+    );
+    let hidden: Vec<_> = tx
+        .hidden_workflows()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(hidden, [system]);
+    let listed: Vec<_> = tx
+        .workflows()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(listed, [mine]);
+    let version = tx.latest_workflow_version(system).await.unwrap().unwrap();
+    assert_eq!(version.version, 1, "versions untouched");
+    drop(tx);
+    drop(store);
+
+    // A second open runs nothing again and changes no row.
+    let _store = Store::open(dir.path()).await.unwrap();
+    assert_eq!(snapshot().await, (rows, applied), "no migration ran twice");
+}

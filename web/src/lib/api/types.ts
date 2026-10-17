@@ -234,7 +234,7 @@ export interface TaskPatch {
 /** Who works on a task. */
 export type Assignee = { kind: 'agent' | 'workflow'; id: Ulid };
 
-export type ActivityKind = 'comment' | 'status' | 'priority' | 'assignee' | 'project' | 'title' | 'description' | 'created' | 'run' | 'pull_request';
+export type ActivityKind = 'comment' | 'status' | 'priority' | 'assignee' | 'project' | 'title' | 'description' | 'created' | 'run' | 'pull_request' | 'settings';
 
 /** GET /api/v1/tasks/{id}/activity — the append-only log of a task (SSE with `Accept: text/event-stream`). */
 export interface TaskActivity {
@@ -245,7 +245,8 @@ export interface TaskActivity {
   kind: ActivityKind;
   /** The person's member row; `null` for the engine, or the token holder (see `body.by`) */
   actor_member_id: Ulid | null;
-  /** `comment`: `{text, mentions?}` (`mentions`: agent ids), an agent's reply `{text, by_agent, run_id}`; `status`/`priority`/`title`/`project`: `{from, to}` (a merge-driven move adds
+  /** `comment`: `{text, mentions?}` (`mentions`: agent ids), an agent's reply `{text, by_agent, run_id}`, a tool's in a chat
+   *  without an agent `{text, by_tool, run_id}`; `settings` (such a chat switched): `{from, to}`, each `DirectSettings`; `status`/`priority`/`title`/`project`: `{from, to}` (a merge-driven move adds
    *  `source: pr_automation, pull_requests: "#12, #15"`); `created`: `{status}`; `run`: `{run_id, trigger}`;
    *  `pull_request`: `{action: linked|unlinked|merged, number, url, repo, source}`.
    *  A person's entry also has `by`, the audit actor (e.g. `user:ana`); without it the engine did it. */
@@ -253,12 +254,13 @@ export interface TaskActivity {
   created_at: Timestamp;
 }
 
-/** GET /api/v1/chats?workspace= — a person's own conversation with an agent: a hidden task whose messages are
- *  its comments (POST /tasks/{id}/comments, GET /tasks/{id}/activity) and whose replies are the agent's. */
+/** GET /api/v1/chats?workspace= — a person's own conversation with an agent, or straight with a tool: a hidden task
+ *  whose messages are its comments (POST /tasks/{id}/comments, GET /tasks/{id}/activity) and whose replies are the agent's (the tool's). */
 export interface Chat {
   id: Ulid;
   workspace_id: Ulid;
-  agent_id: Ulid;
+  /** `null`: a chat without an agent, see `runtime` */
+  agent_id: Ulid | null;
   title: string;
   status: TaskStatus;
   /** Its latest run; `status` is the engine's (`queued`, `running`, `succeeded`, `failed`, …). */
@@ -267,8 +269,19 @@ export interface Chat {
   last: TaskActivity | null;
   /** While its run is queued: the keys of the agent's tasks holding the slots. */
   queued_behind: string[];
+  /** Without an agent: the tool it talks to, and how; `null` with an agent */
+  runtime: ChainSpec | null;
+  permission_mode: PermissionMode | null;
   created_at: Timestamp;
   updated_at: Timestamp;
+}
+
+/** A chat without an agent's settings: POST /chats `{workspace_id, ...}`, PATCH /chats/{id} (another model, effort or
+ *  mode only; another tool, credential or host is a new chat). */
+export interface DirectSettings {
+  runtime: ChainSpec;
+  /** `null`: the host's default; `bypass_permissions` needs `manage_runtimes` and `allow_bypass` */
+  permission_mode: PermissionMode | null;
 }
 
 /** GET /api/v1/tasks/{id}/runs — the task's runs, oldest first. */
@@ -644,10 +657,12 @@ export interface Runtime {
   effort_options: EffortLevel[];
   /** Models the CLI lists, when it scopes effort per model (Codex); a model not here uses `effort_options` */
   models: ModelEffort[];
+  /** The permission modes the CLI on this host can enforce; `null` for a key-backed runtime (any host with the tool) */
+  permission_modes: PermissionMode[] | null;
 }
 
-/** Claude Code's permission modes; every adapter maps them. */
-export const PERMISSION_MODES = ['default', 'accept_edits', 'plan', 'bypass_permissions'] as const;
+/** Sun's permission modes (Claude Code's set); every adapter maps them, and each host reports which its CLI can enforce. */
+export const PERMISSION_MODES = ['default', 'accept_edits', 'plan', 'auto', 'bypass_permissions'] as const;
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
 
 /** GET /api/v1/hosts */

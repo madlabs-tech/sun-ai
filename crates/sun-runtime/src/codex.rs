@@ -6,6 +6,28 @@
 //! turn completes. The resumed processes are chained into one event stream
 //! with a single `Exited` at the end. Runs on whatever login the CLI has
 //! (BYO runtime).
+//!
+//! Permission modes ([`mode_args`]), from 0.160.0's `codex exec --help`.
+//! `exec` is headless: nobody can answer an approval, so every mode but
+//! `auto` sets `approval_policy="never"` and the sandbox alone bounds the
+//! agent (a refused write comes back to the model as an error). The host
+//! reports only the modes with an exact Codex equivalent
+//! ([`parse_permission_modes_help`]):
+//!
+//! | Sun mode | Codex flags | Effect |
+//! |---|---|---|
+//! | `plan` | `sandbox_mode="read-only"`, `approval_policy="never"` | reads and runs read-only commands; never writes |
+//! | `default` | same as `plan` | "ask first" with nobody to ask: refused, as on Claude Code headless |
+//! | `auto` | `--approve-for-me` | workspace-write; escalations go to Codex's automatic reviewer |
+//! | `bypass_permissions` | `--dangerously-bypass-approvals-and-sandbox` | everything, no sandbox (container or vm only) |
+//!
+//! `accept_edits` is not reported: Codex's sandbox bounds edits and
+//! commands alike, so it can't allow one without the other. A session can
+//! still get it from a host's own `runtimes.permission_mode` default (or an
+//! agent saved before the save-time check); it then runs workspace-write
+//! with `approval_policy="never"`, as every Codex session did before
+//! BLO-163. `auto` is reported only when the installed `codex exec --help`
+//! lists `--approve-for-me`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -15,8 +37,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Value, json};
 use sun_core::{
-    BoxStream, EffortCatalog, Error, HostCtx, ModelEffort, Readiness, Result, Role, RuntimeAdapter,
-    SessionHandle, SessionId, SessionSpec, Steer, StopMode, SunEvent, Todo, TodoStatus, Transcript,
+    BoxStream, EffortCatalog, Error, HostCtx, ModelEffort, PermissionMode, Readiness, Result, Role,
+    RuntimeAdapter, SessionHandle, SessionId, SessionSpec, Steer, StopMode, SunEvent, Todo,
+    TodoStatus, Transcript,
 };
 use tokio::process::Command;
 use tokio::sync::{mpsc, watch};
@@ -34,8 +57,8 @@ pub const ID: &str = "codex";
 pub struct Codex {
     /// The `codex` binary (a bare name is looked up on `PATH`).
     pub binary: PathBuf,
-    /// `sandbox_mode` for sessions; policy may pick another.
-    pub sandbox: String,
+    /// The mode of sessions whose spec names none ([`mode_args`]).
+    pub permission_mode: PermissionMode,
     /// Where a user's `codex.md` envelope template overrides the built-in
     /// one (sun.yaml `runtimes.template_dir`).
     pub template_dir: Option<PathBuf>,
@@ -53,7 +76,7 @@ impl Codex {
     pub fn new(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: binary.into(),
-            sandbox: "workspace-write".into(),
+            permission_mode: PermissionMode::AcceptEdits,
             template_dir: None,
             sessions: Sessions::default(),
         }
@@ -68,12 +91,12 @@ impl Codex {
 #[derive(Clone)]
 struct Launch {
     binary: PathBuf,
-    sandbox: String,
+    mode: PermissionMode,
     spec: SessionSpec,
 }
 
 impl Launch {
-    /// `codex exec [--skip-git-repo-check] --json -c … [resume <thread>] -- <prompt>`.
+    /// `codex exec [--skip-git-repo-check] --json <mode> -c … [resume <thread>] -- <prompt>`.
     async fn spawn(
         &self,
         resume: Option<&str>,
@@ -88,8 +111,7 @@ impl Launch {
         if !in_git_repo(&self.spec.worktree) {
             cmd.arg("--skip-git-repo-check");
         }
-        cmd.args(["--json", "-c"])
-            .arg(format!("sandbox_mode={}", json!(self.sandbox)));
+        cmd.arg("--json").args(mode_args(self.mode));
         if let Some(model) = &self.spec.model {
             cmd.arg("-c").arg(format!("model={}", json!(model)));
         }
@@ -116,6 +138,36 @@ impl Launch {
         let secrets = self.spec.env.values().cloned().collect();
         Process::spawn(ID, cmd, normalizer, None, secrets).await
     }
+}
+
+/// Sun's permission mode → `codex exec` flags (Adapter boundary; the
+/// module doc has the table). Every turn of a session gets the same ones.
+pub fn mode_args(mode: PermissionMode) -> &'static [&'static str] {
+    const NEVER: &str = "approval_policy=\"never\"";
+    match mode {
+        PermissionMode::Plan | PermissionMode::Default => {
+            &["-c", "sandbox_mode=\"read-only\"", "-c", NEVER]
+        }
+        // Not reported (module doc): only a host default reaches it.
+        PermissionMode::AcceptEdits => &["-c", "sandbox_mode=\"workspace-write\"", "-c", NEVER],
+        PermissionMode::Auto => &["--approve-for-me"],
+        PermissionMode::BypassPermissions => &["--dangerously-bypass-approvals-and-sandbox"],
+    }
+}
+
+/// `codex exec --help` → the Sun modes Codex enforces exactly: `plan`,
+/// `default` and `bypass_permissions` always, `auto` with
+/// `--approve-for-me`, never `accept_edits` (the module doc says why).
+pub fn parse_permission_modes_help(help: &str) -> Vec<PermissionMode> {
+    let auto = help.contains("--approve-for-me");
+    PermissionMode::ALL
+        .into_iter()
+        .filter(|mode| match mode {
+            PermissionMode::AcceptEdits => false,
+            PermissionMode::Auto => auto,
+            _ => true,
+        })
+        .collect()
 }
 
 /// Whether `dir` is inside a git work tree as Codex checks it: a `.git`
@@ -257,14 +309,26 @@ impl RuntimeAdapter for Codex {
         }
     }
 
+    async fn permission_modes(&self, _host: &HostCtx) -> Vec<PermissionMode> {
+        process::run(&self.binary, &["exec", "--help"])
+            .await
+            .map_or_else(
+                |_| parse_permission_modes_help(""),
+                |out| parse_permission_modes_help(&String::from_utf8_lossy(&out.stdout)),
+            )
+    }
+
     async fn start(&self, mut spec: SessionSpec) -> Result<SessionHandle> {
+        let mode = PermissionMode::parse_opt(spec.permission_mode.as_deref())
+            .map_err(|why| Error::InvalidInput(format!("session permission_mode: {why}")))?
+            .unwrap_or(self.permission_mode);
         crate::byo_key::native_env(&mut spec, ID)?;
         crate::mcp::native_env(&mut spec, ID)?;
         let session_id = spec.session_id;
         let envelope = envelope::first_prompt(ID, self.template_dir.as_deref(), &spec)?;
         let launch = Launch {
             binary: self.binary.clone(),
-            sandbox: self.sandbox.clone(),
+            mode,
             spec,
         };
         // A resumed thread keeps its id, known before `thread.started`.

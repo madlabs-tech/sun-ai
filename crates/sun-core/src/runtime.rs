@@ -39,6 +39,13 @@ pub trait RuntimeAdapter: Send + Sync {
         EffortCatalog::default()
     }
 
+    /// The [`PermissionMode`]s the installed CLI can enforce, probed with
+    /// [`readiness`](Self::readiness); the agent form and save-time checks
+    /// offer only these. Default: [`PermissionMode::LEGACY`].
+    async fn permission_modes(&self, _host: &HostCtx) -> Vec<PermissionMode> {
+        PermissionMode::legacy()
+    }
+
     /// Starts a session in `spec.worktree` with the rendered envelope.
     async fn start(&self, spec: SessionSpec) -> Result<SessionHandle>;
 
@@ -193,10 +200,17 @@ pub struct Envelope {
 }
 
 /// Sun's permission policy vocabulary, which every adapter maps to its CLI
-/// (Claude Code's `--permission-mode` spelling lives only in its adapter;
-/// OpenCode answers its permission requests by it).
-/// `bypass_permissions` needs the operator's `allow_bypass`.
-pub const PERMISSION_MODES: [&str; 4] = ["default", "accept_edits", "plan", "bypass_permissions"];
+/// (each adapter's module doc has its table). Strictness, most restrictive
+/// first: `plan` < `default` < `accept_edits` < `auto` < `bypass_permissions`.
+/// Only `bypass_permissions` needs the operator's `allow_bypass` and an
+/// isolated exec env; `auto` is not a bypass.
+pub const PERMISSION_MODES: [&str; 5] = [
+    "default",
+    "accept_edits",
+    "plan",
+    "auto",
+    "bypass_permissions",
+];
 
 /// One of [`PERMISSION_MODES`], parsed. Every mode a session runs in passes
 /// through this type: a spelling outside the list (`bypassPermissions`,
@@ -211,18 +225,36 @@ pub enum PermissionMode {
     AcceptEdits,
     /// Read-only planning.
     Plan,
+    /// The CLI approves what it judges safe itself and refuses the rest
+    /// (Claude Code's `auto`, Codex's automatic reviewer).
+    Auto,
     /// Everything without asking: only in a container or VM.
     BypassPermissions,
 }
 
 impl PermissionMode {
     /// Every mode, in [`PERMISSION_MODES`] order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
+        Self::Default,
+        Self::AcceptEdits,
+        Self::Plan,
+        Self::Auto,
+        Self::BypassPermissions,
+    ];
+
+    /// The modes every adapter took before `auto`: what a host that reports
+    /// no `permission_modes` (2.1 and older) supports.
+    pub const LEGACY: [Self; 4] = [
         Self::Default,
         Self::AcceptEdits,
         Self::Plan,
         Self::BypassPermissions,
     ];
+
+    /// [`Self::LEGACY`] as a `Vec`, the serde default of a capability report.
+    pub fn legacy() -> Vec<Self> {
+        Self::LEGACY.to_vec()
+    }
 
     /// Sun's name of the mode, as in [`PERMISSION_MODES`].
     pub fn as_str(self) -> &'static str {
@@ -230,6 +262,7 @@ impl PermissionMode {
             Self::Default => "default",
             Self::AcceptEdits => "accept_edits",
             Self::Plan => "plan",
+            Self::Auto => "auto",
             Self::BypassPermissions => "bypass_permissions",
         }
     }
@@ -633,10 +666,12 @@ mod tests {
         assert_eq!(bypass_refusal(bypass, &container), None);
         let bare = bypass_refusal(bypass, &ExecEnvSpec::Bare).unwrap();
         assert!(bare.contains("`bare`"), "{bare}");
+        // `auto` is not a bypass: it runs bare.
         let others = [
             PermissionMode::AcceptEdits,
             PermissionMode::Plan,
             PermissionMode::Default,
+            PermissionMode::Auto,
         ];
         for mode in others.map(Some).into_iter().chain([None]) {
             assert_eq!(bypass_refusal(mode, &ExecEnvSpec::Bare), None);
