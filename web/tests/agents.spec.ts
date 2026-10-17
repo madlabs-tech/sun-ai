@@ -171,6 +171,40 @@ test('agent form: host, model and effort per chain entry, from the hosts’ cata
   await expect(edit.getByRole('group', { name: 'Settings of claude-code' }).getByLabel('Host')).toHaveValue('');
 });
 
+// The Agent dialog is ~430 px wide at any viewport: each picker shows its widest label in full.
+test('1280 px: the chain pickers show their labels in full', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'New agent' }).click();
+  const dialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'New agent' }) });
+  const chain = dialog.getByRole('combobox', { name: 'Add to Runtimes, in failover order' });
+  await chain.fill('codex');
+  await chain.press('Enter');
+  const codex = dialog.getByRole('group', { name: 'Settings of codex' });
+  for (const field of ['Host', 'Model', 'Effort']) {
+    const clipped = await codex.getByLabel(field).evaluate((el: HTMLSelectElement | HTMLInputElement) => {
+      const labels = el instanceof HTMLSelectElement ? [...el.options].map((o) => o.text) : [el.placeholder];
+      const s = getComputedStyle(el);
+      const probe = Object.assign(document.createElement('span'), { style: `position:absolute;white-space:pre;font:${s.font}` });
+      document.body.append(probe);
+      const room = el.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight);
+      const wide = labels.filter((l) => ((probe.textContent = l), probe.getBoundingClientRect().width > room));
+      probe.remove();
+      return wide;
+    });
+    expect(clipped, field).toEqual([]);
+  }
+});
+
+test('a legacy bypass agent says “Anything” is off and leaving it is one-way', async ({ page }) => {
+  await open(page, '&no_bypass');
+  await row(page, 'Night Owl').getByRole('button', { name: 'Edit Night Owl' }).click();
+  const edit = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Edit Night Owl' }) });
+  await expect(edit.getByLabel('Permissions')).toHaveValue('bypass_permissions');
+  await expect(edit).toContainText('“Anything” is off on this deployment');
+  await expect(edit).toContainText('you can’t pick it back');
+  await expect(edit).not.toContainText('Runs any command without asking.');
+});
+
 test('360 px: the chain settings fit', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 740 });
   await open(page);

@@ -124,9 +124,4 @@
     gap: var(--space-3);
     grid-template-columns: 1fr;
   }
-  @media (min-width: 640px) {
-    .chain-entry__fields {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-  }
 </style>

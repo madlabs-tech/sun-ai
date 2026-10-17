@@ -29,6 +29,8 @@ const agents: Agent[] = [
   agent('Ada', 'Fixes bugs with a failing test first.', 'Reproduce the bug in a failing test, fix it, keep the diff small.', ['claude-code', 'codex'], ['tdd'], 2),
   agent('Night Owl', 'Runs long refactors overnight.', '', ['gemini-cli'], [], 0),
 ];
+// `?no_bypass`: Night Owl was saved in bypass before the operator turned it off.
+if (new URLSearchParams(location.search).has('no_bypass')) agents[1].permission_mode = 'bypass_permissions';
 
 /** An agent by id, archived ones too (a task keeps its agent). */
 export const find_agent = (id: string) => agents.find((a) => a.id === id);
