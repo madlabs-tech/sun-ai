@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::{Extension, Json};
 use serde::Serialize;
 use sun_core::model::Agent;
-use sun_core::{AgentId, Timestamp, WorkspaceId};
+use sun_core::{AgentId, ChainEntry, HostId, HostLink, Timestamp, WorkspaceId};
 use sun_engine::AgentFields;
 
 use crate::Api;
@@ -29,7 +29,7 @@ pub(crate) struct AgentView {
     name: String,
     description: String,
     instructions: String,
-    runtime_chain: Vec<String>,
+    runtime_chain: Vec<ChainEntry>,
     skill_ids: Vec<String>,
     created_at: Timestamp,
     archived_at: Option<Timestamp>,
@@ -50,8 +50,18 @@ async fn view(
 ) -> ApiResult<AgentView> {
     let mut reasons = Vec::new();
     let mut ready = false;
-    for name in &agent.runtime_chain {
-        let reason = match readiness_of(api, agent.workspace_id, name.clone(), online).await {
+    for entry in &agent.runtime_chain {
+        let name = entry.name();
+        // A pinned entry runs only on its host.
+        let pin_online = entry.host().map(|pin| {
+            pin.parse::<HostId>()
+                .is_ok_and(|host| api.hosts.is_online(host))
+        });
+        if pin_online == Some(false) {
+            reasons.push(format!("{name}: its host is offline"));
+            continue;
+        }
+        let reason = match readiness_of(api, agent.workspace_id, name.to_owned(), online).await {
             Ok(r) if r.installed && r.logged_in => {
                 ready = true;
                 break;
@@ -103,7 +113,10 @@ pub(crate) async fn list(
 }
 
 /// `POST /agents?workspace= {name, runtime_chain, description?,
-/// instructions?, skill_ids?}`.
+/// instructions?, skill_ids?}`. A chain entry is a runtime name or
+/// `{tool, credential?, host?, model?, effort?}`; an unknown credential, a
+/// host without the tool, or an effort outside the host's catalog is
+/// `422 invalid_input` naming the field (`runtime_chain[1].effort: ...`).
 pub(crate) async fn create(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,

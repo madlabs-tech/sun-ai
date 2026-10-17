@@ -608,3 +608,72 @@ fn watchdog_cron_and_send_back_defaults_are_parsed() {
         "{errors:#?}"
     );
 }
+
+/// A chain entry is a name or `{tool, credential, host, model, effort}`;
+/// both shapes come back out of the parse as they were written, so a
+/// committed YAML chain round-trips unchanged, and a string-only chain
+/// keeps its hash.
+#[test]
+fn structured_chain_entries_parse_and_round_trip() {
+    let step = "steps: [{id: a, type: agent, prompt: p}]\n";
+    let yaml = format!(
+        "name: wf\nruntime:\n  chain:\n    - claude-code\n    - {{tool: opencode, credential: ollama-qwen, model: \"qwen2.5-coder:7b\"}}\n    - {{tool: codex, host: 01JHOSTID, model: gpt-5-codex, effort: high}}\n{step}"
+    );
+    let chain = parse(&yaml).unwrap().runtime.unwrap().chain;
+    let names: Vec<&str> = chain.iter().map(|e| e.name()).collect();
+    assert_eq!(names, ["claude-code", "ollama-qwen", "codex"]);
+    let json = serde_json::to_value(&chain).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!([
+            "claude-code",
+            {"tool": "opencode", "credential": "ollama-qwen", "model": "qwen2.5-coder:7b"},
+            {"tool": "codex", "host": "01JHOSTID", "model": "gpt-5-codex", "effort": "high"},
+        ])
+    );
+    // The same chain written back as YAML parses to the same chain.
+    let again = format!(
+        "name: wf\nruntime:\n  chain: {}\n{step}",
+        serde_json::to_string(&chain).unwrap()
+    );
+    assert_eq!(parse(&again).unwrap().runtime.unwrap().chain, chain);
+    // A string-only chain hashes as it did before entries had a shape.
+    let plain = format!("name: wf\nruntime: {{chain: [claude-code, codex]}}\n{step}");
+    let bare = parse(&plain).unwrap();
+    assert_eq!(
+        serde_json::to_value(&bare.runtime.as_ref().unwrap().chain).unwrap(),
+        serde_json::json!(["claude-code", "codex"])
+    );
+}
+
+#[test]
+fn structured_chain_entries_are_checked() {
+    let step = "steps: [{id: a, type: agent, prompt: p}]\n";
+    let chain = |entry: &str| format!("name: wf\nruntime: {{chain: [{entry}]}}\n{step}");
+    assert_error(
+        &chain("{tool: codex, permission_mode: plan}"),
+        "2:33: unknown field `permission_mode`, expected one of tool, credential",
+    );
+    assert_error(&chain("{model: opus}"), "2:20: missing field `tool`");
+    assert_error(&chain("{tool: Codex}"), "2:19: invalid `tool` `Codex`");
+    assert_error(
+        &chain("{tool: codex, effort: \"--yolo\"}"),
+        "2:19: invalid `effort` `--yolo`",
+    );
+    assert_error(
+        &chain("{tool: claude-code, model: \"opus; rm -rf /\"}"),
+        "2:19: invalid `model`",
+    );
+    assert_error(
+        &chain("{tool: opencode, credential: Bad Key}"),
+        "2:19: invalid `credential`",
+    );
+    assert_error(
+        &chain("codex, {tool: codex, effort: high}"),
+        "2:26: runtime `codex` appears twice",
+    );
+    assert_error(
+        &chain("ollama-qwen, {tool: opencode, credential: ollama-qwen}"),
+        "2:32: runtime `ollama-qwen` appears twice",
+    );
+}

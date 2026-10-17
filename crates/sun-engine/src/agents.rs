@@ -41,8 +41,9 @@ pub struct AgentFields {
     pub description: Option<String>,
     /// Its prompt, at most 20 000 characters.
     pub instructions: Option<String>,
-    /// Runtime names in failover order; 1–32.
-    pub runtime_chain: Option<Vec<String>>,
+    /// Runtimes in failover order, names or `{tool, credential, host,
+    /// model, effort}`; 1–32.
+    pub runtime_chain: Option<Vec<sun_core::ChainEntry>>,
     /// Skill names (catalog ids); at most 32.
     pub skill_ids: Option<Vec<String>>,
 }
@@ -263,6 +264,8 @@ impl Engine {
         })?;
         let mut tx = self.store.begin().await?;
         tx.get_workspace(workspace).await?;
+        crate::chain_check::check(&mut tx, workspace, &agent.runtime_chain, "runtime_chain")
+            .await?;
         plan.check(Quota::Agents, tx.agents(Some(workspace)).await?.len())?;
         tx.insert_agent(&agent).await?;
         audit(&mut tx, &agent, actor, "created").await?;
@@ -289,6 +292,11 @@ impl Engine {
             )));
         }
         let agent = fields.apply(before.clone())?;
+        // A chain saved before stays as it is even if a host left since.
+        if agent.runtime_chain != before.runtime_chain {
+            let chain = &agent.runtime_chain;
+            crate::chain_check::check(&mut tx, agent.workspace_id, chain, "runtime_chain").await?;
+        }
         let (source, parsed) = system_source(&agent)?;
         for workflow in tx.system_workflows_of(id).await? {
             if tx.get_workflow(workflow).await?.name != agent.name {
@@ -342,7 +350,7 @@ mod tests {
             name: "Ada".into(),
             description: String::new(),
             instructions: instructions.into(),
-            runtime_chain: chain.iter().map(|r| r.to_string()).collect(),
+            runtime_chain: chain.iter().map(|r| (*r).into()).collect(),
             skill_ids: vec!["tdd".into()],
             created_at: chrono::Utc::now(),
             archived_at: None,
@@ -355,7 +363,7 @@ mod tests {
         assert_eq!(parsed.name, AGENT_STEP);
         assert_eq!(
             parsed.runtime.as_ref().map(|r| r.chain.clone()),
-            Some(vec!["claude-code".to_owned(), "codex".to_owned()])
+            Some(vec!["claude-code".into(), "codex".into()])
         );
         let [step] = parsed.steps.as_slice() else {
             panic!("{:?}", parsed.steps)

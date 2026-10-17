@@ -56,6 +56,7 @@ mod approval;
 mod attention;
 mod base;
 mod budget;
+mod chain_check;
 mod conversation;
 mod data_touched;
 mod device;

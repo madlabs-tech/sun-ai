@@ -730,8 +730,9 @@ pub struct Agent {
     pub description: String,
     /// Its prompt (at most 20 000 characters).
     pub instructions: String,
-    /// Runtime names in failover order (a workflow's `runtime.chain`); non-empty.
-    pub runtime_chain: Vec<String>,
+    /// Its runtimes in failover order (a workflow's `runtime.chain`):
+    /// names or `{tool, credential, host, model, effort}`; non-empty.
+    pub runtime_chain: Vec<crate::ChainEntry>,
     /// Skill names (catalog ids) installed into its sessions.
     pub skill_ids: Vec<String>,
     /// When it was created.
@@ -767,7 +768,7 @@ impl Agent {
 
     /// The runtime chain, or `InvalidInput` when it is empty or too long
     /// (names are checked by the workflow parser).
-    pub fn clean_chain(chain: Vec<String>) -> crate::Result<Vec<String>> {
+    pub fn clean_chain(chain: Vec<crate::ChainEntry>) -> crate::Result<Vec<crate::ChainEntry>> {
         if chain.is_empty() || chain.len() > Self::MAX_LIST {
             return Err(crate::Error::InvalidInput(format!(
                 "Pick 1 to {} runtimes for the agent.",
@@ -1220,6 +1221,19 @@ pub struct Host {
     /// They may attach it to their other workspaces.
     #[serde(default)]
     pub enrolled_by: Option<MemberId>,
+}
+
+impl Host {
+    /// The effort catalog the host last reported for `tool` (BLO-119);
+    /// empty when it reported none or the report doesn't parse.
+    pub fn effort_catalog(&self, tool: &str) -> crate::EffortCatalog {
+        let caps =
+            serde_json::from_value::<crate::host_protocol::Capabilities>(self.capabilities.clone());
+        caps.ok()
+            .and_then(|caps| caps.runtimes.into_iter().find(|r| r.adapter == tool))
+            .map(|r| r.effort)
+            .unwrap_or_default()
+    }
 }
 
 /// `host_runtime` — one tool (runtime adapter) on one host, projected from

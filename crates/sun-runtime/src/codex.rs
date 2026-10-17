@@ -86,6 +86,11 @@ impl Launch {
         if let Some(model) = &self.spec.model {
             cmd.arg("-c").arg(format!("model={}", json!(model)));
         }
+        if let Some(effort) = crate::effort::checked(self.spec.effort.as_deref())? {
+            let effort = json!(effort);
+            cmd.arg("-c")
+                .arg(format!("model_reasoning_effort={effort}"));
+        }
         // Codex reads MCP servers from config.toml; override per session.
         if let Some(path) = &self.spec.mcp_config {
             for server in crate::mcp::read_mcp_config(path)? {

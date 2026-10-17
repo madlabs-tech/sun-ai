@@ -46,6 +46,18 @@ pub fn level(value: &str, description: Option<String>) -> Option<EffortLevel> {
     })
 }
 
+/// A session's effort token, refused unless it is a plain token: the
+/// kernel checked it against the host's catalog, and this is the last line
+/// before it becomes a CLI argument.
+pub fn checked(effort: Option<&str>) -> sun_core::Result<Option<&str>> {
+    match effort {
+        Some(value) if level(value, None).is_none() => Err(sun_core::Error::InvalidInput(format!(
+            "session effort `{value}` is not an effort level"
+        ))),
+        other => Ok(other),
+    }
+}
+
 /// Every level any of `models` accepts, lowest first; tokens Sun doesn't
 /// know go last in the order first seen. Descriptions are per model, so
 /// none here.

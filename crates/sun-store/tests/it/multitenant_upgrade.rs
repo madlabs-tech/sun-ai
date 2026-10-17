@@ -247,7 +247,7 @@ async fn check(store: &Store) {
     let [copy] = tx.agents(Some(ops)).await.unwrap().try_into().unwrap();
     assert_eq!(
         (copy.name.as_str(), copy.runtime_chain.as_slice()),
-        ("Ada", &["or".to_owned()][..])
+        ("Ada", &[sun_core::ChainEntry::from("or")][..])
     );
     let t_ops = tx.get_task(T_OPS.parse().unwrap()).await.unwrap();
     assert_eq!(t_ops.assignee_agent_id, Some(copy.id));

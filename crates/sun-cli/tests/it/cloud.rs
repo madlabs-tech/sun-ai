@@ -111,6 +111,7 @@ fn spec() -> SessionSpec {
         envelope: String::new(),
         envelope_parts: None,
         model: None,
+        effort: None,
         mcp_config: None,
         env: BTreeMap::new(),
         exec_env: Default::default(),

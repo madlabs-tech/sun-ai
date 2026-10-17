@@ -288,3 +288,115 @@ async fn a_hidden_workspaces_workflow_is_no_assignee() {
     let (status, _) = call_as(app, &bob, "POST", "/api/v1/tasks", Some(sneak)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// TRD BLO-117 item 8 over HTTP: `/runtimes` carries each `(host, tool)`'s
+/// effort catalog for the form; `POST /agents` takes structured chain
+/// entries, refuses an effort the host doesn't offer naming the field, and
+/// stores and returns the chain unchanged; a workflow YAML with such
+/// entries comes back from the API as it was sent.
+#[tokio::test]
+async fn structured_chain_entries_over_http() {
+    let k = kernel().await;
+    let app = &k.app;
+    let mut hello = crate::api::kernel_host_hello(&k);
+    hello["protocol"] = json!("2.1");
+    hello["capabilities"]["runtimes"] = json!([{
+        "adapter": "fake",
+        "readiness": {"installed": true, "version": "1", "logged_in": true, "detail": null},
+        "effort_options": [
+            {"value": "low", "label": "Low"},
+            {"value": "xhigh", "label": "Extra high", "description": "Deepest"},
+        ],
+        "models": [{"id": "small", "label": "Small", "effort_options": [{"value": "low", "label": "Low"}]}],
+    }]);
+    let _socket = crate::api::connect_host(app, k.host, hello).await;
+
+    let (_, runtimes) = call(
+        app,
+        "GET",
+        &format!("/api/v1/runtimes?workspace={MAIN}"),
+        None,
+    )
+    .await;
+    let fake = runtimes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["tool"] == "fake")
+        .unwrap();
+    assert_eq!(fake["effort_options"][1]["label"], "Extra high", "{fake}");
+    assert_eq!(fake["models"][0]["id"], "small");
+
+    let host = k.host.to_string();
+    for (chain, field) in [
+        (
+            json!([{"tool": "fake", "effort": "max"}]),
+            "runtime_chain[0].effort",
+        ),
+        (
+            json!([{"tool": "fake", "model": "small", "effort": "xhigh"}]),
+            "runtime_chain[0].effort",
+        ),
+        (
+            json!([{"tool": "fake", "credential": "nope"}]),
+            "runtime_chain[0].credential",
+        ),
+        (
+            json!([{"tool": "fake", "host": "01J000000000000000000HOST0"}]),
+            "runtime_chain[0].host",
+        ),
+    ] {
+        let body = json!({ "name": "Ada", "runtime_chain": chain });
+        let (status, error) = call(app, "POST", "/api/v1/agents", Some(body)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{chain}");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains(&format!(" {field}: ")),
+            "{chain}: {message}"
+        );
+    }
+    let chain = json!([
+        "codex",
+        {"tool": "fake", "host": host, "model": "big", "effort": "xhigh"},
+    ]);
+    let body = json!({ "name": "Ada", "runtime_chain": chain });
+    let (status, ada) = call(app, "POST", "/api/v1/agents", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{ada}");
+    assert_eq!(ada["runtime_chain"], chain);
+    let (_, listed) = call(
+        app,
+        "GET",
+        &format!("/api/v1/agents?workspace={MAIN}"),
+        None,
+    )
+    .await;
+    assert_eq!(listed[0]["runtime_chain"], chain);
+    assert_eq!(listed[0]["ready"], true, "{listed}");
+
+    // YAML → API → stored → YAML unchanged.
+    let yaml = format!(
+        "name: pinned\nruntime:\n  chain:\n    - claude-code\n    - {{tool: fake, host: {host}, effort: low}}\nsteps:\n  - {{id: a, type: agent, prompt: p}}\n"
+    );
+    let body = json!({ "source_yaml": yaml });
+    let (status, saved) = call(app, "POST", "/api/v1/workflows", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{saved}");
+    let path = format!("/api/v1/workflows/{}", saved["id"].as_str().unwrap());
+    let (_, read) = call(app, "GET", &path, None).await;
+    assert_eq!(read["source_yaml"], yaml);
+    let bad = yaml.replace("effort: low", "effort: max");
+    let (status, error) = call(
+        app,
+        "POST",
+        "/api/v1/workflows",
+        Some(json!({ "source_yaml": bad })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("runtime.chain[1].effort"),
+        "{error}"
+    );
+}

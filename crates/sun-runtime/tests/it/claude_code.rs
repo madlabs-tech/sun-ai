@@ -268,6 +268,7 @@ fn spec(dir: &Path, env: &[(&str, &str)]) -> SessionSpec {
         envelope: "Create hello.txt".into(),
         envelope_parts: None,
         model: Some("haiku".into()),
+        effort: Some("high".into()),
         mcp_config: None,
         env: vars,
         exec_env: Default::default(),
@@ -324,7 +325,7 @@ async fn live_run_matches_replay_and_passes_the_envelope() {
         args.contains(&format!("--session-id {}", native_session_id(session_id))),
         "{args}"
     );
-    assert!(args.contains("--model haiku"), "{args}");
+    assert!(args.contains("--model haiku --effort high"), "{args}");
     assert!(args.contains("--permission-mode acceptEdits"), "{args}");
     // Sun's own MCP tools run without a permission prompt.
     assert!(args.contains("--allowedTools mcp__sun --model"), "{args}");
@@ -589,4 +590,16 @@ async fn envelope_user_template_reaches_the_first_prompt() {
     std::fs::write(templates.join("claude-code.md"), "{{task}} {{gate}}").unwrap();
     let err = adapter.start(spec).await.unwrap_err();
     assert!(err.to_string().contains("{{gate}}"), "{err}");
+}
+
+/// The kernel checks effort against the host's catalog; the adapter is the
+/// last line: a value that isn't a plain token never becomes an argument.
+#[tokio::test]
+async fn an_effort_that_is_not_a_token_never_reaches_the_cli() {
+    let dir = sandbox("bad-effort");
+    let adapter = ClaudeCode::new(dir.join("claude"));
+    let mut spec = spec(&dir, &[]);
+    spec.effort = Some("--dangerously-skip-permissions".into());
+    assert!(adapter.start(spec).await.is_err());
+    assert!(!dir.join("out.args").exists(), "the CLI was not started");
 }

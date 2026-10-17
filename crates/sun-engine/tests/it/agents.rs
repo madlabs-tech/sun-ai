@@ -60,6 +60,8 @@ struct HoldHost {
     offline: Mutex<HashSet<HostId>>,
     /// The host each session started on.
     started_on: Mutex<Vec<HostId>>,
+    /// Each started session's `(model, effort)`.
+    settings: Mutex<Vec<(Option<String>, Option<String>)>>,
     alive: Arc<Mutex<HashSet<SessionId>>>,
     sink: Arc<Mutex<Option<mpsc::UnboundedSender<HostEvent>>>>,
 }
@@ -97,6 +99,8 @@ impl HostLink for HoldHost {
         let started = (spec.resume.clone(), native_id.clone());
         self.natives.lock().unwrap().push(started);
         self.started_on.lock().unwrap().push(host);
+        let settings = (spec.model.clone(), spec.effort.clone());
+        self.settings.lock().unwrap().push(settings);
         self.adapters.lock().unwrap().push(adapter.to_owned());
         self.skills.lock().unwrap().push(spec.skills.clone());
         self.envelopes.lock().unwrap().push(spec.envelope);
@@ -2403,4 +2407,144 @@ async fn a_mention_chats_session_gets_no_repository_section() {
     let envelope = k.host.envelopes()[1].clone();
     assert!(!envelope.contains("## Repositories"), "{envelope}");
     assert!(!envelope.contains(web), "{envelope}");
+}
+
+/// `fake` ready, with an effort catalog: `low`/`high` tool-wide, and only
+/// `low` for model `small`.
+fn with_effort() -> Value {
+    json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4,
+        "runtimes": [{
+            "adapter": "fake",
+            "readiness": {"installed": true, "version": "1", "logged_in": true, "detail": null},
+            "effort_options": [{"value": "low", "label": "Low"}, {"value": "high", "label": "High"}],
+            "models": [{"id": "small", "label": "Small", "effort_options": [{"value": "low", "label": "Low"}]}],
+        }],
+        "exec_envs": [{"kind": "bare", "ready": true, "version": "1", "detail": null}],
+    })
+}
+
+/// TRD BLO-117 item 8: each of an entry's four settings resolves on save
+/// (an unknown one is refused, naming the field) and reaches the session:
+/// `host` places the run there, `model` and `effort` reach the CLI's spec.
+#[tokio::test]
+async fn structured_chain_entries_resolve_on_save_and_reach_the_session() {
+    let k = kernel_on(
+        &[("plain", Some(&["bare"])), ("rich", Some(&["bare"]))],
+        Caps::default(),
+    )
+    .await;
+    let (plain, rich) = (k.hosts[0], k.hosts[1]);
+    k.engine
+        .set_host_capabilities(rich, &with_effort())
+        .await
+        .unwrap();
+    let mut tx = k.store.begin().await.unwrap();
+    let key = sun_core::model::RuntimeSource::ByoKey;
+    tx.upsert_runtime(WorkspaceId::MAIN, "other-key", "other", key)
+        .await
+        .unwrap();
+    tx.upsert_runtime(WorkspaceId::MAIN, "fake-key", "fake", key)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let saved = std::sync::atomic::AtomicUsize::new(0);
+    let save = |chain: Value| {
+        let engine = k.engine.clone();
+        let name = format!("ada-{}", saved.fetch_add(1, Ordering::SeqCst));
+        async move {
+            let fields = AgentFields {
+                name: Some(name),
+                runtime_chain: Some(serde_json::from_value(chain).unwrap()),
+                ..AgentFields::default()
+            };
+            let plan = crate::support::unlimited();
+            engine
+                .create_agent(WorkspaceId::MAIN, fields, "user:me", &plan)
+                .await
+        }
+    };
+    let refused = |result: Result<sun_core::model::Agent>| match result {
+        Err(Error::InvalidInput(why)) => why,
+        other => panic!("{other:?}"),
+    };
+    let stranger = HostId::generate().to_string();
+    for (chain, field) in [
+        (
+            json!([{"tool": "fake", "credential": "nope"}]),
+            "runtime_chain[0].credential",
+        ),
+        (
+            json!([{"tool": "fake", "credential": "other-key"}]),
+            "runtime_chain[0].credential",
+        ),
+        (
+            json!(["fake-key", {"tool": "fake", "host": stranger}]),
+            "runtime_chain[1].host",
+        ),
+        (
+            json!([{"tool": "fake", "host": plain.to_string(), "effort": "high"}]),
+            "runtime_chain[0].effort",
+        ),
+        (
+            json!([{"tool": "fake", "model": "small", "effort": "high"}]),
+            "runtime_chain[0].effort",
+        ),
+        (
+            json!([{"tool": "fake", "effort": "max"}]),
+            "runtime_chain[0].effort",
+        ),
+    ] {
+        let why = refused(save(chain.clone()).await);
+        assert!(why.starts_with(field), "{chain}: {why}");
+    }
+    // A key runtime's name is a credential, on the tool it runs on.
+    save(json!([{"tool": "fake", "credential": "fake-key"}]))
+        .await
+        .unwrap();
+    let archive = |id| k.engine.archive_agent(id, "user:me");
+
+    // Unpinned with an effort only `rich` lists: placed there, the effort
+    // and model reach the session; stored and read back unchanged.
+    let chain = json!([{"tool": "fake", "model": "big", "effort": "high"}]);
+    let agent = save(chain.clone()).await.unwrap();
+    assert_eq!(serde_json::to_value(&agent.runtime_chain).unwrap(), chain);
+    let stored = k.engine.agent(agent.id).await.unwrap();
+    assert_eq!(serde_json::to_value(&stored.runtime_chain).unwrap(), chain);
+    let task = k.task(agent.id, TaskStatus::Todo).await;
+    k.working(task).await;
+    assert_eq!(k.host.started_on.lock().unwrap().last(), Some(&rich));
+    assert_eq!(
+        k.host.settings.lock().unwrap().last(),
+        Some(&(Some("big".to_owned()), Some("high".to_owned())))
+    );
+    archive(agent.id).await.unwrap();
+
+    // `host:` pins it to `rich`, though `plain` is the less busy one now
+    // (the first run still works on `rich`).
+    let pinned = json!([{"tool": "fake", "host": rich.to_string(), "model": "m-1"}]);
+    let agent = save(pinned).await.unwrap();
+    let task = k.task(agent.id, TaskStatus::Todo).await;
+    k.working(task).await;
+    let started = k.host.started_on.lock().unwrap().clone();
+    assert_eq!(started, [rich, rich]);
+    assert_eq!(
+        k.host.settings.lock().unwrap().last(),
+        Some(&(Some("m-1".to_owned()), None))
+    );
+}
+
+/// A string-only chain is stored, read and run exactly as before.
+#[tokio::test]
+async fn a_string_only_chain_is_unchanged() {
+    let k = kernel().await;
+    let agent = k.agent("Ada").await;
+    let stored = k.engine.agent(agent).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&stored.runtime_chain).unwrap(),
+        json!(["fake"])
+    );
+    let task = k.task(agent, TaskStatus::Todo).await;
+    k.working(task).await;
+    assert_eq!(k.host.settings.lock().unwrap().last(), Some(&(None, None)));
 }

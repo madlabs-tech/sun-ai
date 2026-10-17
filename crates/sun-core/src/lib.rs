@@ -73,6 +73,7 @@ macro_rules! string_enum {
     };
 }
 
+mod chain;
 pub mod entitlement;
 mod error;
 mod event;
@@ -88,6 +89,7 @@ mod runtime_state;
 pub mod sso;
 mod status;
 
+pub use chain::{ChainEntry, ChainSpec, chain_names};
 pub use error::{Error, Result};
 pub use event::{LimitKind, Role, SunEvent, Todo, TodoStatus};
 pub use id::*;
