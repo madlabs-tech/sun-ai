@@ -301,7 +301,7 @@
               {#if session_settings}<span class="ml-mono">· {session_settings}</span>{/if}
             </dd>
             <dt id="on-limit-label">On limit</dt>
-            <dd>
+            <dd class="wide">
               <Select size="sm" aria-labelledby="on-limit-label" options={LIMIT_OPTIONS} bind:value={() => task_limit, set_task_limit} />
             </dd>
           {/if}
@@ -578,6 +578,10 @@
     margin: 0;
     color: var(--fg-1);
     min-width: 0;
+  }
+  /* The 360 px side column leaves the value column too narrow for the select's labels. */
+  .task-log :global(.meta dd.wide) {
+    grid-column: 1 / -1;
   }
   .task-log :global(.answer) {
     display: flex;
