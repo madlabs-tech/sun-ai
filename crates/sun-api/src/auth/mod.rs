@@ -220,7 +220,7 @@ impl Caller {
 }
 
 /// The 403 for a role without `permission`.
-fn denied(permission: Permission) -> ApiError {
+pub(crate) fn denied(permission: Permission) -> ApiError {
     let what = match permission {
         Permission::Run => "run tasks",
         Permission::Approve => "approve",
