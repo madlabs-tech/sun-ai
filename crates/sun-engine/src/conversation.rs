@@ -24,7 +24,8 @@ use sun_core::model::{ActivityKind, Run, Task, TaskActivity, TaskKey, TaskKind};
 use sun_core::{
     AgentId, Error, MemberId, Result, RunId, RunStatus, TaskId, TaskStatus, WorkspaceId,
 };
-use sun_store::{AgentRepo, EventLog, RunRepo, TaskRepo, Tx};
+use sun_core::redact::redact;
+use sun_store::{AgentRepo, EventLog, RunRepo, SecretRepo, TaskRepo, Tx};
 
 use crate::executor::tasks;
 use crate::{Engine, OnWorkspace, agents};
@@ -50,7 +51,13 @@ pub(crate) async fn reply(tx: &mut Tx, run_id: RunId, summary: &str) -> Result<(
     if text.is_empty() {
         return Ok(());
     }
-    let text: String = text.chars().take(TaskActivity::MAX_COMMENT).collect();
+    // Redact before the cut: a secret split by it would no longer match.
+    let secrets = tx.known_secrets().await?;
+    let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
+    let text: String = redact(text, &secrets)
+        .chars()
+        .take(TaskActivity::MAX_COMMENT)
+        .collect();
     let body = json!({ "text": text, "by_agent": agent, "run_id": run_id });
     let on = thread_of(tx, run.task_id).await?;
     tasks::log(tx, on, ActivityKind::Comment, None, body).await?;

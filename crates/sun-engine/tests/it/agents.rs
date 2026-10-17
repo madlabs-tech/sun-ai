@@ -2021,7 +2021,6 @@ async fn a_queued_message_names_its_author_and_a_steer_does_not() {
 /// secret filter runs, so a secret straddling the cut is no longer whole
 /// (or no longer long enough) and its head is posted in clear.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BLO-146 defect: conversation::reply truncates before redaction; a secret cut at MAX_COMMENT leaks its prefix"]
 async fn a_secret_cut_by_the_comment_limit_is_still_redacted() {
     use sun_core::model::{SecretScope, TaskActivity};
     let k = kernel().await;
