@@ -1250,6 +1250,7 @@ mod tests {
             instructions: String::new(),
             runtime_chain: vec!["fake".into()],
             skill_ids: vec![],
+            permission_mode: None,
             created_at: chrono::Utc::now(),
             archived_at: Option::None,
         };

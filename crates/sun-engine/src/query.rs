@@ -575,6 +575,16 @@ pub fn check_workflow(source_yaml: &str) -> Vec<WorkflowError> {
     sun_workflow::parse(source_yaml).err().unwrap_or_default()
 }
 
+/// Whether an agent step of `source_yaml` sets `permission_mode:
+/// bypass_permissions` (`false` when it doesn't parse).
+pub fn sets_bypass(source_yaml: &str) -> bool {
+    sun_workflow::parse(source_yaml).is_ok_and(|w| {
+        w.steps
+            .iter()
+            .any(|s| w.permission_mode(&s.id) == Some(sun_core::PermissionMode::BypassPermissions))
+    })
+}
+
 pub(crate) fn parse(source_yaml: &str) -> Result<sun_workflow::Workflow> {
     sun_workflow::parse(source_yaml).map_err(|errors| {
         let errors: Vec<String> = errors.iter().map(ToString::to_string).collect();

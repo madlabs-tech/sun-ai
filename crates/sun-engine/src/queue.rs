@@ -56,8 +56,8 @@ use std::sync::Arc;
 use serde_json::json;
 use sun_core::model::{Account, ActivityKind, EventRecord, Host, Run};
 use sun_core::{
-    ChainEntry, Error, ExecEnvSpec, HostId, Result, RunId, RunStatus, StateMachine, TaskId,
-    TaskStatus, Timestamp, WorkspaceId,
+    ChainEntry, Error, ExecEnvSpec, HostId, PermissionMode, Result, RunId, RunStatus, StateMachine,
+    TaskId, TaskStatus, Timestamp, WorkspaceId,
 };
 use sun_store::{
     EventLog, HostRepo, NewEvent, RunRepo, RuntimeRepo, SettingRepo, Store, TaskRepo, Tx,
@@ -664,6 +664,16 @@ impl Scheduler {
                 .map(|workflow| failover::entries(workflow, &slot.runtime))
                 .unwrap_or_else(|| vec![ChainEntry::from(slot.runtime.as_str())]);
             let chain = sun_core::chain_names(&entries);
+            // Each agent step's own mode; the tool's policy fills a `None`.
+            let step_modes: Vec<Option<PermissionMode>> = match &workflow {
+                Some(w) => w
+                    .steps
+                    .iter()
+                    .filter(|s| matches!(s.kind, sun_workflow::StepKind::Agent { .. }))
+                    .map(|s| w.permission_mode(&s.id))
+                    .collect(),
+                None => vec![None],
+            };
             let own = tx.setting(&task_exec_env_key(w.run.task_id)).await?;
             let env = match own.filter(|v| !v.is_null()) {
                 Some(spec) => serde_json::from_value::<ExecEnvSpec>(spec).unwrap_or_default(),
@@ -726,8 +736,11 @@ impl Scheduler {
                     }
                 }
                 if spends && local {
-                    let mode = modes.get(adapter).map(String::as_str);
-                    if let Some(why) = sun_core::mode_refusal(mode, &env) {
+                    let refusal_of = |mode| {
+                        let mode = failover::effective_mode(mode, &modes, adapter);
+                        sun_core::mode_refusal(mode, &env)
+                    };
+                    if let Some(why) = step_modes.iter().find_map(|m| refusal_of(*m)) {
                         refusal.get_or_insert((name, why));
                         continue;
                     }

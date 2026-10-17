@@ -506,6 +506,8 @@ struct Start {
     model: Option<String>,
     /// The chain entry's effort, if it sets one the host offers.
     effort: Option<String>,
+    /// [`failover::effective_mode`]; `None`: the host's `sun.yaml` default.
+    permission_mode: Option<String>,
 }
 
 impl Engine {
@@ -2141,6 +2143,14 @@ impl Executor {
         let exec_env = self.exec_env(tx, step.run_id).await?;
         let (model, effort, effort_ignored) =
             self.entry_settings(tx, step, runtime, &row.adapter).await?;
+        let run = tx.get_run(step.run_id).await?;
+        let step_mode = self
+            .workflow(tx, &run)
+            .await?
+            .permission_mode(&step.step_key);
+        let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
+        let permission_mode =
+            failover::effective_mode(step_mode, &modes, &row.adapter).map(str::to_owned);
         append(
             tx,
             step,
@@ -2177,6 +2187,7 @@ impl Executor {
             byo_key: row.byo_key,
             model,
             effort,
+            permission_mode,
         }));
         Ok(session_id)
     }
@@ -2467,18 +2478,13 @@ impl Executor {
                 let mcp_config = context.mcp_config.clone();
                 delivered = Some(context);
                 let mut read = self.store.read().await?;
-                let permission_mode = read
-                    .permission_modes()
-                    .await?
-                    .into_iter()
-                    .find_map(|(a, mode)| (a == *adapter).then_some(mode));
                 // Only the skills the run's workspace installed.
                 let workspace = read.workspace_of_run(step.run_id).await?;
                 let skills = Some(read.catalog_installs(workspace).await?);
                 drop(read);
                 let spec = SessionSpec {
                     skills,
-                    permission_mode,
+                    permission_mode: start.permission_mode.clone(),
                     session_id,
                     run_id: step.run_id,
                     step_key: step.step_key.clone(),

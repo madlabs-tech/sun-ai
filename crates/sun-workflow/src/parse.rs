@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_saphyr::{Location, Spanned};
 use sun_core::model::Budget;
-use sun_core::{ChainEntry, ChainSpec, ExecEnvSpec, McpGrant, StepKey};
+use sun_core::{ChainEntry, ChainSpec, ExecEnvSpec, McpGrant, PermissionMode, StepKey};
 
 use crate::model::{
     ApprovalTimeout, ApprovalWhen, CODE_GATES, CONTENT_GATES, DEFAULT_SEND_BACKS, DecisionUse,
@@ -214,6 +214,7 @@ struct RawStep {
     question: Option<S<Question>>,
     threshold: Option<S<f64>>,
     retry: Option<S<RawRetry>>,
+    permission_mode: Option<S<PermissionMode>>,
 }
 
 #[derive(Deserialize)]
@@ -618,7 +619,7 @@ impl Check {
     fn kind(&mut self, s: &RawStep, i: usize, index: &HashMap<&str, usize>) -> Option<StepKind> {
         let ty = s.kind.value.as_str();
         let allowed: &[&str] = match ty {
-            "agent" => &["prompt", "skills", "mcp", "context"],
+            "agent" => &["prompt", "skills", "mcp", "context", "permission_mode"],
             "gate" => &["gates", "on_fail"],
             "approval" => &["who", "timeout", "when"],
             "wait" => &["for"],
@@ -654,6 +655,7 @@ impl Check {
             ("decides", at(&s.decides)),
             ("question", at(&s.question)),
             ("threshold", at(&s.threshold)),
+            ("permission_mode", at(&s.permission_mode)),
         ];
         for (field, location) in present {
             if let Some(location) = location
@@ -695,6 +697,7 @@ impl Check {
                     mcp: self.grants(s.mcp.as_ref()),
                     context_sources,
                     context_budget_tokens,
+                    permission_mode: s.permission_mode.as_ref().map(|m| m.value),
                 })
             }
             "gate" => {

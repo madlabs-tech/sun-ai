@@ -366,6 +366,7 @@ fn agent(workspace: WorkspaceId, name: &str) -> Agent {
         instructions: String::new(),
         runtime_chain: vec!["claude-code".into()],
         skill_ids: Vec::new(),
+        permission_mode: None,
         created_at: chrono::Utc::now(),
         archived_at: None,
     }
