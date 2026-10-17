@@ -6,6 +6,7 @@
 //! shared by every task of a repo) and `work/<task_id>` (one directory per task,
 //! reused by every session of the task, so a hand-off continues in place).
 
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Component, Path, PathBuf};
 
 use sun_core::host_protocol::{SessionFile, Worktree};
@@ -14,7 +15,7 @@ use sun_core::{Error, Result, TaskId};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::buffer::io;
+use crate::buffer::{io, write_file};
 
 /// Prepares and checks task directories.
 pub struct Worktrees {
@@ -251,6 +252,9 @@ impl Worktrees {
 /// cleared first; `overwrite: false` files are only created when missing.
 /// Paths must be relative and under `.sun/`, and no existing part of a path
 /// may be a symlink, so an agent can't redirect a write out of the worktree.
+/// Files are written `0600` and the dirs Sun creates `0700`: `mcp.json`
+/// holds the session's `SUN_MCP_TOKEN`. Every exec env runs the agent as
+/// the worktree's owner, so it still reads them.
 pub fn write_files(root: &Path, files: &[SessionFile]) -> Result<()> {
     for file in files {
         let mut parts = Path::new(&file.path).components();
@@ -278,9 +282,13 @@ pub fn write_files(root: &Path, files: &[SessionFile]) -> Result<()> {
             continue;
         }
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(io(parent))?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(io(parent))?;
         }
-        std::fs::write(&path, &file.contents).map_err(io(&path))?;
+        write_file(&path, &file.contents, 0o600)?;
     }
     Ok(())
 }
@@ -475,5 +483,46 @@ mod tests {
         assert!(!outside.join("progress.md").exists());
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn session_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // A config left by an older Sun, and an existing agent-readable file.
+        std::fs::create_dir_all(root.join(".sun/context")).unwrap();
+        std::fs::write(root.join(".sun/context/mcp.json"), "old").unwrap();
+        std::fs::write(root.join(".sun/notes.md"), "old").unwrap();
+        let loose = std::fs::Permissions::from_mode(0o644);
+        std::fs::set_permissions(root.join(".sun/context/mcp.json"), loose.clone()).unwrap();
+        std::fs::set_permissions(root.join(".sun/notes.md"), loose).unwrap();
+        let config = r#"{"mcpServers":{"sun":{"command":"sun","args":["mcp"],"env":{"SUN_MCP_TOKEN":"t"}}}}"#;
+        let file = |path: &str, contents: &str| SessionFile {
+            path: path.into(),
+            contents: contents.into(),
+            overwrite: true,
+        };
+        write_files(
+            root,
+            &[
+                file(".sun/context/mcp.json", config),
+                file(".sun/context/sources/a.md", "a"),
+                file(".sun/notes.md", "new"),
+            ],
+        )
+        .unwrap();
+        let mcp = root.join(".sun/context/mcp.json");
+        assert_eq!(std::fs::read_to_string(&mcp).unwrap(), config);
+        assert_eq!(mode(&mcp), 0o600, "the session token is owner-only");
+        assert_eq!(mode(&root.join(".sun/context")), 0o700);
+        assert_eq!(mode(&root.join(".sun/context/sources")), 0o700);
+        assert_eq!(mode(&root.join(".sun/context/sources/a.md")), 0o600);
+        assert_eq!(
+            mode(&root.join(".sun/notes.md")),
+            0o600,
+            "existing file tightened"
+        );
     }
 }
