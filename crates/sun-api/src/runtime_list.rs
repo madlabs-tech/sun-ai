@@ -9,6 +9,9 @@
 //! `probed_at`). Presence and load come from the live hub. A `(host, tool)`
 //! is `limited` while an account it would spend cools down: the host's own
 //! login of the tool, or a key on that tool of a workspace the host serves.
+//! Each `(host, tool)` entry carries the effort levels and models the host
+//! reported for the tool (`effort_options`, `models`; empty for key-backed
+//! entries), which the agent form offers.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -106,6 +109,11 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
             entry["workspace_id"] = Value::Null;
             entry["permission_mode"] = json!(modes.get(&tool));
             entry["allow_bypass"] = json!(api.allow_bypass);
+            // What the agent form's model and effort pickers offer for
+            // this tool on this host (BLO-119), from the raw report.
+            let catalog = host.effort_catalog(&tool);
+            entry["effort_options"] = json!(catalog.effort_options);
+            entry["models"] = json!(catalog.models);
             entries.push(entry);
         }
     }
@@ -145,6 +153,7 @@ impl Observed {
             "cooldown_until": self.cooldown_until,
             "probed_at": null, "last_seen_at": null,
             "config": null, "model": null,
+            "effort_options": [], "models": [],
         })
     }
 }

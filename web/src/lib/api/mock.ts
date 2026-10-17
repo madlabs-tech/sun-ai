@@ -58,7 +58,7 @@ import { is_vcs_route, vcs_route } from './mock_vcs';
 import { pull_request_route } from './mock_pull_requests';
 import { agents_route, find_agent } from './mock_agents';
 import { budget_route, has_ecosystem_secret, on_limit_route, settings_route } from './mock_settings';
-import { chain_names, runtime_name } from '../format';
+import { chain_names, entry_name, runtime_name } from '../format';
 
 type StepDef = [key: string, name: string, type: StepType];
 
@@ -260,19 +260,32 @@ const on_host = (host: number, host_name: string, tool: string, r: Partial<Runti
   id: `${fake_id('H', host)}:${tool}`, name: tool, tool, adapter: tool, family: null, version: '1.0.0',
   host: { id: fake_id('H', host), name: host_name }, presence: 'online', availability: 'ready', load: { active: 0, max: null },
   state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: today('10:12'),
-  workspace_id: null, source: 'byo_runtime', permission_mode: null, allow_bypass: true, config: null, model: null, ...r,
+  workspace_id: null, source: 'byo_runtime', permission_mode: null, allow_bypass: true, config: null, model: null,
+  effort_options: [], models: [], ...r,
 });
 const keyed = (name: string, r: Partial<Runtime>): Runtime => ({
   id: name, name, tool: 'opencode', adapter: 'opencode', family: null, version: null, host: null, presence: 'online',
   availability: 'ready', load: null, state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: null,
-  workspace_id: MAIN_WORKSPACE, source: 'byo_key', permission_mode: 'plan', allow_bypass: true, config: null, model: null, ...r,
+  workspace_id: MAIN_WORKSPACE, source: 'byo_key', permission_mode: 'plan', allow_bypass: true, config: null, model: null,
+  effort_options: [], models: [], ...r,
+});
+/** Effort catalogs as the CLIs report them (BLO-119): Claude Code one list per session, Codex per model. */
+const level = (value: string, label: string) => ({ value, label });
+const [LOW, MEDIUM, HIGH, XHIGH] = [level('low', 'Low'), level('medium', 'Medium'), level('high', 'High'), level('xhigh', 'Extra high')];
+const CLAUDE_EFFORT = { effort_options: [LOW, MEDIUM, HIGH] };
+const codex_effort = (newest: boolean) => ({
+  effort_options: newest ? [LOW, MEDIUM, HIGH, XHIGH] : [LOW, MEDIUM, HIGH],
+  models: [
+    { id: 'gpt-5-codex', label: 'GPT-5 Codex', effort_options: newest ? [LOW, MEDIUM, HIGH, XHIGH] : [LOW, MEDIUM, HIGH], default_effort: 'medium' },
+    { id: 'gpt-5-mini', label: 'GPT-5 mini', effort_options: [LOW, MEDIUM] },
+  ],
 });
 export const RUNTIMES: Runtime[] = [
-  on_host(1, 'hery-mbp', 'claude-code', { version: '2.1.291', state: 'busy', load: { active: 2, max: 3 }, permission_mode: 'accept_edits' }),
-  on_host(3, 'rina-laptop', 'claude-code', { version: '2.1.291', presence: 'offline', state: 'offline', detail: 'rina-laptop is offline', last_seen_at: today('06:40'), permission_mode: 'accept_edits' }),
-  on_host(2, 'build-box-01', 'claude-code', { version: '2.1.291', availability: 'needs_login', state: 'needs_login', detail: 'Run `claude auth login` on build-box-01', permission_mode: 'accept_edits' }),
-  on_host(2, 'build-box-01', 'codex', { availability: 'needs_login', state: 'needs_login', detail: 'Run `codex login` on build-box-01' }),
-  on_host(1, 'hery-mbp', 'codex', { version: '0.161.0', availability: 'outdated', detail: 'Codex 0.161.0 is untested. If it misbehaves, install the known-good version: npm install -g @openai/codex@0.160.0' }),
+  on_host(1, 'hery-mbp', 'claude-code', { version: '2.1.291', state: 'busy', load: { active: 2, max: 3 }, permission_mode: 'accept_edits', ...CLAUDE_EFFORT }),
+  on_host(3, 'rina-laptop', 'claude-code', { version: '2.1.291', presence: 'offline', state: 'offline', detail: 'rina-laptop is offline', last_seen_at: today('06:40'), permission_mode: 'accept_edits', ...CLAUDE_EFFORT }),
+  on_host(2, 'build-box-01', 'claude-code', { version: '2.1.291', availability: 'needs_login', state: 'needs_login', detail: 'Run `claude auth login` on build-box-01', permission_mode: 'accept_edits', ...CLAUDE_EFFORT }),
+  on_host(2, 'build-box-01', 'codex', { availability: 'needs_login', state: 'needs_login', detail: 'Run `codex login` on build-box-01', ...codex_effort(false) }),
+  on_host(1, 'hery-mbp', 'codex', { version: '0.161.0', availability: 'outdated', detail: 'Codex 0.161.0 is untested. If it misbehaves, install the known-good version: npm install -g @openai/codex@0.160.0', ...codex_effort(true) }),
   on_host(2, 'build-box-01', 'opencode', { availability: 'limited', state: 'limited', cooldown_until: today('14:00'), permission_mode: 'plan' }),
   on_host(2, 'build-box-01', 'kiro-cli', { version: '1.4', availability: 'unsupported', state: 'unsupported' }),
   keyed('lan-qwen', { config: { kind: 'openai_compatible', endpoint: 'http://localhost:11434/v1', model: 'qwen2.5-coder:7b', key_secret: null } }),
@@ -682,10 +695,11 @@ function start_agent_run(t: TaskDetail, trigger: string) {
   const history = runs_of(t).map((r) => (r.ended_at ? r : { ...r, status: 'cancelled' as const, ended_at: now }));
   if (t.run && !['done', 'failed', 'cancelled'].includes(t.run.status)) [t.run.status, t.run.end_reason] = ['cancelled', 'cancelled'];
   if (t.run) past_runs.set(t.run.id, { run: t.run, gates: t.gates });
-  const runtime = agent.runtime_chain[0] ?? 'claude-code';
+  const chain = agent.runtime_chain.map(entry_name);
+  const runtime = chain[0] ?? 'claude-code';
   const run: Run = {
     id: fake_id('R', 900 + next_seq++), task_id: t.id, workflow_version: 1, status: 'running', end_reason: null,
-    budget: { cost_usd: 5 }, cost_usd: 0, runtime_id: runtime, runtime_chain: agent.runtime_chain, runtime_switches: 0, repo_ids: [],
+    budget: { cost_usd: 5 }, cost_usd: 0, runtime_id: runtime, runtime_chain: chain, runtime_switches: 0, repo_ids: [],
     steps: make_steps([['agent', agent.name, 'agent']], 0, 'running', runtime).map((x) => ({ ...x, started_at: now })),
   };
   t.run = run;

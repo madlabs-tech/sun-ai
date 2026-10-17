@@ -208,6 +208,7 @@ async fn live_run_matches_replay_and_passes_the_envelope() {
     let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
     let mut spec = spec(&dir, &[("SUN_FIXTURE", &fixture)]);
     spec.model = Some("gpt-5".into());
+    spec.effort = Some("xhigh".into());
     let handle = adapter.start(spec).await.unwrap();
     assert_eq!(
         handle.native_id.as_deref(),
@@ -219,7 +220,7 @@ async fn live_run_matches_replay_and_passes_the_envelope() {
     let args = std::fs::read_to_string(dir.join("out.args")).unwrap();
     assert_eq!(
         args,
-        "exec --json -c sandbox_mode=\"workspace-write\" -c model=\"gpt-5\" -- Create hello.txt\n"
+        "exec --json -c sandbox_mode=\"workspace-write\" -c model=\"gpt-5\" -c model_reasoning_effort=\"xhigh\" -- Create hello.txt\n"
     );
     let steer = Steer {
         text: "more".into(),
@@ -426,4 +427,14 @@ async fn builtin_template_reaches_the_first_prompt() {
     assert!(args.contains("-- # Task\n\nCreate hello.txt\n"), "{args}");
     assert!(args.contains("- No new dependencies.\n"), "{args}");
     assert!(args.contains("with your plan tool"), "{args}");
+}
+
+#[tokio::test]
+async fn an_effort_that_is_not_a_token_never_reaches_the_cli() {
+    let dir = sandbox("codex", FAKE_CODEX, "bad-effort");
+    let adapter = Codex::new(dir.join("codex"));
+    let mut spec = spec(&dir, &[]);
+    spec.effort = Some("high\" -c sandbox_mode=\"danger-full-access".into());
+    assert!(adapter.start(spec).await.is_err());
+    assert!(!dir.join("out.args").exists(), "the CLI was not started");
 }

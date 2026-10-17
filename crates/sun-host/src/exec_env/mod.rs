@@ -330,6 +330,7 @@ pub(crate) mod testing {
             envelope: "do it".into(),
             envelope_parts: None,
             model: None,
+            effort: None,
             mcp_config: None,
             env: BTreeMap::from([
                 (

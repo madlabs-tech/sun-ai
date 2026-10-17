@@ -93,7 +93,10 @@ impl Engine {
                     kind: kind_name(&step.kind),
                 })
                 .collect(),
-            runtime_chain: workflow.runtime.map(|r| r.chain).unwrap_or_default(),
+            runtime_chain: workflow
+                .runtime
+                .map(|r| sun_core::chain_names(&r.chain))
+                .unwrap_or_default(),
         })
     }
 
@@ -238,6 +241,10 @@ impl Engine {
                 workflow
             }
         };
+        if let Some(runtime) = &parsed.runtime {
+            let workspace = workflow.workspace_id;
+            crate::chain_check::check(&mut tx, workspace, &runtime.chain, "runtime.chain").await?;
+        }
         let version = tx
             .save_workflow_version(workflow.id, source_yaml, &parsed.hash)
             .await?;
@@ -536,7 +543,10 @@ impl Engine {
                     name,
                 })
                 .collect(),
-            runtimes: workflow.runtime.map(|r| r.chain).unwrap_or_default(),
+            runtimes: workflow
+                .runtime
+                .map(|r| sun_core::chain_names(&r.chain))
+                .unwrap_or_default(),
             estimated_cost_usd: per_session.map(|c| c * f64::from(agent_steps)),
             budget_usd: workflow.budget.cost_usd,
             agent_steps,

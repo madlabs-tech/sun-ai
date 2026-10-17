@@ -91,3 +91,68 @@ test('360 px: agent rows fit', async ({ page }) => {
   await expect(row(page, 'Night Owl')).toContainText('no host reports it');
   await no_overflow(page);
 });
+
+// TRD BLO-117 item 8: each chain entry picks its host, model and effort; the effort options are exactly
+// what that tool reported (per model where it scopes them), and grey out where it reports none.
+test('agent form: host, model and effort per chain entry, from the hosts’ catalogs', async ({ page }) => {
+  await open(page);
+  await page.getByRole('button', { name: 'New agent' }).click();
+  const dialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'New agent' }) });
+  await dialog.getByLabel('Name', { exact: true }).fill('Tuner');
+  const chain = dialog.getByRole('combobox', { name: 'Add to Runtimes, in failover order' });
+  for (const name of ['codex', 'claude-code', 'lan-qwen']) {
+    await chain.fill(name);
+    await chain.press('Enter');
+  }
+  const settings = (name: string) => dialog.getByRole('group', { name: `Settings of ${name}` });
+  const options = (name: string, field: string) => settings(name).getByLabel(field).locator('option');
+  const codex = settings('codex');
+
+  // Switching tool swaps the options: Codex's union across its hosts, Claude Code's own list.
+  await expect(options('codex', 'Effort')).toHaveText(['CLI default', 'Low', 'Medium', 'High', 'Extra high']);
+  await expect(options('claude-code', 'Effort')).toHaveText(['CLI default', 'Low', 'Medium', 'High']);
+  await expect(options('codex', 'Host')).toHaveText(['Any host', 'build-box-01', 'hery-mbp']);
+  // Offline hosts aren't offered.
+  await expect(options('claude-code', 'Host')).toHaveText(['Any host', 'hery-mbp', 'build-box-01']);
+  // A tool with no catalog greys the picker out and says why.
+  await expect(settings('lan-qwen').getByLabel('Effort')).toBeDisabled();
+  await expect(settings('lan-qwen')).toContainText('OpenCode reports no effort levels.');
+
+  // Switching model swaps them again where the tool scopes effort per model.
+  await codex.getByLabel('Model').fill('gpt-5-mini');
+  await codex.getByLabel('Model').press('Tab');
+  await expect(options('codex', 'Effort')).toHaveText(['CLI default', 'Low', 'Medium']);
+  await codex.getByLabel('Model').fill('gpt-5-codex');
+  await codex.getByLabel('Model').press('Tab');
+  await codex.getByLabel('Effort').selectOption('xhigh');
+  // The older Codex on build-box-01 has no Extra high: pinning there drops it.
+  await codex.getByLabel('Host').selectOption({ label: 'build-box-01' });
+  await expect(options('codex', 'Effort')).toHaveText(['CLI default', 'Low', 'Medium', 'High']);
+  await expect(codex.getByLabel('Effort')).toHaveValue('');
+  await codex.getByLabel('Host').selectOption({ label: 'hery-mbp' });
+  await codex.getByLabel('Effort').selectOption('xhigh');
+
+  await dialog.getByRole('button', { name: 'Create agent' }).click();
+  await expect(dialog).toBeHidden();
+  await expect(row(page, 'Tuner')).toContainText('gpt-5-codex · xhigh');
+
+  // Edit opens with each entry's settings; untouched entries stay plain names.
+  await row(page, 'Tuner').getByRole('button', { name: 'Edit Tuner' }).click();
+  const edit = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Edit Tuner' }) });
+  const edited = edit.getByRole('group', { name: 'Settings of codex' });
+  await expect(edited.getByLabel('Effort')).toHaveValue('xhigh');
+  await expect(edited.getByLabel('Model')).toHaveValue('gpt-5-codex');
+  await expect(edit.getByRole('group', { name: 'Settings of claude-code' }).getByLabel('Host')).toHaveValue('');
+});
+
+test('360 px: the chain settings fit', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await open(page);
+  await page.getByRole('button', { name: 'New agent' }).click();
+  const dialog = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'New agent' }) });
+  const chain = dialog.getByRole('combobox', { name: 'Add to Runtimes, in failover order' });
+  await chain.fill('codex');
+  await chain.press('Enter');
+  await expect(dialog.getByRole('group', { name: 'Settings of codex' }).getByLabel('Effort')).toBeVisible();
+  await no_overflow(page);
+});

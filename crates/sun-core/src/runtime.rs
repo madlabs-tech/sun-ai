@@ -141,6 +141,11 @@ pub struct SessionSpec {
     pub envelope_parts: Option<Envelope>,
     /// Model override; `None` uses the CLI default.
     pub model: Option<String>,
+    /// Effort level, one of the tokens the host reported for this tool and
+    /// model ([`EffortCatalog`]); the adapter maps it to its CLI's flag, and
+    /// one whose CLI has no such setting ignores it. `None`: the CLI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     /// MCP config file to pass to the CLI, if any.
     pub mcp_config: Option<PathBuf>,
     /// Extra environment, e.g. model endpoint and key for BYO-key or credits.

@@ -126,6 +126,9 @@ impl RuntimeAdapter for ClaudeCode {
         if let Some(model) = &spec.model {
             cmd.args(["--model", model]);
         }
+        if let Some(effort) = crate::effort::checked(spec.effort.as_deref())? {
+            cmd.args(["--effort", effort]);
+        }
         if let Some(mcp) = &spec.mcp_config {
             cmd.arg("--mcp-config").arg(mcp).arg("--strict-mcp-config");
         }

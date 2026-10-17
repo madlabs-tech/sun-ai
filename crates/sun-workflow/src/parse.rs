@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use serde_saphyr::{Location, Spanned};
 use sun_core::model::Budget;
-use sun_core::{ExecEnvSpec, McpGrant, StepKey};
+use sun_core::{ChainEntry, ChainSpec, ExecEnvSpec, McpGrant, StepKey};
 
 use crate::model::{
     ApprovalTimeout, ApprovalWhen, CODE_GATES, CONTENT_GATES, DEFAULT_SEND_BACKS, DecisionUse,
@@ -166,7 +166,7 @@ type RawGrants = S<Vec<S<McpGrant>>>;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRuntime {
-    chain: S<Vec<S<String>>>,
+    chain: S<Vec<S<ChainEntry>>>,
     on_limit: Option<OnLimit>,
     review_after_failover: Option<Vec<S<String>>>,
     switch_back: Option<bool>,
@@ -342,27 +342,30 @@ impl Check {
                 "`runtime.chain` needs at least one runtime",
             );
         }
-        let mut chain: Vec<String> = Vec::new();
-        for name in raw.chain.value {
-            // `market:<adapter>`: that runtime rented on the marketplace;
-            // `<mod>.<adapter>`: one an extension serves (mod API 1.2).
-            let runtime = name.value.strip_prefix("market:").unwrap_or(&name.value);
-            let extension = is_dotted(runtime) && runtime.matches('.').count() == 1;
-            if !is_slug(runtime) && !extension {
-                self.err(
-                    name.referenced,
-                    format!(
-                        "invalid runtime name `{}`: {SLUG_RULE}, or <extension>.<adapter>",
-                        name.value
-                    ),
-                );
-            } else if chain.contains(&name.value) {
-                self.err(
-                    name.referenced,
-                    format!("runtime `{}` appears twice in the chain", name.value),
-                );
+        let mut chain: Vec<ChainEntry> = Vec::new();
+        for entry in raw.chain.value {
+            let at = entry.referenced;
+            match &entry.value {
+                ChainEntry::Name(name) => {
+                    // `market:<adapter>`: that runtime rented on the marketplace;
+                    // `<mod>.<adapter>`: one an extension serves (mod API 1.2).
+                    let runtime = name.strip_prefix("market:").unwrap_or(name);
+                    if !is_runtime(runtime) {
+                        self.err(
+                            at,
+                            format!(
+                                "invalid runtime name `{name}`: {SLUG_RULE}, or <extension>.<adapter>"
+                            ),
+                        );
+                    }
+                }
+                ChainEntry::Spec(spec) => self.chain_spec(at, spec),
             }
-            chain.push(name.value);
+            let name = entry.value.name();
+            if chain.iter().any(|e| e.name() == name) {
+                self.err(at, format!("runtime `{name}` appears twice in the chain"));
+            }
+            chain.push(entry.value);
         }
         let review_after_failover = raw
             .review_after_failover
@@ -375,6 +378,47 @@ impl Check {
             on_limit: raw.on_limit,
             review_after_failover,
             switch_back: raw.switch_back.unwrap_or(false),
+        }
+    }
+
+    /// Checks the object form of a chain entry. `model` and `effort` end up
+    /// as CLI arguments, so each must be one plain token. Whether the
+    /// credential, host and effort exist is checked where the workspace is
+    /// known (the engine, on save).
+    fn chain_spec(&mut self, at: Location, spec: &ChainSpec) {
+        if !is_runtime(&spec.tool) {
+            self.err(
+                at,
+                format!(
+                    "invalid `tool` `{}`: {SLUG_RULE}, or <extension>.<adapter>",
+                    spec.tool
+                ),
+            );
+        }
+        if let Some(name) = &spec.credential
+            && !is_runtime_name(name)
+        {
+            self.err(
+                at,
+                format!("invalid `credential` `{name}`: 1–64 of a-z, 0-9, - or _"),
+            );
+        }
+        let fields = [
+            ("host", &spec.host, 64),
+            ("model", &spec.model, 128),
+            ("effort", &spec.effort, 32),
+        ];
+        for (field, value, max) in fields {
+            if let Some(value) = value
+                && !is_cli_token(value, max)
+            {
+                self.err(
+                    at,
+                    format!(
+                        "invalid `{field}` `{value}`: one word of at most {max} characters, not starting with `-`"
+                    ),
+                );
+            }
         }
     }
 
@@ -931,6 +975,32 @@ fn at<T>(field: &Option<S<T>>) -> Option<Location> {
 /// `[a-z][a-z0-9_-]*`, at most 64 chars (the [`StepKey`] rule).
 fn is_slug(text: &str) -> bool {
     StepKey::new(text).is_ok()
+}
+
+/// A runtime or tool name: a slug, or `<extension>.<adapter>`.
+fn is_runtime(text: &str) -> bool {
+    is_slug(text) || (is_dotted(text) && text.matches('.').count() == 1)
+}
+
+/// A key-backed runtime's name (`Runtime::validate`): 1–64 of `[a-z0-9_-]`.
+fn is_runtime_name(text: &str) -> bool {
+    (1..=64).contains(&text.len())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// A value passed to a CLI as one argument: 1–`max` characters of
+/// `[A-Za-z0-9._:/@\[\]-]`, not starting with `-` (never read as an option).
+/// Covers `gpt-5-codex`, `opus[1m]`, `openrouter/qwen/qwen3-coder`,
+/// `qwen2.5-coder:7b`.
+fn is_cli_token(text: &str, max: usize) -> bool {
+    !text.is_empty()
+        && text.len() <= max
+        && !text.starts_with('-')
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._:/@[]-".contains(c))
 }
 
 /// Two or more slugs joined by `.`, e.g. `github.open_pr`.

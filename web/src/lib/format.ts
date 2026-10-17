@@ -1,5 +1,5 @@
 // Display rules shared by every screen: task columns, status labels, money, time.
-import type { Agent, OnLimit, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
+import type { Agent, ChainEntry, OnLimit, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
 
 /** `list` with `item` added (`on`) or removed, once. */
 export const toggle = <T,>(list: T[], item: T, on: boolean) => (on ? [...list.filter((x) => x !== item), item] : list.filter((x) => x !== item));
@@ -135,6 +135,9 @@ export const runtime_name = (runtimes: Runtime[], name: string | null) => {
   const r = runtimes.find((x) => x.name === name);
   return r?.host ? tool_label(r.tool) : (r?.name ?? tool_label(name));
 };
+
+/** A chain entry's runtime name (the kernel's `ChainEntry::name`): the credential's, else the tool's. */
+export const entry_name = (e: ChainEntry) => (typeof e === 'string' ? e : (e.credential ?? e.tool));
 
 /** The distinct chain names of a runtime list (one per tool, however many hosts have it). */
 export const chain_names = (runtimes: Runtime[]) => [...new Set(runtimes.map((r) => r.name))];

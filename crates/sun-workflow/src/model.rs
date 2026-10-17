@@ -134,8 +134,10 @@ impl Workflow {
 /// `runtime:` — the failover chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RuntimePolicy {
-    /// Runtime names (`sun_core::model::Runtime::name`) in failover order; non-empty, unique.
-    pub chain: Vec<String>,
+    /// Runtimes in failover order: names (`sun_core::model::Runtime::name`)
+    /// or `{tool, credential, host, model, effort}`; non-empty, each
+    /// [`ChainEntry::name`](sun_core::ChainEntry::name) unique.
+    pub chain: Vec<sun_core::ChainEntry>,
     /// What to do when the current runtime hits a limit; `None`: the
     /// ecosystem default (a task's own setting beats both).
     pub on_limit: Option<OnLimit>,

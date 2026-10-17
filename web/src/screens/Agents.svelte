@@ -1,5 +1,6 @@
 <!-- Agents: the open workspace's. A task assigned to one runs its instructions on its runtime chain
-     (failover order) with its skills. Ready = some runtime of the chain is logged in on an online host;
+     (failover order) with its skills; each runtime of the chain may pin a host and set a model and an
+     effort level, from what that host's CLI reports. Ready = some runtime of the chain is logged in on an online host;
      not ready says why per runtime. Creating, editing and archiving need manage_runtimes; an edit gives
      running tasks nothing new (they keep their version). -->
 <script lang="ts">
@@ -7,22 +8,24 @@
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import Loaded from '../lib/ui/Loaded.svelte';
   import Chips from '../lib/ui/Chips.svelte';
+  import ChainSettings from '../lib/ui/ChainSettings.svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
   import { api } from '../lib/api/client';
-  import type { Agent, AgentFields } from '../lib/api/types';
+  import type { Agent, AgentFields, ChainEntry, Runtime } from '../lib/api/types';
   import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
-  import { chain_names } from '../lib/format';
+  import { chain_names, entry_name } from '../lib/format';
 
   const workspace = current_workspace();
   const manage = $derived(can('manage_runtimes'));
   /** The list, also kept for the assignee pickers and cards. */
   const fetch_agents = () => api.list_agents(workspace).then((list) => (app.agents = list));
   let load = $state(fetch_agents());
-  /** Suggestions: chain names (one per tool, however many hosts), and the catalog's installed skills. */
-  let runtimes = $state<string[]>([]);
+  /** Every (host, tool) and key-backed runtime: chain name suggestions, and each entry's hosts, models
+   *  and effort levels. Plus the catalog's installed skills. */
+  let runtimes = $state<Runtime[]>([]);
   let skills = $state<string[]>([]);
   api.list_runtimes(workspace).then(
-    (rows) => (runtimes = chain_names(rows)),
+    (rows) => (runtimes = rows),
     () => {},
   );
   api.list_catalog('', '', workspace).then(
@@ -30,7 +33,7 @@
     () => {},
   );
 
-  const empty_form = () => ({ name: '', description: '', instructions: '', runtime_chain: [] as string[], skill_ids: [] as string[] });
+  const empty_form = () => ({ name: '', description: '', instructions: '', runtime_chain: [] as ChainEntry[], skill_ids: [] as string[] });
   /** The agent being edited; `null` with `editing` open: a new one. */
   let editing = $state<Agent | null>(null);
   let open = $state(false);
@@ -103,8 +106,8 @@
           </div>
           <div class="sun-row__meta agent__meta">
             <span class="agent__chain" aria-label="Runtimes, in failover order">
-              {#each a.runtime_chain as r, i (r)}
-                {#if i > 0}<Icon name="chevron-right" size={12} />{/if}<span class="ml-mono">{r}</span>
+              {#each a.runtime_chain as r, i (entry_name(r))}
+                {#if i > 0}<Icon name="chevron-right" size={12} />{/if}<span class="ml-mono">{entry_name(r)}</span>{#if typeof r !== 'string'}<span class="agent__settings">{[r.model, r.effort].filter(Boolean).join(' · ')}</span>{/if}
               {/each}
             </span>
             · {tasks(a.task_count)}
@@ -148,7 +151,15 @@
       </div>
       <div class="ml-field__hint">Optional. Without it, the agent works from the task alone.</div>
     </div>
-    <Chips label="Runtimes, in failover order" placeholder="claude-code" suggestions={runtimes} hint="The first ready one runs; the next takes over at a limit." bind:items={form.runtime_chain} />
+    <Chips
+      label="Runtimes, in failover order"
+      placeholder="claude-code"
+      suggestions={chain_names(runtimes)}
+      name={entry_name}
+      hint="The first ready one runs; the next takes over at a limit."
+      bind:items={form.runtime_chain}
+    />
+    <ChainSettings {runtimes} bind:chain={form.runtime_chain} />
     <Chips label="Skills" placeholder="tdd" suggestions={skills} hint="Installed skills from the Catalog." bind:items={form.skill_ids} />
     {#if error}<p class="agent-form__error" role="alert">{error}</p>{/if}
   </form>
@@ -184,6 +195,10 @@
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-1);
+  }
+  .agent__settings {
+    font-size: var(--size-xs);
+    color: var(--fg-2);
   }
   .agent__text,
   .agent__why,

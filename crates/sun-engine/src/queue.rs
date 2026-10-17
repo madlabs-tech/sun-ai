@@ -18,6 +18,9 @@
 //!   pump. A run whose exec env (task override, else workflow `exec_env:`)
 //!   is a container or VM only goes to hosts that report that kind ready;
 //!   a VM's RAM and CPUs count against its host's cap.
+//!   A chain entry pinned to a host (`{tool, host}`) only goes there, and
+//!   one with an `effort` only to hosts whose catalog lists that level for
+//!   its tool and model.
 //!   A run a comment queued prefers the host of its task's previous run,
 //!   where the agent's last CLI session is (`conversation`).
 //! - **`bypass_permissions`** (a runtime's permission mode) runs only in a
@@ -51,10 +54,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::json;
-use sun_core::model::{Account, ActivityKind, EventRecord, Run};
+use sun_core::model::{Account, ActivityKind, EventRecord, Host, Run};
 use sun_core::{
-    Error, ExecEnvSpec, HostId, Result, RunId, RunStatus, StateMachine, TaskId, TaskStatus,
-    Timestamp, WorkspaceId,
+    ChainEntry, Error, ExecEnvSpec, HostId, Result, RunId, RunStatus, StateMachine, TaskId,
+    TaskStatus, Timestamp, WorkspaceId,
 };
 use sun_store::{
     EventLog, HostRepo, NewEvent, RunRepo, RuntimeRepo, SettingRepo, Store, TaskRepo, Tx,
@@ -605,12 +608,9 @@ impl Scheduler {
         // cooling (failover picks the same one at dispatch), and goes to a
         // host whose CLI for that runtime is ready.
         let mut tx = self.store.read().await?;
-        let names: HashMap<HostId, String> = tx
-            .hosts()
-            .await?
-            .into_iter()
-            .map(|h| (h.id, h.name))
-            .collect();
+        let every_host = tx.hosts().await?;
+        let names: HashMap<HostId, String> =
+            every_host.iter().map(|h| (h.id, h.name.clone())).collect();
         // The hosts each waiting run's workspace has. The fallback host takes
         // any run only while it is no enrolled host (tests, before any joined).
         let mut attached: HashMap<WorkspaceId, HashSet<HostId>> = HashMap::new();
@@ -631,6 +631,9 @@ impl Scheduler {
         let mut to_market = Vec::new();
         // Runs placement refuses (bypass outside a container or VM).
         let mut refused = Vec::new();
+        // Runs whose picked entry only some hosts may take (`host:`,
+        // `effort:`), with those hosts.
+        let mut only_on: HashMap<RunId, HashSet<HostId>> = HashMap::new();
         let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
         let capped = crate::budget::ecosystem_over(&mut tx, now).await?.is_some();
         self.held_until = capped.then(|| crate::budget::next_month_start(now));
@@ -656,10 +659,11 @@ impl Scheduler {
             if capped && spends {
                 continue;
             }
-            let chain = workflow
+            let entries = workflow
                 .as_ref()
-                .map(|workflow| failover::chain(workflow, &slot.runtime))
-                .unwrap_or_else(|| vec![slot.runtime.clone()]);
+                .map(|workflow| failover::entries(workflow, &slot.runtime))
+                .unwrap_or_else(|| vec![ChainEntry::from(slot.runtime.as_str())]);
+            let chain = sun_core::chain_names(&entries);
             let own = tx.setting(&task_exec_env_key(w.run.task_id)).await?;
             let env = match own.filter(|v| !v.is_null()) {
                 Some(spec) => serde_json::from_value::<ExecEnvSpec>(spec).unwrap_or_default(),
@@ -681,6 +685,25 @@ impl Scheduler {
                     true => tx.runtime_by_name(w.workspace, name).await?,
                     false => None,
                 };
+                let adapter = row
+                    .as_ref()
+                    .map_or(name.as_str(), |row| row.adapter.as_str());
+                // `host:` pins the entry to that host; an `effort:` goes only
+                // to hosts whose catalog lists it for the tool and model.
+                let only = failover::entry(&entries, name).and_then(|entry| {
+                    let fits = |h: &Host| {
+                        entry.host().is_none_or(|pin| h.id.to_string() == pin)
+                            && entry.effort().is_none_or(|effort| {
+                                h.effort_catalog(adapter).allows(entry.model(), effort)
+                            })
+                    };
+                    let constrained = entry.host().is_some() || entry.effort().is_some();
+                    constrained.then(|| {
+                        let hosts = every_host.iter().filter(|h| fits(h));
+                        hosts.map(|h| h.id).collect::<HashSet<HostId>>()
+                    })
+                });
+                let eligible = |h: &HostId| only.as_ref().is_none_or(|only| only.contains(h));
                 let account = Account::of(row.as_ref(), name);
                 if local {
                     // Cooling while its account cools on every host that
@@ -691,7 +714,7 @@ impl Scheduler {
                         .await?
                         .iter()
                         .map(|(h, ..)| *h)
-                        .filter(|h| may_take(&attached, *h, w.workspace))
+                        .filter(|h| may_take(&attached, *h, w.workspace) && eligible(h))
                         .peekable();
                     let cooled = |h: HostId| self.cooling.contains_key(&account.key(h));
                     let cooling = match &account {
@@ -703,14 +726,16 @@ impl Scheduler {
                     }
                 }
                 if spends && local {
-                    let adapter = row.map_or_else(|| name.clone(), |row| row.adapter);
-                    let mode = modes.get(&adapter).map(String::as_str);
+                    let mode = modes.get(adapter).map(String::as_str);
                     if let Some(why) = sun_core::mode_refusal(mode, &env) {
                         refusal.get_or_insert((name, why));
                         continue;
                     }
                 }
                 runtime = Some((name, account));
+                if let Some(only) = only {
+                    only_on.insert(w.run.id, only);
+                }
                 break;
             }
             let (runtime, account) = match (runtime, refusal) {
@@ -825,6 +850,9 @@ impl Scheduler {
             |host, runtime| max_sessions.get(&(*host, runtime.to_owned())).copied(),
             |host, want| {
                 runs_on.contains(&(*host, want.runtime.clone()))
+                    && only_on
+                        .get(&want.run_id)
+                        .is_none_or(|only| only.contains(host))
                     && !self.cooling.contains_key(&want.account.key(*host))
                     && may_take(&attached, *host, want.workspace)
             },

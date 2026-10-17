@@ -549,8 +549,8 @@ export interface Agent {
   name: string;
   description: string;
   instructions: string;
-  /** Runtime ids in failover order */
-  runtime_chain: string[];
+  /** Its runtimes in failover order: names, or a tool with its settings */
+  runtime_chain: ChainEntry[];
   /** Catalog skill ids */
   skill_ids: string[];
   created_at: Timestamp;
@@ -568,8 +568,40 @@ export interface AgentFields {
   name?: string;
   description?: string;
   instructions?: string;
-  runtime_chain?: string[];
+  runtime_chain?: ChainEntry[];
   skill_ids?: string[];
+}
+
+/** One runtime of a chain: a runtime name (`claude-code`, `ollama-qwen`, `market:codex`) or a tool
+ *  with its settings. Exactly these five fields: the shape lands in workflow YAML users commit. */
+export type ChainEntry = string | ChainSpec;
+
+export interface ChainSpec {
+  /** The tool id, e.g. `codex` */
+  tool: string;
+  /** A key-backed runtime's name that pays; absent: the CLI's own login */
+  credential?: string;
+  /** The host id it must run on; absent: any eligible host */
+  host?: string;
+  /** Passed to the CLI as its model; absent: the CLI's default */
+  model?: string;
+  /** One of the effort levels the host reported (`EffortLevel.value`); absent: the CLI's default */
+  effort?: string;
+}
+
+/** An effort level as the CLI itself names it. Render `label`, store `value`. */
+export interface EffortLevel {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+/** A model the CLI lists, with its own effort levels when the CLI scopes effort per model. */
+export interface ModelEffort {
+  id: string;
+  label: string;
+  effort_options: EffortLevel[];
+  default_effort?: string;
 }
 
 /** GET /api/v1/runtimes: one per (host, tool), then the workspace's key-backed runtimes (`host: null`). */
@@ -606,6 +638,10 @@ export interface Runtime {
   config: ByoKeyConfig | null;
   /** A `credits` runtime's gateway model (OpenCode only); `null` for the others */
   model: string | null;
+  /** The effort levels the CLI on this host offers, tool-wide; empty when it has none (or a key-backed runtime) */
+  effort_options: EffortLevel[];
+  /** Models the CLI lists, when it scopes effort per model (Codex); a model not here uses `effort_options` */
+  models: ModelEffort[];
 }
 
 /** Claude Code's permission modes; every adapter maps them. */

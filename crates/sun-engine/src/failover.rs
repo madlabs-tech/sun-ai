@@ -74,8 +74,8 @@ use sun_core::host_protocol::{Capabilities, ExecRequest};
 use sun_core::model::{self, Account, EventRecord, Step};
 use sun_core::redact::redact;
 use sun_core::{
-    Error, HandoffPackId, HostId, Result, RunId, RunStatus, StepId, StepKey, StepStatus, SunEvent,
-    TaskId, Timestamp,
+    ChainEntry, Error, HandoffPackId, HostId, Result, RunId, RunStatus, StepId, StepKey,
+    StepStatus, SunEvent, TaskId, Timestamp,
 };
 use sun_store::{
     EventLog, HostRepo, NewEvent, RunRepo, RuntimeRepo, SecretRepo, SessionRepo, SettingRepo,
@@ -238,12 +238,46 @@ fn pick(
         .cloned()
 }
 
-/// The runtime chain of a workflow; without `runtime:` the engine default.
+/// The runtime names of a workflow's chain ([`ChainEntry::name`]); without
+/// `runtime:` the engine default.
 pub(crate) fn chain(workflow: &Workflow, default: &str) -> Vec<String> {
+    entries(workflow, default)
+        .iter()
+        .map(|e| e.name().to_owned())
+        .collect()
+}
+
+/// The entries of a workflow's chain, with their settings; without
+/// `runtime:` the engine default.
+pub(crate) fn entries(workflow: &Workflow, default: &str) -> Vec<ChainEntry> {
     workflow
         .runtime
         .as_ref()
-        .map_or_else(|| vec![default.to_owned()], |p| p.chain.clone())
+        .map_or_else(|| vec![ChainEntry::from(default)], |p| p.chain.clone())
+}
+
+/// Why `entry` can't run on `host`: it is pinned to another one.
+pub(crate) fn pinned_elsewhere(entry: &ChainEntry, host: HostId) -> Option<String> {
+    let pin = entry.host()?;
+    (pin != host.to_string()).then(|| format!("`{}` is pinned to host {pin}", entry.name()))
+}
+
+/// Why `entry` can't run on `host`: its effort isn't a level the host's
+/// catalog lists for `adapter` and the entry's model.
+fn effort_missing(entry: &ChainEntry, host: Option<&model::Host>, adapter: &str) -> Option<String> {
+    let effort = entry.effort()?;
+    let offered = host.is_some_and(|h| h.effort_catalog(adapter).allows(entry.model(), effort));
+    (!offered).then(|| {
+        format!(
+            "`{}`: the host doesn't offer effort `{effort}`",
+            entry.name()
+        )
+    })
+}
+
+/// The entry of `chain` named `name` ([`ChainEntry::name`]), if any.
+pub(crate) fn entry<'a>(chain: &'a [ChainEntry], name: &str) -> Option<&'a ChainEntry> {
+    chain.iter().find(|e| e.name() == name)
 }
 
 /// What one host reported about its runtimes, read per
@@ -392,7 +426,9 @@ impl Executor {
     /// adapter installed and logged in, per the host's last report read per
     /// [`super::RUNTIMES_MODEL`]) and not cooling down. Each unready runtime
     /// passed over is journalled as `runtime_skipped {runtime, reason}`. A
-    /// host that reported no capabilities is trusted. A runtime whose
+    /// host that reported no capabilities is trusted. An entry pinned to
+    /// another host (`host:`), or whose `effort:` this host doesn't list,
+    /// is unready here. A runtime whose
     /// permission mode is `bypass_permissions` is unready for a run outside a
     /// container or VM ([`sun_core::mode_refusal`]). A `market:` entry is
     /// ready only for a limit hit (`market`) whose run may move there
@@ -405,10 +441,8 @@ impl Executor {
         market: bool,
     ) -> Result<Option<String>> {
         let rows = super::runtime_rows(tx).await?;
-        let reported = match tx.get_host(self.host(step.run_id)).await {
-            Ok(host) => Reported::of(&host, rows.as_deref()),
-            Err(_) => None,
-        };
+        let host = tx.get_host(self.host(step.run_id)).await.ok();
+        let reported = host.as_ref().and_then(|h| Reported::of(h, rows.as_deref()));
         let mut unready = HashMap::new();
         if chain.iter().any(|n| n.starts_with(MARKET_PREFIX)) {
             let why = match market {
@@ -427,6 +461,8 @@ impl Executor {
         let workspace = tx.workspace_of_run(step.run_id).await?;
         let env = self.exec_env(tx, step.run_id).await?;
         let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
+        let run = tx.get_run(step.run_id).await?;
+        let entries = entries(&*self.workflow(tx, &run).await?, &self.config.adapter);
         // A `market:` runtime runs on the seller's host, not this one.
         for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
             let adapter = match tx.runtime_by_name(workspace, name).await? {
@@ -434,7 +470,12 @@ impl Executor {
                 None => name.clone(),
             };
             let mode = modes.get(&adapter).map(String::as_str);
-            let why = reported.as_ref().and_then(|r| r.unready(&adapter));
+            let entry = entry(&entries, name);
+            let pinned = entry.and_then(|e| pinned_elsewhere(e, self.host(step.run_id)));
+            let effort = entry.and_then(|e| effort_missing(e, host.as_ref(), &adapter));
+            let why = pinned
+                .or(effort)
+                .or_else(|| reported.as_ref().and_then(|r| r.unready(&adapter)));
             if let Some(why) = why.or_else(|| sun_core::mode_refusal(mode, &env)) {
                 unready.insert(name.clone(), why);
             }
@@ -803,18 +844,23 @@ impl Executor {
         else {
             return Ok(());
         };
-        let account = self.account(tx, step.run_id, preferred).await?;
+        // Pinned to another host: it can't take over on this one.
+        if pinned_elsewhere(preferred, self.host(step.run_id)).is_some() {
+            return Ok(());
+        }
+        let preferred = preferred.name().to_owned();
+        let account = self.account(tx, step.run_id, &preferred).await?;
         if !self.failover.cooling.get(&account).is_some_and(over) {
             return Ok(());
         }
         let from = self.runtime_of(tx, step).await?;
-        if from == *preferred {
+        if from == preferred {
             return Ok(());
         }
         let handoff = Handoff {
             step_id: step.id,
             from,
-            to: preferred.clone(),
+            to: preferred,
             reason: HandoffReason::SwitchBack,
             reset_at: None,
         };

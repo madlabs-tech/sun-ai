@@ -1,6 +1,7 @@
 // In-memory agents for the mock: GET/POST /agents, PATCH/DELETE /agents/{id} (DELETE archives).
 // Ready when a runtime of the chain is known and not offline, like the kernel's "logged in on an online host".
-import type { Agent, AgentFields } from './types';
+import type { Agent, AgentFields, ChainEntry } from './types';
+import { entry_name } from '../format';
 import { MAIN_WORKSPACE } from './types';
 import { MockError, RUNTIMES, clone, not_found } from './mock';
 
@@ -8,7 +9,7 @@ const invalid = (message: string) => new MockError(422, { error: { code: 'invali
 let next_id = 0;
 const new_id = () => `01JVAG${String(++next_id).padStart(4, '0')}`.padEnd(26, '0');
 
-const agent = (name: string, description: string, instructions: string, runtime_chain: string[], skill_ids: string[], task_count: number): Agent => ({
+const agent = (name: string, description: string, instructions: string, runtime_chain: ChainEntry[], skill_ids: string[], task_count: number): Agent => ({
   id: new_id(),
   workspace_id: MAIN_WORKSPACE,
   name,
@@ -33,7 +34,7 @@ export const find_agent = (id: string) => agents.find((a) => a.id === id);
 
 /** The agent with its readiness read now. */
 function view(a: Agent): Agent {
-  const reasons = a.runtime_chain.map((id) => {
+  const reasons = a.runtime_chain.map(entry_name).map((id) => {
     const of_name = RUNTIMES.filter((x) => x.name === id);
     // Logged in on an online host; a limit doesn't log it out.
     const ready = of_name.some((x) => ['idle', 'busy', 'limited'].includes(x.state));
@@ -41,6 +42,15 @@ function view(a: Agent): Agent {
   });
   const ready = reasons.some((r) => r === null);
   return clone({ ...a, ready, ready_reason: ready ? null : reasons.join('; ') });
+}
+
+/** A `{tool, host, model, effort}` entry checked like the kernel: the host reported the tool, the effort is in its catalog. */
+function check_entry(e: ChainEntry, i: number) {
+  if (typeof e === 'string') return;
+  const reports = RUNTIMES.filter((r) => r.host && r.tool === e.tool && (!e.host || r.host.id === e.host));
+  if (e.host && !reports.length) throw invalid(`invalid input: runtime_chain[${i}].host: that host has not reported ${e.tool}`);
+  const offered = (r: (typeof reports)[number]) => (r.models.find((m) => m.id === e.model)?.effort_options ?? r.effort_options).some((l) => l.value === e.effort);
+  if (e.effort && !reports.some(offered)) throw invalid(`invalid input: runtime_chain[${i}].effort: \`${e.effort}\` is not an effort level ${e.tool} offers`);
 }
 
 /** `fields` set on `a`, checked like the kernel. */
@@ -51,6 +61,7 @@ function apply(a: Agent, fields: AgentFields): Agent {
   if ([...next.description].length > 1000) throw invalid('Keep the description to 1000 characters.');
   if ([...next.instructions].length > 20_000) throw invalid('Keep the instructions to 20000 characters.');
   if (!next.runtime_chain.length || next.runtime_chain.length > 32) throw invalid('Pick 1 to 32 runtimes for the agent.');
+  next.runtime_chain.forEach(check_entry);
   if (agents.some((x) => x.id !== a.id && !x.archived_at && x.name.toLowerCase() === next.name.toLowerCase()))
     throw invalid(`There is already an agent named \`${next.name}\`.`);
   return next;

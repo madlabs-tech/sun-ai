@@ -502,6 +502,10 @@ struct Start {
     exec_env: ExecEnvSpec,
     /// The runtime row's `byo_key` source (`None` for other sources).
     byo_key: Option<sun_core::ByoKey>,
+    /// The chain entry's model, if it sets one.
+    model: Option<String>,
+    /// The chain entry's effort, if it sets one the host offers.
+    effort: Option<String>,
 }
 
 impl Engine {
@@ -2135,6 +2139,8 @@ impl Executor {
             .await?;
         tx.assign_step_session(step.id, row.id, session_id).await?;
         let exec_env = self.exec_env(tx, step.run_id).await?;
+        let (model, effort, effort_ignored) =
+            self.entry_settings(tx, step, runtime, &row.adapter).await?;
         append(
             tx,
             step,
@@ -2149,6 +2155,9 @@ impl Executor {
                 "exec_env": exec_env,
                 "context_window": self.context_window(&row.adapter),
                 "rotate_at_percent": self.config.watchdog.rotate_at_percent,
+                "model": model,
+                "effort": effort,
+                "effort_ignored": effort_ignored,
             }),
         )
         .await?;
@@ -2166,8 +2175,42 @@ impl Executor {
             resume,
             exec_env,
             byo_key: row.byo_key,
+            model,
+            effort,
         }));
         Ok(session_id)
+    }
+
+    /// The model and effort chain entry `runtime` of the step's run sets.
+    /// The effort goes to the CLI only when the run's host lists it for
+    /// `adapter` and that model (its last report); else it is returned as
+    /// ignored, so the journal says why the CLI's default ran.
+    async fn entry_settings(
+        &mut self,
+        tx: &mut Tx,
+        step: &Step,
+        runtime: &str,
+        adapter: &str,
+    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
+        let run = tx.get_run(step.run_id).await?;
+        let entries = failover::entries(&*self.workflow(tx, &run).await?, &self.config.adapter);
+        let Some(entry) = failover::entry(&entries, runtime) else {
+            return Ok((None, None, None));
+        };
+        let model = entry.model().map(str::to_owned);
+        let Some(effort) = entry.effort() else {
+            return Ok((model, None, None));
+        };
+        let offered = match tx.get_host(self.host(step.run_id)).await {
+            Ok(host) => host
+                .effort_catalog(adapter)
+                .allows(model.as_deref(), effort),
+            Err(_) => false,
+        };
+        Ok(match offered {
+            true => (model, Some(effort.to_owned()), None),
+            false => (model, None, Some(effort.to_owned())),
+        })
     }
 
     /// Forgets the sessions of `step_id` and stops them after commit.
@@ -2442,7 +2485,8 @@ impl Executor {
                     worktree,
                     envelope,
                     envelope_parts,
-                    model: None,
+                    model: start.model.clone(),
+                    effort: start.effort.clone(),
                     mcp_config,
                     env: BTreeMap::new(),
                     exec_env: start.exec_env.clone(),
@@ -3166,6 +3210,7 @@ mod byo_key_tests {
             envelope: String::new(),
             envelope_parts: None,
             model: None,
+            effort: None,
             mcp_config: None,
             env: BTreeMap::new(),
             exec_env: ExecEnvSpec::Bare,

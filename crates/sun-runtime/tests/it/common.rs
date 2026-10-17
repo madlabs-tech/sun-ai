@@ -131,6 +131,7 @@ pub fn spec(dir: &Path, env: &[(&str, &str)]) -> SessionSpec {
         envelope: "Create hello.txt".into(),
         envelope_parts: None,
         model: None,
+        effort: None,
         mcp_config: None,
         env: vars,
         exec_env: Default::default(),
