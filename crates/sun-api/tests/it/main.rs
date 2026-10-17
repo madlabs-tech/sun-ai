@@ -7,6 +7,7 @@ mod api;
 mod auth;
 mod billing;
 mod bypass_gate;
+mod bypass_paths;
 mod chats;
 mod common;
 mod device;
