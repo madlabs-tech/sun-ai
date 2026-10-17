@@ -308,6 +308,7 @@ async fn structured_chain_entries_over_http() {
             {"value": "xhigh", "label": "Extra high", "description": "Deepest"},
         ],
         "models": [{"id": "small", "label": "Small", "effort_options": [{"value": "low", "label": "Low"}]}],
+        "permission_modes": ["plan", "auto"],
     }]);
     let _socket = crate::api::connect_host(app, k.host, hello).await;
 
@@ -326,6 +327,8 @@ async fn structured_chain_entries_over_http() {
         .unwrap();
     assert_eq!(fake["effort_options"][1]["label"], "Extra high", "{fake}");
     assert_eq!(fake["models"][0]["id"], "small");
+    // BLO-163: what the agent form's permission picker offers for the tool.
+    assert_eq!(fake["permission_modes"], json!(["plan", "auto"]));
 
     let host = k.host.to_string();
     for (chain, field) in [

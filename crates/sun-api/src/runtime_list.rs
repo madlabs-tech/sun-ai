@@ -11,7 +11,9 @@
 //! login of the tool, or a key on that tool of a workspace the host serves.
 //! Each `(host, tool)` entry carries the effort levels and models the host
 //! reported for the tool (`effort_options`, `models`; empty for key-backed
-//! entries), which the agent form offers.
+//! entries) and the permission modes the CLI there can enforce
+//! (`permission_modes`; `null` for key-backed entries, which run on any
+//! host with the tool), which the agent form offers.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -111,6 +113,7 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
             let catalog = host.effort_catalog(&tool);
             entry["effort_options"] = json!(catalog.effort_options);
             entry["models"] = json!(catalog.models);
+            entry["permission_modes"] = json!(host.permission_modes(&tool).unwrap_or_default());
             entries.push(entry);
         }
     }
@@ -150,7 +153,7 @@ impl Observed {
             "cooldown_until": self.cooldown_until,
             "probed_at": null, "last_seen_at": null,
             "config": null, "model": null,
-            "effort_options": [], "models": [],
+            "effort_options": [], "models": [], "permission_modes": null,
         })
     }
 }

@@ -156,12 +156,16 @@ impl Host {
         let ctx = HostCtx { host_id };
         let runtimes =
             futures_util::future::join_all(self.adapters.iter().map(|(id, adapter)| async {
-                let (readiness, effort) =
-                    tokio::join!(adapter.readiness(&ctx), adapter.effort(&ctx));
+                let (readiness, effort, permission_modes) = tokio::join!(
+                    adapter.readiness(&ctx),
+                    adapter.effort(&ctx),
+                    adapter.permission_modes(&ctx)
+                );
                 RuntimeCapability {
                     adapter: id.clone(),
                     readiness,
                     effort,
+                    permission_modes,
                 }
             }))
             .await;
