@@ -894,9 +894,11 @@ async fn create_task(
 
 /// A webhook: creates and queues a task on a workflow whose `on:`
 /// has `webhook`. Body `{title?, text?, url?, repo?, key?, ..}`; a repeated
-/// `key` answers 200 with the task it made the first time.
+/// `key` answers 200 with the task it made the first time. The run acts
+/// for the caller, so their bypass policy caps it.
 async fn trigger_workflow(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
     Path(workflow): Path<String>,
     Body(payload): Body<Value>,
 ) -> ApiResult<(StatusCode, Json<TaskView>)> {
@@ -907,7 +909,11 @@ async fn trigger_workflow(
         return Err(ApiError::invalid("The payload is longer than 64 KB."));
     }
     let workflow_id: WorkflowId = id(&workflow, "workflow")?;
-    let (task_id, created) = api.engine.trigger_webhook(workflow_id, &payload).await?;
+    let by = caller.task_actor();
+    let (task_id, created) = api
+        .engine
+        .trigger_webhook(workflow_id, &payload, Some(&by))
+        .await?;
     let Json(view) = summary(&api, task_id).await?;
     let status = match created {
         true => StatusCode::CREATED,

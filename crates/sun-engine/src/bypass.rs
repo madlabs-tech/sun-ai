@@ -13,9 +13,11 @@
 //! 5. The host refuses bypass on bare metal.
 //!
 //! The person is whoever made the run go: the commenter, mover or assigner
-//! (each queue path's actor), or the retry's caller. A run no person queued
-//! (a trigger, schedule or eval) acts for the deployment: it runs what was
-//! saved, which only the bypass gate's holders could save.
+//! (each queue path's actor), the retry's caller, or the webhook's caller.
+//! A run no person queued (a cron schedule, a mod event, an eval) acts for
+//! the deployment: it runs what was saved, which only the bypass gate's
+//! holders could save. The check is per run: a step retried, resumed or
+//! steered later still acts for whoever queued the run.
 
 use serde_json::{Value, json};
 use sun_core::model::{ActivityKind, AuditAction, BypassPolicy, OWNER_ISSUER, Run};
@@ -203,6 +205,26 @@ steps:
     needs: [plan]
 ";
 
+    /// An engine on `store` with a local host recording session modes.
+    async fn start(
+        store: &Store,
+        dir: &std::path::Path,
+        allow_bypass: bool,
+    ) -> (Engine, std::sync::Arc<LocalHost>) {
+        let local = LocalHost::new(dir, |_, _| {});
+        let config = crate::EngineConfig {
+            allow_bypass,
+            host: HostId::generate(),
+            adapter: "fake".into(),
+            delivery_timeout: Duration::from_secs(5),
+            watchdog: crate::WatchdogConfig::default(),
+        };
+        let (engine, _task) = Engine::start(store.clone(), local.clone(), mods(json!({})), config)
+            .await
+            .unwrap();
+        (engine, local)
+    }
+
     /// Who queues the run in each case.
     enum By {
         Engine,
@@ -228,17 +250,7 @@ steps:
     ) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
-        let local = LocalHost::new(dir.path(), |_, _| {});
-        let config = crate::EngineConfig {
-            allow_bypass,
-            host: HostId::generate(),
-            adapter: "fake".into(),
-            delivery_timeout: Duration::from_secs(5),
-            watchdog: crate::WatchdogConfig::default(),
-        };
-        let (engine, _task) = Engine::start(store.clone(), local.clone(), mods(json!({})), config)
-            .await
-            .unwrap();
+        let (engine, local) = start(&store, dir.path(), allow_bypass).await;
         let mut tx = store.begin().await.unwrap();
         let ana = tx
             .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
@@ -363,21 +375,59 @@ steps:
         }
     }
 
+    /// `POST /workflows/{id}/trigger` acts for its caller: under `off` a
+    /// member's webhook run of a bypass workflow is capped, said on the
+    /// thread and audited. A webhook with no caller acts for the deployment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_webhook_run_acts_for_its_caller() {
+        let hooked = BYPASS.replace("name: agent\n", "name: agent\non: [webhook]\n");
+        for (member, want) in [(true, "accept_edits"), (false, "bypass_permissions")] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path()).await.unwrap();
+            let (engine, local) = start(&store, dir.path(), true).await;
+            let mut tx = store.begin().await.unwrap();
+            let ana = tx
+                .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let (workflow, _) = engine.save_workflow(None, &hooked).await.unwrap();
+            let by = Actor {
+                member_id: Some(ana.id),
+                name: "user:ana".into(),
+            };
+            let payload = json!({ "title": "deploy failed" });
+            let (task, _) = engine
+                .trigger_webhook(workflow.id, &payload, member.then_some(&by))
+                .await
+                .unwrap();
+            let run_id = {
+                let mut tx = store.read().await.unwrap();
+                tx.runs_of_task(task).await.unwrap().pop().unwrap().id
+            };
+            engine.start_run(run_id).await.unwrap();
+            let run = until_run_ends(&store, run_id).await;
+            assert_eq!(run.status, RunStatus::Succeeded);
+            let got = local.modes.lock().unwrap().clone();
+            assert_eq!(modes(&got), [Some(want), Some(want)]);
+            let capped = events(&store, run_id, BYPASS_CAPPED).await;
+            let (thread, audit) = thread_and_audit(&store, run_id).await;
+            match member {
+                true => {
+                    assert_eq!(capped.len(), 2, "{capped:?}");
+                    assert_eq!(thread, [capped_line("ana")]);
+                    assert_eq!(audit.len(), 2, "{audit:?}");
+                }
+                false => assert!(capped.is_empty() && thread.is_empty() && audit.is_empty()),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn a_policy_naming_an_unknown_member_is_refused_and_ids_deduplicate() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).await.unwrap();
-        let local = LocalHost::new(dir.path(), |_, _| {});
-        let config = crate::EngineConfig {
-            allow_bypass: true,
-            host: HostId::generate(),
-            adapter: "fake".into(),
-            delivery_timeout: Duration::from_secs(5),
-            watchdog: crate::WatchdogConfig::default(),
-        };
-        let (engine, _task) = Engine::start(store.clone(), local, mods(json!({})), config)
-            .await
-            .unwrap();
+        let (engine, _) = start(&store, dir.path(), true).await;
         assert_eq!(
             engine.bypass_policy().await.unwrap(),
             BypassPolicy::default()
