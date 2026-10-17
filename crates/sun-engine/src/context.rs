@@ -246,8 +246,16 @@ impl Executor {
         let selection = read.task_context(brief.task_id).await?;
         let task = read.get_task(brief.task_id).await?;
         let sources = task_sources(&mut read, &task).await?;
-        let memory = crate::memory::active_for(&mut read, &task).await?;
-        let workspace_context = crate::workspaces::workspace_context(&mut read, task.id).await?;
+        // A chat without an agent is the bare tool, like its own app: no
+        // memory, workspace context or knowledge.
+        let direct = super::tasks::direct_chat(&mut read, &task).await?;
+        let (memory, workspace_context) = match direct {
+            true => (Vec::new(), String::new()),
+            false => (
+                crate::memory::active_for(&mut read, &task).await?,
+                crate::workspaces::workspace_context(&mut read, task.id).await?,
+            ),
+        };
         let task_worktree = super::worktree_of(&mut read, brief.task_id).await?;
         // A chat answers and never clones, so it isn't told about the repos.
         let repos = if task.kind == model::TaskKind::Chat {
@@ -267,7 +275,10 @@ impl Executor {
         };
         // Knowledge is optional: a failed search never blocks a session.
         let query = format!("{} {}", brief.goal, brief.title);
-        let hits = retrieve_scoped(&self.store, &query, &sources).await;
+        let hits = match direct {
+            true => Vec::new(),
+            false => retrieve_scoped(&self.store, &query, &sources).await,
+        };
         // The repo's design system rides along when it has one.
         let design = read_design(&*self.hosts, self.host(step.run_id), &task_worktree).await;
         let ledger = LedgerView {

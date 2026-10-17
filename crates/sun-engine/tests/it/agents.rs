@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use sun_core::StateMachine as _;
 use sun_core::model::{Assignee, Host, Priority, Run, Task, TaskKind};
 use sun_core::{
     AgentId, BoxStream, EngineHandle, Error, HostEvent, HostId, HostLink, ModCall, ModLink, Result,
@@ -2548,4 +2549,173 @@ async fn a_string_only_chain_is_unchanged() {
     let task = k.task(agent, TaskStatus::Todo).await;
     k.working(task).await;
     assert_eq!(k.host.settings.lock().unwrap().last(), Some(&(None, None)));
+}
+
+impl Kernel {
+    /// Waits until `chat` has `n` replies and its last run has ended, so the
+    /// next message queues a new run.
+    async fn answered(&self, chat: TaskId, n: usize) {
+        eventually(&format!("{n} replies"), || async {
+            let replies = self.comments(chat).await;
+            let replies = replies
+                .iter()
+                .filter(|c| c.get("by_agent").or(c.get("by_tool")).is_some())
+                .count();
+            let ended = self
+                .runs(chat)
+                .await
+                .pop()
+                .is_some_and(|r| r.status.is_terminal());
+            replies == n && ended && self.get(chat).await.status == TaskStatus::NeedsYou
+        })
+        .await;
+    }
+}
+
+/// BLO-162: a chat without an agent talks to the picked tool bare (the chat
+/// brief, no instructions, skills, memory or workspace context), the tool
+/// replies as itself, the next message resumes it, and a fresh session reads
+/// the tool's lines as its own. Its workflow is hidden and the chat keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_chat_talks_to_the_bare_tool_and_the_tool_replies() {
+    use sun_core::model::{MemoryItem, MemoryScope, MemoryStatus};
+    use sun_store::MemoryRepo;
+
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    k.host.finish.store(true, Ordering::SeqCst);
+    let context = sun_engine::ProfileChange {
+        context: Some("Workspace rule: deploy on Fridays.".into()),
+        ..Default::default()
+    };
+    k.engine
+        .update_workspace_profile(WorkspaceId::MAIN, &context, "user:me")
+        .await
+        .unwrap();
+    let mut tx = k.store.begin().await.unwrap();
+    let item = MemoryItem {
+        id: sun_core::MemoryItemId::generate(),
+        workspace_id: WorkspaceId::MAIN,
+        scope: MemoryScope::Ecosystem,
+        scope_id: None,
+        body: "Memory rule: blue-green.".into(),
+        target: None,
+        reason: "r".into(),
+        source_run: None,
+        status: MemoryStatus::Active,
+        author: "sun".into(),
+        reviewed_by: None,
+        created_at: chrono::Utc::now(),
+    };
+    tx.insert_memory(&item, "rule").await.unwrap();
+    tx.commit().await.unwrap();
+    let ada = k.agent("Ada").await;
+
+    let runtime = sun_core::ChainSpec {
+        tool: "fake".into(),
+        credential: None,
+        host: None,
+        model: Some("m1".into()),
+        effort: None,
+    };
+    let plan = Some(sun_core::PermissionMode::Plan);
+    let chat = k
+        .engine
+        .create_direct_chat(WorkspaceId::MAIN, runtime, plan, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (chat.kind, chat.assignee_agent_id, chat.status),
+        (TaskKind::Chat, None, TaskStatus::NeedsYou)
+    );
+    assert_eq!(chat.title, "fake · m1");
+
+    // Hidden, saved only by the engine: one step, no skills, the mode given.
+    let workflow = chat.workflow_id.unwrap();
+    let listed = k.engine.workflows().await.unwrap();
+    assert!(listed.iter().all(|(w, _)| w.id != workflow));
+    assert!(matches!(
+        k.engine.workflow(workflow).await,
+        Err(Error::NotFound(_))
+    ));
+    let mut tx = k.store.read().await.unwrap();
+    let source = tx.latest_workflow_version(workflow).await.unwrap().unwrap();
+    drop(tx);
+    let source = source.source_yaml;
+    assert!(source.contains("\"skills\": []"), "{source}");
+    assert!(source.contains("\"permission_mode\": \"plan\""), "{source}");
+    let saved = k.engine.save_workflow(Some(workflow), &source).await;
+    assert!(matches!(saved, Err(Error::NotFound(_))), "{saved:?}");
+    // It keeps its tool: no assignment, to an agent or to nobody.
+    for to in [None, Some(Assignee::Agent { id: ada })] {
+        let moved = k.engine.assign_task(chat.id, to, None).await;
+        assert!(matches!(moved, Err(Error::InvalidInput(_))), "{moved:?}");
+    }
+
+    k.say(chat.id, "ana", "Hi there").await;
+    k.answered(chat.id, 1).await;
+    let first = k.host.envelopes()[0].clone();
+    assert!(first.contains("You are chatting with a person."), "{first}");
+    assert!(first.contains("- ana: Hi there"), "{first}");
+    for absent in ["Workspace rule", "Memory rule", "You are Ada"] {
+        assert!(!first.contains(absent), "{absent}: {first}");
+    }
+    assert_eq!(k.host.skills.lock().unwrap()[0], Some(Vec::new()));
+    let settings = k.host.settings.lock().unwrap()[0].clone();
+    assert_eq!(settings, (Some("m1".into()), None));
+    let reply = k.comments(chat.id).await.pop().unwrap();
+    assert_eq!(
+        (&reply["by_tool"], reply.get("by_agent")),
+        (&json!("fake"), None)
+    );
+
+    // The next message resumes the tool's session.
+    k.say(chat.id, "ana", "And then?").await;
+    k.answered(chat.id, 2).await;
+    let (resumed, _) = k.session(1);
+    assert_eq!(resumed, k.host.natives.lock().unwrap()[0].1);
+
+    // The CLI lost it: a fresh session reads the tool's lines as its own.
+    k.host.refuse_resume.store(true, Ordering::SeqCst);
+    k.say(chat.id, "ana", "Last one").await;
+    k.sessions(3).await;
+    assert_eq!(
+        thread_lines(&k.host.envelopes()[2]),
+        [
+            "- ana: Hi there",
+            "- fake (you): done",
+            "- ana: And then?",
+            "- fake (you): done",
+            "- ana: Last one",
+        ]
+    );
+}
+
+/// BLO-162 §3: a session resumes only on the version it started with, so an
+/// agent edited mid-chat answers the next message in a fresh session with
+/// its new instructions and the thread, not under the old ones.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_edited_mid_chat_answers_fresh_with_its_new_instructions() {
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    k.host.finish.store(true, Ordering::SeqCst);
+    let ada = k.agent("Ada").await;
+    let chat = k.engine.create_chat(ada, None).await.unwrap();
+    k.say(chat.id, "ana", "Hi").await;
+    k.answered(chat.id, 1).await;
+
+    let terse = AgentFields {
+        instructions: Some("You are Ada, now terse.".into()),
+        ..AgentFields::default()
+    };
+    k.engine.update_agent(ada, terse, "user:me").await.unwrap();
+    k.say(chat.id, "ana", "Still there?").await;
+    k.sessions(2).await;
+    assert_eq!(k.session(1).0, None, "no resume across versions");
+    let fresh = k.host.envelopes()[1].clone();
+    assert!(fresh.contains("You are Ada, now terse."), "{fresh}");
+    assert_eq!(
+        thread_lines(&fresh),
+        ["- ana: Hi", "- Ada (you): done", "- ana: Still there?"]
+    );
 }

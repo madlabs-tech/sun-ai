@@ -553,6 +553,18 @@ pub struct Workflow {
     pub name: String,
 }
 
+/// Who a workflow belongs to. Only a person's is listed and saved by people;
+/// the engine makes and saves the hidden others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowOwner {
+    /// A person's workflow (or a missing one).
+    Person,
+    /// An agent's system workflow.
+    Agent(AgentId),
+    /// A direct chat's: one agent step on the tool the person picked.
+    DirectChat,
+}
+
 /// `workflow_version` — saving a workflow creates a new version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowVersion {

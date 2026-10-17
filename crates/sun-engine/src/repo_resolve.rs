@@ -5,13 +5,14 @@
 
 use std::collections::HashSet;
 
-use sun_core::model::{Repo, Task};
+use sun_core::model::{Repo, Task, WorkflowOwner};
 use sun_core::{Error, RepoId, Result, WorkflowId};
 use sun_store::{AgentRepo, RepoRepo, Tx};
 
-/// The repos a run of `task` on `workflow` works in: none on an agent's
-/// system workflow (it clones for itself), else the workspace repos the
-/// task's title and body and the workflow's name and `description` name.
+/// The repos a run of `task` on `workflow` works in: none on a hidden
+/// workflow (an agent clones for itself, a direct chat needs none), else the
+/// workspace repos the task's title and body and the workflow's name and
+/// `description` name.
 /// `InvalidInput` when a coding workflow ([`sun_workflow::Workflow::is_coding`])
 /// names none while the workspace has repos to name.
 pub(crate) async fn run_repos(
@@ -20,7 +21,7 @@ pub(crate) async fn run_repos(
     workflow_id: WorkflowId,
     workflow: &sun_workflow::Workflow,
 ) -> Result<Vec<RepoId>> {
-    if tx.system_agent_of(workflow_id).await?.is_some() {
+    if tx.workflow_owner(workflow_id).await? != WorkflowOwner::Person {
         return Ok(Vec::new());
     }
     let repos = tx.repos(task.workspace_id).await?;

@@ -3,7 +3,7 @@
 //! of the workflow lists.
 #![allow(clippy::unwrap_used)]
 
-use sun_core::model::{Agent, Task, Workflow};
+use sun_core::model::{Agent, Task, Workflow, WorkflowOwner};
 use sun_core::{AgentId, Error, WorkflowId, WorkspaceId};
 use sun_store::{AgentRepo, Store, StoreError, TaskRepo, WorkflowRepo};
 
@@ -77,12 +77,33 @@ async fn agent_names_are_unique_while_active_and_tasks_name_real_agents() {
             .unwrap(),
         Some(system.id)
     );
-    assert_eq!(tx.system_agent_of(system.id).await.unwrap(), Some(ada2.id));
-    assert_eq!(tx.system_agent_of(mine.id).await.unwrap(), None);
+    // A direct chat's workflow: hidden too, owned by no agent.
+    let chat = Workflow {
+        id: WorkflowId::generate(),
+        ..system.clone()
+    };
+    tx.insert_direct_chat_workflow(&chat).await.unwrap();
+    let agent = WorkflowOwner::Agent(ada2.id);
+    assert_eq!(tx.workflow_owner(system.id).await.unwrap(), agent);
+    assert_eq!(
+        tx.workflow_owner(mine.id).await.unwrap(),
+        WorkflowOwner::Person
+    );
+    assert_eq!(
+        tx.workflow_owner(chat.id).await.unwrap(),
+        WorkflowOwner::DirectChat
+    );
+    let missing = WorkflowId::generate();
+    assert_eq!(
+        tx.workflow_owner(missing).await.unwrap(),
+        WorkflowOwner::Person
+    );
     assert_eq!(tx.workflows().await.unwrap(), std::slice::from_ref(&mine));
     let listed = tx.workflows_of_workspace(WorkspaceId::MAIN).await.unwrap();
     assert_eq!(listed, [mine]);
-    assert_eq!(tx.system_workflows().await.unwrap(), [system]);
+    let mut hidden = vec![system, chat];
+    hidden.sort_by_key(|w| w.id.to_string());
+    assert_eq!(tx.hidden_workflows().await.unwrap(), hidden);
 }
 
 /// Item 9: `agent.permission_mode` is `None` (inherit) unless set, and

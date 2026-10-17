@@ -20,14 +20,23 @@
 //! - **A direct chat** ([`Engine::create_chat`]) is a `chat` task with no
 //!   source: a person's own conversation with an agent, its messages the
 //!   chat's comments. Only its creator sees it ([`Engine::chat_hidden`]).
+//!   Without an agent ([`Engine::create_direct_chat`]) it runs its own
+//!   hidden one-step workflow on the tool the person picked, with no
+//!   instructions, skills, memory or workspace context, and the tool replies
+//!   (`by_tool`).
 
 use serde_json::json;
-use sun_core::model::{ActivityKind, Run, Task, TaskActivity, TaskKey, TaskKind};
+use sun_core::model::{
+    ActivityKind, Run, Task, TaskActivity, TaskKey, TaskKind, Workflow, WorkflowOwner,
+};
 use sun_core::redact::redact;
 use sun_core::{
-    AgentId, Error, MemberId, Result, RunId, RunStatus, TaskId, TaskStatus, WorkspaceId,
+    AgentId, ChainEntry, ChainSpec, Error, MemberId, PermissionMode, Result, RunId, RunStatus,
+    TaskId, TaskStatus, WorkflowId, WorkspaceId,
 };
-use sun_store::{AgentRepo, EventLog, RunRepo, SecretRepo, TaskRepo, Tx};
+use sun_store::{
+    AgentRepo, EventLog, RunRepo, SecretRepo, TaskRepo, Tx, WorkflowRepo, WorkspaceRepo,
+};
 
 use crate::executor::tasks;
 use crate::{Engine, OnWorkspace, agents};
@@ -41,14 +50,16 @@ const THREAD_CHARS: usize = 16_000;
 /// Agents one comment may mention.
 const MAX_MENTIONS: usize = 5;
 
-/// `summary`, the done claim of `run_id`'s agent, as the agent's comment on
-/// the run's task (a mention chat's: on the task it came from). Nothing for
-/// an empty claim or another workflow's run.
+/// `summary`, the done claim of `run_id`'s agent (or a direct chat's tool),
+/// as its comment on the run's task (a mention chat's: on the task it came
+/// from). Nothing for an empty claim or a person's workflow's run.
 pub(crate) async fn reply(tx: &mut Tx, run_id: RunId, summary: &str) -> Result<()> {
     let text = summary.trim();
     let run = tx.get_run(run_id).await?;
-    let Some(agent) = tx.system_agent_of(run.workflow_id).await? else {
-        return Ok(());
+    let (by, who) = match tx.workflow_owner(run.workflow_id).await? {
+        WorkflowOwner::Agent(agent) => ("by_agent", json!(agent)),
+        WorkflowOwner::DirectChat => ("by_tool", json!(chat_tool(tx, &run).await?)),
+        WorkflowOwner::Person => return Ok(()),
     };
     if text.is_empty() {
         return Ok(());
@@ -60,10 +71,23 @@ pub(crate) async fn reply(tx: &mut Tx, run_id: RunId, summary: &str) -> Result<(
         .chars()
         .take(TaskActivity::MAX_COMMENT)
         .collect();
-    let body = json!({ "text": text, "by_agent": agent, "run_id": run_id });
+    let mut body = json!({ "text": text, "run_id": run_id });
+    body[by] = who;
     let on = thread_of(tx, run.task_id).await?;
     tasks::log(tx, on, ActivityKind::Comment, None, body).await?;
     Ok(())
+}
+
+/// The tool a direct chat's run talks to: its one chain entry's.
+async fn chat_tool(tx: &mut Tx, run: &Run) -> Result<String> {
+    let version = tx
+        .get_workflow_version(run.workflow_id, run.workflow_version)
+        .await?;
+    let parsed = crate::query::parse(&version.source_yaml)?;
+    let entry = parsed.runtime.and_then(|r| r.chain.into_iter().next());
+    Ok(entry
+        .map(|e| e.spec().map_or(e.name(), |s| &s.tool).to_owned())
+        .unwrap_or_default())
 }
 
 /// The task whose thread `task_id` talks on: its source for a mention chat.
@@ -142,15 +166,18 @@ pub(crate) async fn woken_by_comment(tx: &mut Tx, run_id: RunId) -> Result<bool>
         .is_some_and(|e| e.payload["reason"] == COMMENT))
 }
 
-/// The run of the same workflow just before `run` on its task, unless the
-/// watchdog stopped it: resuming a stalled, looping or over-budget session
-/// would carry that context on, so those start fresh with the thread.
+/// The run of the same workflow version just before `run` on its task,
+/// unless the watchdog stopped it: resuming a stalled, looping or
+/// over-budget session would carry that context on, so those start fresh
+/// with the thread. A new version (an edited agent, a chat switched to
+/// another model) starts fresh too: a resumed session keeps the
+/// instructions and settings it started with.
 pub(crate) async fn previous_run(tx: &mut Tx, run: &Run) -> Result<Option<Run>> {
     let runs = tx.runs_of_task(run.task_id).await?;
     let before = runs.iter().take_while(|r| r.id != run.id);
     Ok(before
         .last()
-        .filter(|r| r.workflow_id == run.workflow_id)
+        .filter(|r| (r.workflow_id, r.workflow_version) == (run.workflow_id, run.workflow_version))
         .filter(|r| {
             !matches!(
                 r.status,
@@ -161,7 +188,8 @@ pub(crate) async fn previous_run(tx: &mut Tx, run: &Run) -> Result<Option<Run>> 
 }
 
 /// The task's latest comments as `- who: text` lines, oldest first, `me`'s
-/// marked "(you)"; empty without comments.
+/// (and a direct chat's tool's, the one reading) marked "(you)"; empty
+/// without comments.
 pub(crate) async fn thread(tx: &mut Tx, task_id: TaskId, me: Option<AgentId>) -> Result<String> {
     // ponytail: reads the whole log; page from the end when threads get long.
     let mut lines = Vec::new();
@@ -173,7 +201,10 @@ pub(crate) async fn thread(tx: &mut Tx, task_id: TaskId, me: Option<AgentId>) ->
         let who = match entry.body["by_agent"].as_str().map(str::parse::<AgentId>) {
             Some(Ok(id)) if Some(id) == me => format!("{} (you)", tx.get_agent(id).await?.name),
             Some(Ok(id)) => tx.get_agent(id).await?.name,
-            _ => person(entry.body["by"].as_str().unwrap_or("someone")).to_owned(),
+            _ => match entry.body["by_tool"].as_str() {
+                Some(tool) => format!("{tool} (you)"),
+                None => person(entry.body["by"].as_str().unwrap_or("someone")).to_owned(),
+            },
         };
         lines.push(format!("- {who}: {text}"));
     }
@@ -230,6 +261,47 @@ impl Engine {
             status: TaskStatus::NeedsYou,
             created_by: creator,
             ..Task::new(agent.workspace_id, format!("Chat with {}", agent.name))
+        };
+        tx.insert_task(&chat).await?;
+        let chat = tx.get_task(chat.id).await?;
+        tx.commit().await?;
+        Ok(chat)
+    }
+
+    /// A new chat of `creator` (`None`: the token holder) on `workspace`
+    /// with no agent: straight with `runtime`'s tool, in `permission_mode`
+    /// (`None`: the host's default). It waits in Needs you for its first
+    /// message. `InvalidInput` for an entry `chain_check` refuses.
+    pub async fn create_direct_chat(
+        &self,
+        workspace: WorkspaceId,
+        runtime: ChainSpec,
+        permission_mode: Option<PermissionMode>,
+        creator: Option<MemberId>,
+    ) -> Result<Task> {
+        let title = match &runtime.model {
+            Some(model) => format!("{} · {model}", runtime.tool),
+            None => runtime.tool.clone(),
+        };
+        let chain = [ChainEntry::Spec(runtime)];
+        let (source, parsed) = agents::one_step_source(&chain, "", &[], permission_mode)?;
+        let mut tx = self.store.begin().await?;
+        tx.get_workspace(workspace).await?;
+        crate::chain_check::check(&mut tx, workspace, &chain, "runtime").await?;
+        let workflow = Workflow {
+            id: WorkflowId::generate(),
+            workspace_id: workspace,
+            name: title.clone(),
+        };
+        tx.insert_direct_chat_workflow(&workflow).await?;
+        tx.save_workflow_version(workflow.id, &source, &parsed.hash)
+            .await?;
+        let chat = Task {
+            kind: TaskKind::Chat,
+            workflow_id: Some(workflow.id),
+            status: TaskStatus::NeedsYou,
+            created_by: creator,
+            ..Task::new(workspace, title)
         };
         tx.insert_task(&chat).await?;
         let chat = tx.get_task(chat.id).await?;

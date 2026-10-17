@@ -102,8 +102,8 @@ pub(crate) struct EventView {
     pub at: Timestamp,
 }
 
-/// Workflow names and latest versions (agents' system workflows too, for
-/// task views; never listed), and workspace issue prefixes (for task keys),
+/// Workflow names and latest versions (hidden workflows too, for task
+/// views; never listed), and workspace issue prefixes (for task keys),
 /// loaded once per request.
 pub(crate) struct Workflows {
     workflows: HashMap<WorkflowId, WorkflowRef>,
@@ -113,7 +113,7 @@ pub(crate) struct Workflows {
 
 impl Workflows {
     pub(crate) async fn load(engine: &Engine) -> Result<Self> {
-        let system = engine.system_workflows().await?;
+        let system = engine.hidden_workflows().await?;
         let mut loaded = Self::of(engine.workflows().await?);
         loaded.system = system.iter().map(|(w, _)| w.id).collect();
         loaded.workflows.extend(Self::of(system).workflows);
@@ -154,7 +154,7 @@ impl Workflows {
             .is_some_and(|w| sees(&w.workspace_id))
     }
 
-    /// Every workflow but agents' system workflows, by id.
+    /// Every workflow but hidden ones, by id.
     pub(crate) fn all(&self) -> Vec<WorkflowRef> {
         let mut all: Vec<_> = self
             .workflows

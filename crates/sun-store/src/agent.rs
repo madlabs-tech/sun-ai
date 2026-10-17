@@ -1,10 +1,11 @@
-//! `agent`: each workspace's agents, and their hidden system workflows
-//! (`workflow.system_agent_id`, on the agent's workspace).
+//! `agent`: each workspace's agents, and the hidden workflows: agents'
+//! system workflows (`workflow.system_agent_id`, on the agent's workspace)
+//! and direct chats' (`workflow.direct_chat`).
 
 use async_trait::async_trait;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
-use sun_core::model::{Agent, Workflow};
+use sun_core::model::{Agent, Workflow, WorkflowOwner};
 use sun_core::{AgentId, WorkflowId, WorkspaceId};
 
 use crate::repo::{parse, parse_ts, parse_ts_opt, ts, workflow_from};
@@ -37,12 +38,17 @@ pub trait AgentRepo {
     ) -> Result<Option<WorkflowId>>;
     /// Every system workflow of `agent`.
     async fn system_workflows_of(&mut self, agent: AgentId) -> Result<Vec<WorkflowId>>;
-    /// Every agent's system workflows, oldest first.
-    async fn system_workflows(&mut self) -> Result<Vec<Workflow>>;
-    /// The agent whose system workflow `workflow` is; `None` for a person's
-    /// workflow (or a missing one).
-    async fn system_agent_of(&mut self, workflow: WorkflowId) -> Result<Option<AgentId>>;
+    /// Inserts `workflow` as a direct chat's.
+    async fn insert_direct_chat_workflow(&mut self, workflow: &Workflow) -> Result<()>;
+    /// Every hidden workflow (agents' and direct chats'), oldest first.
+    async fn hidden_workflows(&mut self) -> Result<Vec<Workflow>>;
+    /// Who `workflow` belongs to; [`WorkflowOwner::Person`] for a missing one.
+    async fn workflow_owner(&mut self, workflow: WorkflowId) -> Result<WorkflowOwner>;
 }
+
+/// The SQL condition on a `workflow` row that it is hidden: never listed,
+/// only the engine saves it.
+pub(crate) const HIDDEN: &str = "(system_agent_id IS NOT NULL OR direct_chat = 1)";
 
 const COLUMNS: &str = "id, workspace_id, name, description, instructions, runtime_chain, \
                        skill_ids, created_at, archived_at";
@@ -174,11 +180,22 @@ impl AgentRepo for Tx {
         ids.into_iter().map(parse).collect()
     }
 
-    async fn system_workflows(&mut self) -> Result<Vec<Workflow>> {
+    async fn insert_direct_chat_workflow(&mut self, workflow: &Workflow) -> Result<()> {
         sqlx::query(
-            "SELECT id, name, workspace_id FROM workflow
-             WHERE system_agent_id IS NOT NULL ORDER BY id",
+            "INSERT INTO workflow (id, name, workspace_id, direct_chat) VALUES ($1, $2, $3, 1)",
         )
+        .bind(workflow.id.to_string())
+        .bind(&workflow.name)
+        .bind(workflow.workspace_id.to_string())
+        .execute(self.conn())
+        .await?;
+        Ok(())
+    }
+
+    async fn hidden_workflows(&mut self) -> Result<Vec<Workflow>> {
+        sqlx::query(&format!(
+            "SELECT id, name, workspace_id FROM workflow WHERE {HIDDEN} ORDER BY id"
+        ))
         .fetch_all(self.conn())
         .await?
         .iter()
@@ -186,13 +203,17 @@ impl AgentRepo for Tx {
         .collect()
     }
 
-    async fn system_agent_of(&mut self, workflow: WorkflowId) -> Result<Option<AgentId>> {
-        let agent: Option<Option<String>> =
-            sqlx::query_scalar("SELECT system_agent_id FROM workflow WHERE id = $1")
+    async fn workflow_owner(&mut self, workflow: WorkflowId) -> Result<WorkflowOwner> {
+        let row: Option<(Option<String>, i64)> =
+            sqlx::query_as("SELECT system_agent_id, direct_chat FROM workflow WHERE id = $1")
                 .bind(workflow.to_string())
                 .fetch_optional(self.conn())
                 .await?;
-        agent.flatten().map(parse).transpose()
+        Ok(match row {
+            Some((Some(agent), _)) => WorkflowOwner::Agent(parse(agent)?),
+            Some((None, 1)) => WorkflowOwner::DirectChat,
+            _ => WorkflowOwner::Person,
+        })
     }
 }
 

@@ -43,7 +43,7 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 use sun_core::model::{
-    ActivityKind, Assignee, Priority, Run, Task, TaskActivity, TaskKey, TaskKind,
+    ActivityKind, Assignee, Priority, Run, Task, TaskActivity, TaskKey, TaskKind, WorkflowOwner,
 };
 use sun_core::{
     AgentId, Error, ExecEnvSpec, MemberId, ProjectId, Result, RunId, RunStatus, StateMachine,
@@ -396,6 +396,11 @@ impl Executor {
                 "This task is done; its assignee stays.".into(),
             ));
         }
+        if direct_chat(&mut tx, &task).await? {
+            return Err(Error::InvalidInput(
+                "A chat without an agent keeps its tool; start a new chat instead.".into(),
+            ));
+        }
         let runs = tx.runs_of_task(task_id).await?;
         (task.assignee_agent_id, task.workflow_id) = match to {
             None => (None, None),
@@ -451,7 +456,8 @@ impl Executor {
         self.apply(effects).await
     }
 
-    /// A comment on a task assigned to an active agent (see the module doc).
+    /// A comment on a task assigned to an active agent, or on a chat
+    /// without one (see the module doc).
     pub(super) async fn on_comment(
         &mut self,
         task_id: TaskId,
@@ -460,11 +466,11 @@ impl Executor {
     ) -> Result<()> {
         let mut tx = self.store.read().await?;
         let task = tx.get_task(task_id).await?;
-        let Some(agent) = task.assignee_agent_id else {
-            return Ok(());
-        };
-        if tx.get_agent(agent).await?.archived_at.is_some() {
-            return Ok(());
+        match task.assignee_agent_id {
+            Some(agent) if tx.get_agent(agent).await?.archived_at.is_some() => return Ok(()),
+            Some(_) => {}
+            None if direct_chat(&mut tx, &task).await? => {}
+            None => return Ok(()),
         }
         let active = tx
             .runs_of_task(task_id)
@@ -504,11 +510,20 @@ impl Executor {
     }
 }
 
-/// `id` when it is a person's workflow with a saved version; an agent's
-/// system workflow answers like a missing one.
+/// True when `task` is a chat without an agent (it runs a direct chat's
+/// workflow).
+pub(crate) async fn direct_chat(tx: &mut Tx, task: &Task) -> Result<bool> {
+    Ok(match task.workflow_id {
+        Some(id) => tx.workflow_owner(id).await? == WorkflowOwner::DirectChat,
+        None => false,
+    })
+}
+
+/// `id` when it is a person's workflow with a saved version; a hidden one
+/// answers like a missing one.
 async fn person_workflow(tx: &mut Tx, id: WorkflowId) -> Result<WorkflowId> {
-    let system = tx.system_agent_of(id).await?.is_some();
-    if system || tx.latest_workflow_version(id).await?.is_none() {
+    let hidden = tx.workflow_owner(id).await? != WorkflowOwner::Person;
+    if hidden || tx.latest_workflow_version(id).await?.is_none() {
         return Err(Error::NotFound(format!("workflow {id}")));
     }
     Ok(id)
@@ -802,7 +817,8 @@ impl Engine {
         )
         .await?;
         let mut wake = Vec::new();
-        if mentions.is_empty() && task.assignee_agent_id.is_some() {
+        let answers = task.assignee_agent_id.is_some() || direct_chat(&mut tx, &task).await?;
+        if mentions.is_empty() && answers {
             wake.push(task_id);
         }
         for agent in mentions {
