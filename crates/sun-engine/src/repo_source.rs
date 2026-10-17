@@ -581,6 +581,72 @@ steps:
         );
     }
 
+    /// BLO-141 carry-over (b): the bypass check compares the repo file with
+    /// the run's *pinned* version only. When an admin saved the bypass
+    /// version in Sun after the run was pinned, and the repo file matches
+    /// that latest version, the run is still refused, even though `pin`
+    /// would otherwise repin it to the latest saved version.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repo_file_matching_a_bypass_version_saved_after_the_pin_is_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let host = LocalHost::new(dir.path(), |_, _| {});
+        let work = host
+            .prepare_worktree(
+                HostId::generate(),
+                Worktree::Folder {
+                    task_id: TaskId::generate(),
+                },
+            )
+            .await
+            .unwrap();
+        let pinned = "name: fix
+exec_env: { kind: container, image: 'node:22' }
+steps:
+  - id: implement
+    type: agent
+    prompt: fix it
+";
+        let saved = format!("{pinned}    permission_mode: bypass_permissions\n");
+        std::fs::create_dir_all(work.join(".sun/workflows")).unwrap();
+        std::fs::write(work.join(".sun/workflows/fix.yaml"), &saved).unwrap();
+        let repo = crate::gates::tests::repo("https://github.com/acme/app.git");
+        let mut tx = store.begin().await.unwrap();
+        tx.insert_repo(&repo).await.unwrap();
+        tx.commit().await.unwrap();
+        let run_id = seed_with(&store, pinned, vec![repo.id]).await;
+        // The admin saves the bypass version in Sun (v2) after the run was
+        // pinned to v1; the repo file is exactly v2.
+        let mut tx = store.begin().await.unwrap();
+        let workflow_id = tx.get_run(run_id).await.unwrap().workflow_id;
+        let hash = sun_workflow::parse(&saved).unwrap().hash;
+        let v2 = tx
+            .save_workflow_version(workflow_id, &saved, &hash)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(v2.version, 2);
+        let config = EngineConfig {
+            allow_bypass: true,
+            host: HostId::generate(),
+            adapter: "fake".into(),
+            delivery_timeout: Duration::from_secs(5),
+            watchdog: crate::WatchdogConfig::default(),
+        };
+        let (engine, _) = Engine::start(store.clone(), host, Arc::new(Echo::default()), config)
+            .await
+            .unwrap();
+
+        engine.start_run(run_id).await.unwrap();
+        let run = until_run_ends(&store, run_id).await;
+        let reason = run.end_reason.clone().unwrap_or_default();
+        assert!(
+            !reason.starts_with(".sun/workflows/fix.yaml: step `implement` sets permission_mode"),
+            "refused although the repo file is the bypass version an admin saved (v2): {reason}"
+        );
+        assert_eq!(run.workflow_version, 2, "repinned to the saved version");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn extension_step_runs_through_the_echo_mod() {
         let dir = tempfile::tempdir().unwrap();
