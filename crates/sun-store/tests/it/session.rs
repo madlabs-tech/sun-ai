@@ -83,13 +83,14 @@ async fn runtime_session_handoff_and_note_rows_round_trip() {
             .is_none()
     );
 
+    // Cooldowns are keyed by account; a later limit moves the end.
+    let account = format!("cred:{}", configured.id);
     let until = chrono::Utc::now() + chrono::Duration::minutes(30);
-    tx.set_cooldown(configured.id, Some(until)).await.unwrap();
-    assert_eq!(
-        tx.cooldowns().await.unwrap(),
-        [("claude-max".to_owned(), until)]
-    );
-    tx.set_cooldown(configured.id, None).await.unwrap();
+    tx.set_cooldown(&account, Some(until)).await.unwrap();
+    let later = until + chrono::Duration::minutes(5);
+    tx.set_cooldown(&account, Some(later)).await.unwrap();
+    assert_eq!(tx.cooldowns().await.unwrap(), [(account.clone(), later)]);
+    tx.set_cooldown(&account, None).await.unwrap();
     assert!(tx.cooldowns().await.unwrap().is_empty());
 
     // Sessions need no host row (a revoked host keeps its history).

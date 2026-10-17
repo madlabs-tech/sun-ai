@@ -127,9 +127,8 @@ impl Engine {
         Ok(self.store.read().await?.permission_modes().await?)
     }
 
-    /// `runtime name -> cooldown_until` of every runtime still cooling down
-    /// now. Keyed by chain name across the deployment, as failover cools.
-    // ponytail: by name until cooldowns are keyed by account (TRD item 5).
+    /// `account -> cooldown_until` of every account still cooling down now,
+    /// by [`sun_core::model::Account::key`] (internal: never in a response).
     pub async fn cooldowns(&self) -> Result<std::collections::BTreeMap<String, Timestamp>> {
         let now = chrono::Utc::now();
         let rows = self.store.read().await?.cooldowns().await?;
