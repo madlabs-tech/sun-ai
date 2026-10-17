@@ -105,7 +105,7 @@ const SEEDS: Seed[] = [
     ['10:05', 'tool_call', 'grep "session_timeout" api/', 'api/auth/session.go:41\napi/config/defaults.go:12'],
     ['10:06', 'usage', 'Context at 164k tokens', undefined, { context_used: 164000 }],
     ['10:06', 'rotation', 'Context 82% full: continuing in a fresh `claude-code` session', undefined, { percent: 82 }],
-    ['10:07', 'session_assigned', 'Session on Claude Code', undefined, { context_window: 200000, rotate_at_percent: 80 }],
+    ['10:07', 'session_assigned', 'Session on Claude Code', undefined, { context_window: 200000, rotate_at_percent: 80, model: 'opus', effort: 'high' }],
     ['10:09', 'file_change', 'Edited api/auth/session.go · +18 −4'],
     ['10:09', 'usage', 'Context at 31k tokens', undefined, { context_used: 31000 }]] },
   { n: 147, title: 'October campaign: channel drafts', wf: 'campaign', repos: [], status: 'running', step: 1, runtime: 'codex', cost: 0.31, switches: 1, artifact: 'x-thread.md', events: [
@@ -254,18 +254,20 @@ for (const s of SEEDS) {
   }
 }
 
+/** `?no_bypass`: the operator left `runtimes.allow_bypass` off. */
+const allow_bypass = !new URLSearchParams(location.search).has('no_bypass');
 /** One per (host, tool), one in each state of the Runtimes page, then the key-backed ones (`host: null`). */
 const on_host = (host: number, host_name: string, tool: string, r: Partial<Runtime>): Runtime => ({
   id: `${fake_id('H', host)}:${tool}`, name: tool, tool, adapter: tool, family: null, version: '1.0.0',
   host: { id: fake_id('H', host), name: host_name }, presence: 'online', availability: 'ready', load: { active: 0, max: null },
   state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: today('10:12'),
-  workspace_id: null, source: 'byo_runtime', allow_bypass: true, config: null, model: null,
+  workspace_id: null, source: 'byo_runtime', allow_bypass, config: null, model: null,
   effort_options: [], models: [], ...r,
 });
 const keyed = (name: string, r: Partial<Runtime>): Runtime => ({
   id: name, name, tool: 'opencode', adapter: 'opencode', family: null, version: null, host: null, presence: 'online',
   availability: 'ready', load: null, state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: null,
-  workspace_id: MAIN_WORKSPACE, source: 'byo_key', allow_bypass: true, config: null, model: null,
+  workspace_id: MAIN_WORKSPACE, source: 'byo_key', allow_bypass, config: null, model: null,
   effort_options: [], models: [], ...r,
 });
 /** Effort catalogs as the CLIs report them (BLO-119): Claude Code one list per session, Codex per model. */

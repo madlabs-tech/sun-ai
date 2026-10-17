@@ -130,6 +130,8 @@
 
   const mode_hint = $derived.by(() => {
     const mode = form.permission_mode;
+    if (mode === 'bypass_permissions' && !allow_bypass)
+      return '“Anything” is off on this deployment (sun.yaml runtimes.allow_bypass). Pick another mode and you can’t pick it back.';
     if (mode === 'bypass_permissions' && !isolated)
       return `${MODE[mode][1]} No online host has a container or VM ready, so its runs are refused until one does.`;
     if (mode) return MODE[mode][1];

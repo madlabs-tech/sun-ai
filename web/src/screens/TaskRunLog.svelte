@@ -207,6 +207,11 @@
 
   // Context meter: the latest agent session's fill, live from the timeline.
   const fill = $derived(context_fill(events));
+  /** The latest session's model and effort, where its chain entry set them. */
+  const session_settings = $derived.by(() => {
+    const p = [...events].reverse().find((e) => e.kind === 'session_assigned')?.payload;
+    return [p?.model, p?.effort].filter((v) => typeof v === 'string' && v).join(' · ');
+  });
   /** Calm below `rotate_at − 20`, then amber: Sun starts a fresh session at `rotate_at`. */
   const fill_level = $derived(!fill || fill.percent === null ? 'ok' : fill.percent >= fill.rotate_at - 20 ? 'high' : 'ok');
 
@@ -293,6 +298,7 @@
                 {#if i > 0}<Icon name="chevron-right" size={12} />{/if}
                 <span class:on={r === run.runtime_id}>{runtime_name(app.runtimes, r)}</span>
               {/each}
+              {#if session_settings}<span class="ml-mono">· {session_settings}</span>{/if}
             </dd>
             <dt id="on-limit-label">On limit</dt>
             <dd>

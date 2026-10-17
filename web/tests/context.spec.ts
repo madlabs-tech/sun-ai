@@ -13,11 +13,14 @@ test('task page shows how full the context is and that Sun rotated the session',
   await expect(row.locator('.ml-badge--info')).toHaveText('Rotated once');
   await expect(row.locator('.meter__fill--ok')).toBeVisible();
   await expect(drawer.locator('.timeline')).toContainText('Context 82% full: continuing in a fresh `claude-code` session');
+  // The runtime line names the latest session's model and effort, where it set them.
+  await expect(drawer.locator('dt:text-is("Runtime") + dd')).toContainText('· opus · high');
 
   // Near the threshold the bar turns amber.
   await page.goto('/?mock=1#/tasks/SUN-145');
   await expect(page.getByTestId('context-meter')).toContainText('138K / 200K · 69%');
   await expect(page.locator('.meter__fill--high')).toBeVisible();
+  await expect(page.locator('dt:text-is("Runtime") + dd')).not.toContainText('·');
 });
 
 test('pinned constraints are added and removed on the task', async ({ page }) => {
