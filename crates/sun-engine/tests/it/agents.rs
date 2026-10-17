@@ -2388,7 +2388,6 @@ async fn on_an_unassigned_task_only_a_mention_wakes_anyone() {
 /// chat answers and never clones. Ada's own session on the task, control,
 /// does get it.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BLO-147 defect: context::compile adds the workspace repos section to a mention chat's envelope (crates/sun-engine/src/context.rs:252 does not skip TaskKind::Chat)"]
 async fn a_mention_chats_session_gets_no_repository_section() {
     let k = kernel().await;
     let web = "https://github.com/acme/web.git";

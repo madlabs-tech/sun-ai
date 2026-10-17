@@ -249,7 +249,12 @@ impl Executor {
         let memory = crate::memory::active_for(&mut read, &task).await?;
         let workspace_context = crate::workspaces::workspace_context(&mut read, task.id).await?;
         let task_worktree = super::worktree_of(&mut read, brief.task_id).await?;
-        let repos = crate::vcs::workspace_repos(&mut read, brief.task_id).await?;
+        // A chat answers and never clones, so it isn't told about the repos.
+        let repos = if task.kind == model::TaskKind::Chat {
+            Vec::new()
+        } else {
+            crate::vcs::workspace_repos(&mut read, brief.task_id).await?
+        };
         drop(read);
         brief.goal = prompt.to_owned();
         // A multi-repo task: which folder is which repo.
