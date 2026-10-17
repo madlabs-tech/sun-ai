@@ -234,7 +234,7 @@ async fn live_run_does_the_handshake_and_matches_replay() {
     );
     assert_eq!(
         std::fs::read_to_string(dir.join("out.env")).unwrap(),
-        "{\"model\":\"opencode/big-pickle\"}\n"
+        "{\"model\":\"opencode/big-pickle\",\"permission\":{\"bash\":\"ask\",\"edit\":\"ask\",\"webfetch\":\"ask\"}}\n"
     );
 }
 
@@ -401,4 +401,33 @@ async fn builtin_template_reaches_the_first_prompt() {
     );
     assert!(prompt.contains("- cargo test\n"), "{prompt}");
     assert!(prompt.contains("(todowrite)"), "{prompt}");
+}
+
+/// BLO-163: OpenCode allows every tool by default, so each session's config
+/// makes it ask (Sun answers by mode), in every mode and merged over a
+/// provider config the session env already carries (Sun credits).
+#[tokio::test]
+async fn every_mode_makes_opencode_ask() {
+    let ask = json!({"bash": "ask", "edit": "ask", "webfetch": "ask"});
+    for mode in sun_core::PERMISSION_MODES {
+        let dir = sandbox("opencode", FAKE_OPENCODE, &format!("mode-{mode}"));
+        let adapter = OpenCode::new(dir.join("opencode"));
+        let provider = r#"{"provider":{"sun":{}},"model":"sun/m"}"#;
+        let fixture_path = normal_fixture();
+        let env = [
+            ("SUN_FIXTURE", fixture_path.as_str()),
+            ("OPENCODE_CONFIG_CONTENT", provider),
+        ];
+        let mut spec = spec(&dir, &env);
+        spec.permission_mode = Some(mode.into());
+        let handle = adapter.start(spec).await.unwrap();
+        collect(adapter.events(&handle)).await;
+        let config: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("out.env")).unwrap()).unwrap();
+        assert_eq!(config["permission"], ask, "{mode}");
+        assert_eq!(
+            config["model"], "sun/m",
+            "{mode}: the provider config is kept"
+        );
+    }
 }

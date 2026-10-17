@@ -5,6 +5,22 @@
 //! the driver closes stdin once all turns are answered and Claude exits.
 //! Runs on whatever login the CLI has (BYO runtime): the user's
 //! subscription, or a key/endpoint passed in `SessionSpec::env`.
+//!
+//! Permission modes ([`cli_permission_mode`]), checked against 2.1.291's
+//! `--help`. A headless session has nobody to answer a prompt, so anything
+//! the mode would ask about is refused unless `--allowedTools` lists it.
+//!
+//! | Sun mode | `--permission-mode` | Effect |
+//! |---|---|---|
+//! | `plan` | `plan` | reads and plans, never edits or runs commands |
+//! | `default` | `default` (hidden alias of `manual`) | asks for edits and commands: refused |
+//! | `accept_edits` | `acceptEdits` | edits freely, asks for commands: refused |
+//! | `auto` | `auto` | Claude's classifier approves safe actions, refuses the rest |
+//! | `bypass_permissions` | `bypassPermissions` | everything, never asks |
+//!
+//! `auto` is offered only when the installed CLI's `--permission-mode`
+//! choices list it ([`parse_permission_modes_help`]); an older CLI refuses
+//! the flag itself, so the session fails visibly, never downgraded.
 
 use std::path::PathBuf;
 
@@ -93,6 +109,13 @@ impl RuntimeAdapter for ClaudeCode {
                 .unwrap_or_default(),
             models: Vec::new(),
         }
+    }
+
+    async fn permission_modes(&self, _host: &HostCtx) -> Vec<PermissionMode> {
+        process::run(&self.binary, &["--help"]).await.map_or_else(
+            |_| PermissionMode::legacy(),
+            |out| parse_permission_modes_help(&String::from_utf8_lossy(&out.stdout)),
+        )
     }
 
     async fn start(&self, mut spec: SessionSpec) -> Result<SessionHandle> {
@@ -214,6 +237,7 @@ pub fn cli_permission_mode(mode: PermissionMode) -> &'static str {
         PermissionMode::Default => "default",
         PermissionMode::AcceptEdits => "acceptEdits",
         PermissionMode::Plan => "plan",
+        PermissionMode::Auto => "auto",
         PermissionMode::BypassPermissions => "bypassPermissions",
     }
 }
@@ -233,19 +257,8 @@ fn user_message(text: &str) -> String {
 /// Code scopes effort per session, not per model. Empty when the CLI
 /// predates the flag or the list doesn't parse (the picker greys out).
 pub fn parse_effort_help(help: &str) -> Vec<EffortLevel> {
-    // The option's own line, not a mention in another option's text.
-    let defined = help.match_indices("--effort").find(|(at, _)| {
-        let line_start = help[..*at].rfind('\n').map_or(0, |n| n + 1);
-        help[line_start..*at].trim().is_empty()
-    });
-    let Some((at, _)) = defined else {
-        return Vec::new();
-    };
-    let rest = &help[at + "--effort".len()..];
-    // The option's text ends where the next option's line starts.
-    let text = rest.find("\n  -").map_or(rest, |end| &rest[..end]);
-    let Some(list) = text
-        .split_once('(')
+    let Some(list) = option_text(help, "--effort")
+        .and_then(|text| text.split_once('('))
         .and_then(|(_, after)| after.split_once(')'))
         .map(|(list, _)| list)
     else {
@@ -254,6 +267,28 @@ pub fn parse_effort_help(help: &str) -> Vec<EffortLevel> {
     list.split(',')
         .filter_map(|value| crate::effort::level(value.trim(), None))
         .collect()
+}
+
+/// `claude --help` → the Sun modes its `--permission-mode` can enforce:
+/// [`PermissionMode::LEGACY`] (`default` is a hidden alias of `manual`),
+/// plus `auto` when the option's choices list it.
+pub fn parse_permission_modes_help(help: &str) -> Vec<PermissionMode> {
+    let auto = option_text(help, "--permission-mode").is_some_and(|text| text.contains("\"auto\""));
+    PermissionMode::ALL
+        .into_iter()
+        .filter(|mode| auto || *mode != PermissionMode::Auto)
+        .collect()
+}
+
+/// The help text of option `flag`: from its own line (not a mention in
+/// another option's text) to the next option's line.
+fn option_text<'a>(help: &'a str, flag: &str) -> Option<&'a str> {
+    let (at, _) = help.match_indices(flag).find(|(at, _)| {
+        let line_start = help[..*at].rfind('\n').map_or(0, |n| n + 1);
+        help[line_start..*at].trim().is_empty()
+    })?;
+    let rest = &help[at + flag.len()..];
+    Some(rest.find("\n  -").map_or(rest, |end| &rest[..end]))
 }
 
 /// `claude auth status --json` → `loggedIn`.
@@ -505,7 +540,13 @@ mod tests {
         let mapped = sun_core::PermissionMode::ALL.map(cli_permission_mode);
         assert_eq!(
             mapped,
-            ["default", "acceptEdits", "plan", "bypassPermissions"]
+            [
+                "default",
+                "acceptEdits",
+                "plan",
+                "auto",
+                "bypassPermissions"
+            ]
         );
     }
 }

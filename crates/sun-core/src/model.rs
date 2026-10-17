@@ -1248,6 +1248,18 @@ impl Host {
             .map(|r| r.effort)
             .unwrap_or_default()
     }
+
+    /// The permission modes the host last reported for `tool`; `None` when
+    /// it reported no such tool or the report doesn't parse.
+    pub fn permission_modes(&self, tool: &str) -> Option<Vec<crate::PermissionMode>> {
+        let caps =
+            serde_json::from_value::<crate::host_protocol::Capabilities>(self.capabilities.clone());
+        caps.ok()?
+            .runtimes
+            .into_iter()
+            .find(|r| r.adapter == tool)
+            .map(|r| r.permission_modes)
+    }
 }
 
 /// `host_runtime` — one tool (runtime adapter) on one host, projected from

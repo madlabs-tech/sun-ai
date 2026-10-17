@@ -240,7 +240,7 @@ async fn live_run_matches_replay_and_passes_the_envelope() {
     let args = std::fs::read_to_string(dir.join("out.args")).unwrap();
     assert_eq!(
         args,
-        "exec --json -c sandbox_mode=\"workspace-write\" -c model=\"gpt-5\" -c model_reasoning_effort=\"xhigh\" -- Create hello.txt\n"
+        "exec --json -c sandbox_mode=\"workspace-write\" -c approval_policy=\"never\" -c model=\"gpt-5\" -c model_reasoning_effort=\"xhigh\" -- Create hello.txt\n"
     );
     let steer = Steer {
         text: "more".into(),
@@ -559,4 +559,61 @@ async fn an_effort_that_is_not_a_token_never_reaches_the_cli() {
     spec.effort = Some("high\" -c sandbox_mode=\"danger-full-access".into());
     assert!(adapter.start(spec).await.is_err());
     assert!(!dir.join("out.args").exists(), "the CLI was not started");
+}
+
+/// BLO-163: every Sun mode launches with its sandbox and approval flags, on
+/// the first turn and on every resumed one.
+#[tokio::test]
+async fn every_permission_mode_reaches_every_turn() {
+    let read_only = "-c sandbox_mode=\"read-only\" -c approval_policy=\"never\"";
+    let expected = [
+        ("default", read_only),
+        (
+            "accept_edits",
+            "-c sandbox_mode=\"workspace-write\" -c approval_policy=\"never\"",
+        ),
+        ("plan", read_only),
+        ("auto", "--approve-for-me"),
+        (
+            "bypass_permissions",
+            "--dangerously-bypass-approvals-and-sandbox",
+        ),
+    ];
+    assert_eq!(expected.len(), sun_core::PERMISSION_MODES.len());
+    for (mode, flags) in expected {
+        let dir = repo_sandbox(&format!("mode-{mode}"));
+        let adapter = Codex::new(dir.join("codex"));
+        let mut spec = spec(&dir, &[("SUN_MODE", "steer")]);
+        spec.permission_mode = Some(mode.into());
+        let handle = adapter.start(spec).await.unwrap();
+        let steer = Steer {
+            text: "again".into(),
+        };
+        adapter.send(&handle, steer).await.unwrap();
+        collect(adapter.events(&handle)).await;
+        let args = std::fs::read_to_string(dir.join("out.args")).unwrap();
+        let turns: Vec<&str> = args.lines().collect();
+        assert_eq!(turns.len(), 2, "{mode}: {args}");
+        for turn in turns {
+            assert!(
+                turn.starts_with(&format!("exec --json {flags} ")),
+                "{mode}: {turn}"
+            );
+            // Exactly one sandbox/approval setting: none left from a default.
+            assert_eq!(
+                turn.matches("sandbox").count(),
+                flags.matches("sandbox").count()
+            );
+        }
+    }
+    // A spelling outside Sun's modes never reaches the CLI.
+    let dir = repo_sandbox("mode-forged");
+    let mut spec = spec(&dir, &[]);
+    spec.permission_mode = Some("bypassPermissions".into());
+    let err = Codex::new(dir.join("codex")).start(spec).await.unwrap_err();
+    assert!(
+        err.to_string().contains("is not a permission mode"),
+        "{err}"
+    );
+    assert!(!dir.join("out.args").exists());
 }

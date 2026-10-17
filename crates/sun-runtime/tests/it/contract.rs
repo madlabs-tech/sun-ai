@@ -139,3 +139,35 @@ fn every_tested_version_has_recordings() {
     assert!(!is_tested("claude-code", "2.2.0"));
     assert!(!is_tested("gemini", "1.0.0"));
 }
+
+/// BLO-163: every recorded Claude Code and Codex version's own `--help`
+/// (`help.txt`, recorded with the fixtures) offers all five Sun permission
+/// modes to the probe; a version that drops one fails the matrix and stays
+/// unpinned. OpenCode answers permission requests over ACP: no flag to read.
+#[test]
+fn every_recorded_cli_offers_every_permission_mode() {
+    type Probe = fn(&str) -> Vec<sun_core::PermissionMode>;
+    let probes: [(&str, Probe); 2] = [
+        (
+            "claude-code",
+            sun_runtime::claude::parse_permission_modes_help,
+        ),
+        ("codex", sun_runtime::codex::parse_permission_modes_help),
+    ];
+    for (cli, probe) in probes {
+        for version in recorded_versions(cli) {
+            let path = format!("{}/{version}/help.txt", cli_dir(cli));
+            let help = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert_eq!(
+                probe(&help),
+                sun_core::PermissionMode::ALL,
+                "{cli} {version}"
+            );
+        }
+        // A CLI from before `auto` keeps the four modes it could always take.
+        assert_eq!(
+            probe("  --permission-mode <mode>  (choices: \"plan\")\n"),
+            sun_core::PermissionMode::LEGACY
+        );
+    }
+}
