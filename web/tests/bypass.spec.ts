@@ -48,14 +48,14 @@ test('an admin the policy does not let sees “Anything” as unavailable, with 
   await page.getByRole('button', { name: 'New agent' }).click();
   const create = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'New agent' }) });
   await expect(create.getByLabel('Permissions').locator('option', { hasText: 'Anything' })).toHaveCount(0);
-  await expect(create).toContainText('“Anything” is not enabled for you; the owner can enable it in Settings → Security.');
+  await expect(create).toContainText('“Anything” is not enabled for you: your runs go as Edit files. The owner can enable it in Settings → Security.');
   await create.getByRole('button', { name: 'Cancel' }).click();
 
   // An agent already in bypass keeps showing it, and says the admin's own runs of it go as Edit files.
   await row(page, 'Night Owl').getByRole('button', { name: 'Edit Night Owl' }).click();
   const edit = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Edit Night Owl' }) });
   await expect(edit.getByLabel('Permissions')).toHaveValue('bypass_permissions');
-  await expect(edit).toContainText('your runs of this agent go as Edit files');
+  await expect(edit).toContainText('your runs go as Edit files');
 });
 
 test('with the policy at everyone the admin may pick “Anything”', async ({ page }) => {
