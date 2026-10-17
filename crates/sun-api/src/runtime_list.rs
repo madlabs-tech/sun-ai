@@ -29,8 +29,6 @@ use crate::{Api, RuntimesModel, wire};
 /// Every entry of `workspace` (`None`: every workspace's).
 pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult<Vec<Value>> {
     let cooling = api.engine.cooldowns().await?;
-    let modes: BTreeMap<String, String> =
-        api.engine.permission_modes().await?.into_iter().collect();
     let active = api.hosts.active_sessions();
     let runtimes = api.engine.runtimes(workspace).await?;
     let keys: Vec<&Runtime> = runtimes
@@ -107,7 +105,6 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
             entry["name"] = json!(tool);
             entry["source"] = json!(RuntimeSource::ByoRuntime);
             entry["workspace_id"] = Value::Null;
-            entry["permission_mode"] = json!(modes.get(&tool));
             entry["allow_bypass"] = json!(api.allow_bypass);
             // What the agent form's model and effort pickers offer for
             // this tool on this host (BLO-119), from the raw report.
@@ -124,7 +121,7 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
     });
     let online = online_adapters(api, workspace).await?;
     for runtime in keys {
-        let entry = keyed(api, runtime, &online, &cooling, &modes).await?;
+        let entry = keyed(api, runtime, &online, &cooling).await?;
         entries.push(entry);
     }
     Ok(entries)
@@ -242,7 +239,6 @@ async fn keyed(
     runtime: &Runtime,
     online: &BTreeMap<String, (bool, bool)>,
     cooling: &BTreeMap<String, Timestamp>,
-    modes: &BTreeMap<String, String>,
 ) -> ApiResult<Value> {
     let ready = runtime_readiness(api, runtime, online).await?;
     let cooldown_until = cooling.get(&Account::credential_key(runtime.id)).copied();
@@ -273,7 +269,6 @@ async fn keyed(
     entry["name"] = json!(runtime.name);
     entry["source"] = json!(runtime.source);
     entry["workspace_id"] = json!(runtime.workspace_id);
-    entry["permission_mode"] = json!(modes.get(&runtime.adapter));
     entry["allow_bypass"] = json!(api.allow_bypass);
     entry["config"] = json!(runtime.byo_key);
     if runtime.source == RuntimeSource::Credits {

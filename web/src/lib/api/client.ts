@@ -58,7 +58,6 @@ import type { OnLimit, OutboxItem, Resolution,
   MemoryMetrics,
   ModInstall,
   NewSource,
-  PermissionMode,
   Pin,
   PinCommit,
   PinTarget,
@@ -342,8 +341,6 @@ export const api = {
   /** `manage_runtimes`: archives it; its tasks keep it, new tasks can't pick it. */
   archive_agent: (id: string) => request<null>('DELETE', `/agents/${id_path(id)}`),
   /** Admin: the permission mode every new session of runtime `id` gets (audited). */
-  set_runtime_policy: (id: string, permission_mode: PermissionMode) =>
-    request<{ id: string; permission_mode: PermissionMode }>('PUT', `/runtimes/${id_path(id)}/policy`, { permission_mode }),
   kernel_use: () => request<KernelUse>('GET', '/kernel'),
   /** Admin: stops a live session; its run pauses and records `reason`. */
   kill_session: (session_id: string, reason: string) =>

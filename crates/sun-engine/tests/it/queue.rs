@@ -1321,9 +1321,9 @@ async fn tasks_of(store: &Store, source: &str, count: usize) -> Vec<Task> {
 }
 
 /// Item 9: a step's own `permission_mode:` (an agent's, on its system
-/// workflow) decides at placement over the tool's policy row. Bypass on the
-/// step on a bare-only workspace takes the FR7 refusal path, never a silent
-/// downgrade; `plan` on the step places a run whose tool's policy is bypass.
+/// workflow) decides at placement. Bypass on the step on a bare-only
+/// workspace takes the FR7 refusal path, never a silent downgrade; `plan`
+/// on the step places.
 #[tokio::test(flavor = "multi_thread")]
 async fn queue_a_steps_permission_mode_wins_at_placement() {
     const BYPASS: &str = "name: bypass\nruntime: {chain: [plain]}\nsteps:\n  \
@@ -1334,11 +1334,6 @@ async fn queue_a_steps_permission_mode_wins_at_placement() {
     let store = Store::open(dir.path()).await.unwrap();
     let bypass = tasks_of(&store, BYPASS, 1).await.remove(0);
     let plan = tasks_of(&store, PLAN, 1).await.remove(0);
-    let mut tx = store.begin().await.unwrap();
-    tx.set_permission_mode("fake", "bypass_permissions")
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
     let host = add_host(&store, "bare", true).await;
     let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![host])));
     let (_engine, queue) = kernel_on(&store, link, host, Caps::default()).await;
@@ -1377,20 +1372,18 @@ async fn queue_a_steps_permission_mode_wins_at_placement() {
     );
 }
 
-/// FR7: a run whose runtime is in `bypass_permissions` goes only to a host
+/// FR7: a run whose step is in `bypass_permissions` goes only to a host
 /// with its container ready; a bare run of it is refused, journalled, and
 /// fails without being placed, even with a container host online.
 #[tokio::test(flavor = "multi_thread")]
 async fn queue_places_bypass_runs_only_in_a_container_or_vm() {
-    const AGENT: &str = "name: agentic\nsteps:\n  - {id: implement, type: agent, prompt: do it}\n";
+    const AGENT: &str = "name: agentic\nsteps:\n  \
+                         - {id: implement, type: agent, prompt: do it, permission_mode: bypass_permissions}\n";
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
     let tasks = tasks_of(&store, AGENT, 2).await;
     let (boxed, bare) = (&tasks[0], &tasks[1]);
     let mut tx = store.begin().await.unwrap();
-    tx.set_permission_mode("fake", "bypass_permissions")
-        .await
-        .unwrap();
     let container = serde_json::json!({"kind": "container", "image": "toolchain:1"});
     tx.put_setting(&format!("task_exec_env.{}", boxed.id), &container)
         .await
@@ -1456,26 +1449,6 @@ async fn queue_places_bypass_runs_only_in_a_container_or_vm() {
         !events.iter().any(|e| e.kind == "session_assigned"),
         "no session"
     );
-
-    // A chain with an entry not in bypass takes that one instead.
-    const CHAINED: &str = "name: chained\nruntime: {chain: [fake, plain]}\nsteps:\n  \
-                           - {id: implement, type: agent, prompt: do it}\n";
-    let chained = &tasks_of(&store, CHAINED, 1).await[0];
-    queue.enqueue(chained.id).await.unwrap();
-    eventually("the chained run placed", || async {
-        placed_on(&store, chained.id).await.is_some()
-    })
-    .await;
-    let (run, _) = run_of(&store, chained.id).await.unwrap();
-    let events = store
-        .read()
-        .await
-        .unwrap()
-        .events_after(Some(run), 0, 32)
-        .await
-        .unwrap();
-    let placed = events.iter().find(|e| e.kind == "run_placed").unwrap();
-    assert_eq!(placed.payload["runtime"], "plain");
 }
 
 /// BLO-139 third path: an agent saved in `bypass_permissions` while the
@@ -1666,26 +1639,20 @@ async fn queue_cools_the_account_not_every_host_with_the_tool() {
     );
 }
 
-/// BLO-136 case 2a and 2d under `runtimes.model: v2`, with only bare hosts
-/// online. (2a) A run whose only chain entry is in `bypass_permissions`
-/// fails at placement: journalled as `placement_refused_bypass_bare` with
-/// exactly `{runtime, exec_env, reason}` and no account key, never placed,
-/// no session. (2d) A chain `[bypass, plain]` goes to `plain`: not refused,
-/// and the bypass entry's mode is never lowered.
+/// BLO-136 case 2a under `runtimes.model: v2`, with only bare hosts
+/// online: a run whose step is in `bypass_permissions` fails at placement:
+/// journalled as `placement_refused_bypass_bare` with exactly `{runtime,
+/// exec_env, reason}` and no account key, never placed, no session. (Case
+/// 2d, a per-tool bypass beside a plain entry, went with `runtime_policy`.)
 #[tokio::test(flavor = "multi_thread")]
-async fn queue_v2_bare_hosts_only_refuse_bypass_and_take_the_plain_entry() {
-    const SOLO: &str = "name: solo\nsteps:\n  - {id: implement, type: agent, prompt: do it}\n";
-    const CHAINED: &str = "name: chained\nruntime: {chain: [fake, plain]}\nsteps:\n  \
-                           - {id: implement, type: agent, prompt: do it}\n";
+async fn queue_v2_bare_hosts_refuse_a_bypass_step() {
+    const SOLO: &str = "name: solo\nsteps:\n  \
+                        - {id: implement, type: agent, prompt: do it, permission_mode: bypass_permissions}\n";
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
     let solo = tasks_of(&store, SOLO, 1).await.remove(0);
-    let chained = tasks_of(&store, CHAINED, 1).await.remove(0);
     let mut tx = store.begin().await.unwrap();
     tx.put_setting(sun_engine::RUNTIMES_MODEL, &serde_json::json!("v2"))
-        .await
-        .unwrap();
-    tx.set_permission_mode("fake", "bypass_permissions")
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -1765,51 +1732,6 @@ async fn queue_v2_bare_hosts_only_refuse_bypass_and_take_the_plain_entry() {
     for kind in ["run_placed", "session_assigned", "step_started"] {
         assert!(!events.iter().any(|e| e.kind == kind), "{kind}: {events:?}");
     }
-
-    // 2d: the plain entry is taken; nothing refused, the mode not lowered.
-    queue.enqueue(chained.id).await.unwrap();
-    eventually("the chained run placed", || async {
-        placed_on(&store, chained.id).await.is_some()
-    })
-    .await;
-    let run = store
-        .read()
-        .await
-        .unwrap()
-        .runs_of_task(chained.id)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap()
-        .id;
-    let events = store
-        .read()
-        .await
-        .unwrap()
-        .events_after(Some(run), 0, 64)
-        .await
-        .unwrap();
-    let placed = events.iter().find(|e| e.kind == "run_placed").unwrap();
-    assert_eq!(placed.payload["runtime"], "plain", "{}", placed.payload);
-    assert!(
-        !events
-            .iter()
-            .any(|e| e.kind == "placement_refused_bypass_bare"),
-        "{events:?}"
-    );
-    let modes = store
-        .read()
-        .await
-        .unwrap()
-        .permission_modes()
-        .await
-        .unwrap();
-    assert!(
-        modes
-            .iter()
-            .any(|(a, m)| a == "fake" && m == "bypass_permissions"),
-        "never lowered: {modes:?}"
-    );
 }
 
 /// BLO-136 case 3 (cross-workspace placement and cooldown). Workspace Main

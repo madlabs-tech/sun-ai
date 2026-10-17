@@ -1,8 +1,8 @@
 <!-- Agents: the open workspace's. A task assigned to one runs its instructions on its runtime chain
      (failover order) with its skills; each runtime of the chain may pin a host and set a model and an
      effort level, from what that host's CLI reports. Ready = some runtime of the chain is logged in on an online host;
-     not ready says why per runtime. Its permission mode applies to every runtime of the chain; unset, it
-     inherits the first runtime's. "Anything" (bypass) needs the deployment's allow_bypass and a container or
+     not ready says why per runtime. Its permission mode applies to every runtime of the chain; unset, each
+     host's sun.yaml default. "Anything" (bypass) needs the deployment's allow_bypass and a container or
      VM host to run on. Creating, editing and archiving need manage_runtimes; an edit gives running tasks
      nothing new (they keep their version). -->
 <script lang="ts">
@@ -42,16 +42,15 @@
   /** The operator's `runtimes.allow_bypass`, as every runtime reports it. */
   const allow_bypass = $derived(runtimes.some((r) => r.allow_bypass));
   const mode_options = $derived([
-    { value: '', label: 'Inherit from the runtime' },
+    { value: '', label: 'Host default' },
     // An agent already in bypass keeps showing it, even with bypass now off.
     ...PERMISSION_MODES.filter((m) => m !== 'bypass_permissions' || allow_bypass || editing?.permission_mode === m).map((m) => ({
       value: m,
       label: MODE[m][0],
     })),
   ]);
-  /** The agent row's mode: its own, or the inherited one. */
-  const mode_line = (a: Agent) =>
-    a.effective_permission_mode && `${MODE[a.effective_permission_mode][0]}${a.permission_mode ? '' : ' (inherited)'}`;
+  /** The agent row's mode, when it sets one. */
+  const mode_line = (a: Agent) => a.permission_mode && MODE[a.permission_mode][0];
   api.list_catalog('', '', workspace).then(
     (c) => (skills = c.entries.filter((e) => e.kind === 'skill' && e.installed).map((e) => e.id)),
     () => {},
@@ -134,9 +133,8 @@
     if (mode === 'bypass_permissions' && !isolated)
       return `${MODE[mode][1]} No online host has a container or VM ready, so its runs are refused until one does.`;
     if (mode) return MODE[mode][1];
-    const inherited = editing?.permission_mode === null ? editing.effective_permission_mode : null;
     const why_no_bypass = allow_bypass ? '' : ' “Anything” is off on this deployment (sun.yaml runtimes.allow_bypass).';
-    return `${inherited ? `Inherited: ${MODE[inherited][0]}.` : 'Each runtime’s mode, else the host’s sun.yaml.'}${why_no_bypass}`;
+    return `Each host’s sun.yaml default.${why_no_bypass}`;
   });
 </script>
 

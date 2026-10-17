@@ -261,8 +261,8 @@ pub enum StepKind {
         context_sources: Vec<String>,
         /// Token budget for the pushed context pack.
         context_budget_tokens: Option<u32>,
-        /// The mode its sessions run in (`permission_mode:`); `None`
-        /// inherits the tool's `runtime_policy` row. An agent's system
+        /// The mode its sessions run in (`permission_mode:`); `None`: the
+        /// host's `sun.yaml` default. An agent's system
         /// workflow carries the agent's here. Left out of the hash when absent.
         #[serde(skip_serializing_if = "Option::is_none")]
         permission_mode: Option<PermissionMode>,

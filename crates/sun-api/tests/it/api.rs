@@ -815,7 +815,11 @@ async fn host_socket_enrolment_session_sse_and_steer() {
     until_online(app, k.host).await;
     let (_, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
     assert_eq!(runtimes[0]["state"], "idle");
-    assert_eq!(runtimes[0]["permission_mode"], Value::Null, "host default");
+    assert!(
+        runtimes[0].get("permission_mode").is_none(),
+        "{}",
+        runtimes[0]
+    );
     let (_, hosts) = call(app, "GET", "/api/v1/hosts", None).await;
     let envs = &hosts[0]["capabilities"]["exec_envs"];
     assert_eq!(
@@ -824,29 +828,26 @@ async fn host_socket_enrolment_session_sse_and_steer() {
     );
     assert_eq!(envs[2]["detail"], "install Lima");
 
-    // A permission mode per runtime: validated, bypass refused without the
-    // operator's opt-in, audited, listed and sent with every session.
+    // Per-runtime permission modes are gone (item 14): the alias is `410`.
     let adapter = runtimes[0]["tool"].as_str().unwrap().to_owned();
     let policy = format!("/api/v1/runtimes/{adapter}/policy");
-    for bad in ["yolo", "acceptEdits", "bypass_permissions"] {
-        let body = json!({ "permission_mode": bad });
-        let (status, error) = call(app, "PUT", &policy, Some(body)).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
-    }
     let body = json!({ "permission_mode": "plan" });
-    let (status, _) = call(app, "PUT", &policy, Some(body)).await;
-    assert_eq!(status, StatusCode::OK);
-    let (_, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
-    assert_eq!(runtimes[0]["permission_mode"], "plan");
-    let (_, audit) = call(app, "GET", "/api/v1/audit", None).await;
-    assert!(audit.to_string().contains("policy_change"), "{audit}");
+    let (status, error) = call(app, "PUT", &policy, Some(body)).await;
+    assert_eq!(status, StatusCode::GONE, "{error}");
+    assert_eq!(error["error"]["code"], "gone");
 
     // The engine starts the agent session on this host, in the task's
-    // exec env (its override wins over the workflow's `exec_env:`).
-    let yaml = AGENT.replace(
-        "steps:",
-        "exec_env: { kind: vm, template: default }\nsteps:",
-    );
+    // exec env (its override wins over the workflow's `exec_env:`), with
+    // the step's permission mode.
+    let yaml = AGENT
+        .replace(
+            "steps:",
+            "exec_env: { kind: vm, template: default }\nsteps:",
+        )
+        .replace(
+            "prompt: say hi",
+            "prompt: say hi\n    permission_mode: plan",
+        );
     let (status, workflow) = call(
         app,
         "POST",

@@ -401,41 +401,24 @@ async fn structured_chain_entries_over_http() {
     );
 }
 
-/// Item 9: an agent's `permission_mode` (null inherits), its
-/// `effective_permission_mode` (else the first runtime's `runtime_policy`
-/// row), and the bypass gate: `runtimes.allow_bypass` plus `manage_runtimes`,
-/// on the agent and on a workflow step's `permission_mode:`.
+/// Item 9: an agent's `permission_mode` (null: the host's default) and the
+/// bypass gate: `runtimes.allow_bypass` plus `manage_runtimes`, on the agent
+/// and on a workflow step's `permission_mode:`.
 #[tokio::test]
-async fn an_agents_permission_mode_inherits_and_bypass_needs_manage_runtimes() {
+async fn an_agents_permission_mode_and_bypass_needs_manage_runtimes() {
     let k = kernel().await;
     let bypass_ok = sun_api::router(k.api.clone().with_allow_bypass(true));
     let body = json!({ "name": "Ada", "runtime_chain": ["claude-code"] });
     let (status, ada) = call(&k.app, "POST", "/api/v1/agents", Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "{ada}");
-    let modes = |a: &Value| {
-        (
-            a["permission_mode"].clone(),
-            a["effective_permission_mode"].clone(),
-        )
-    };
-    assert_eq!(modes(&ada), (Value::Null, Value::Null));
-    let policy = json!({ "permission_mode": "plan" });
-    let (status, _) = call(
-        &k.app,
-        "PUT",
-        "/api/v1/runtimes/claude-code/policy",
-        Some(policy),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ada["permission_mode"], Value::Null);
+    assert!(ada.get("effective_permission_mode").is_none(), "{ada}");
     let path = format!("/api/v1/agents/{}", ada["id"].as_str().unwrap());
-    let (_, ada) = call(&k.app, "PATCH", &path, Some(json!({ "description": "d" }))).await;
-    assert_eq!(modes(&ada), (Value::Null, json!("plan")), "inherited");
 
     let set = |mode: Value| Some(json!({ "permission_mode": mode }));
     let (status, ada) = call(&k.app, "PATCH", &path, set(json!("accept_edits"))).await;
     assert_eq!(status, StatusCode::OK, "{ada}");
-    assert_eq!(modes(&ada), (json!("accept_edits"), json!("accept_edits")));
+    assert_eq!(ada["permission_mode"], "accept_edits");
     let (_, ada) = call(&k.app, "PATCH", &path, Some(json!({ "description": "e" }))).await;
     assert_eq!(ada["permission_mode"], "accept_edits", "absent keeps it");
     let (status, _) = call(&k.app, "PATCH", &path, set(json!("bypassPermissions"))).await;
@@ -466,16 +449,9 @@ async fn an_agents_permission_mode_inherits_and_bypass_needs_manage_runtimes() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{ada}");
-    assert_eq!(
-        modes(&ada),
-        (json!("bypass_permissions"), json!("bypass_permissions"))
-    );
+    assert_eq!(ada["permission_mode"], "bypass_permissions");
     let (_, ada) = call(&k.app, "PATCH", &path, set(Value::Null)).await;
-    assert_eq!(
-        modes(&ada),
-        (Value::Null, json!("plan")),
-        "back to inheriting"
-    );
+    assert_eq!(ada["permission_mode"], Value::Null, "back to the host's");
 
     // A workflow step: Bob may save workflows, but not a bypass step.
     let flow = |mode: &str| {

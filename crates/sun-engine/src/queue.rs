@@ -642,7 +642,6 @@ impl Scheduler {
         // Runs whose picked entry only some hosts may take (`host:`,
         // `effort:`), with those hosts.
         let mut only_on: HashMap<RunId, HashSet<HostId>> = HashMap::new();
-        let modes: HashMap<String, String> = tx.permission_modes().await?.into_iter().collect();
         let capped = crate::budget::ecosystem_over(&mut tx, now).await?.is_some();
         self.held_until = capped.then(|| crate::budget::next_month_start(now));
         for w in &waiting {
@@ -746,8 +745,8 @@ impl Scheduler {
                 }
                 if spends && local {
                     let allow = self.engine.allow_bypass;
-                    let refusal_of = |mode| {
-                        let mode = failover::effective_mode(mode, &modes, adapter);
+                    let refusal_of = |mode: Option<PermissionMode>| {
+                        let mode = mode.map(PermissionMode::as_str);
                         let disabled = failover::bypass_disabled(mode, allow);
                         let disabled = disabled.map(|why| (PLACEMENT_REFUSED_BYPASS_DISABLED, why));
                         let bare = sun_core::mode_refusal(mode, &env);

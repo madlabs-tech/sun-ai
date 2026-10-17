@@ -18,7 +18,6 @@ const agent = (name: string, description: string, instructions: string, runtime_
   runtime_chain,
   skill_ids,
   permission_mode: null,
-  effective_permission_mode: null,
   created_at: new Date().toISOString(),
   archived_at: null,
   ready: false,
@@ -43,11 +42,7 @@ function view(a: Agent): Agent {
     return of_name.length ? (ready ? null : `${id}: log in to ${id} on a host`) : `${id}: no host reports it`;
   });
   const ready = reasons.some((r) => r === null);
-  // Its own mode, else the first runtime's policy, like the kernel.
-  const first = a.runtime_chain[0];
-  const inherited = first ? (RUNTIMES.find((r) => r.name === entry_name(first))?.permission_mode ?? null) : null;
-  const effective_permission_mode = a.permission_mode ?? inherited;
-  return clone({ ...a, effective_permission_mode, ready, ready_reason: ready ? null : reasons.join('; ') });
+  return clone({ ...a, ready, ready_reason: ready ? null : reasons.join('; ') });
 }
 
 /** A `{tool, host, model, effort}` entry checked like the kernel: the host reported the tool, the effort is in its catalog. */

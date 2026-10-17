@@ -47,10 +47,6 @@ pub trait RuntimeRepo {
     async fn set_cooldown(&mut self, account: &str, until: Option<Timestamp>) -> Result<()>;
     /// `(account, until)` of every account cooling down, ended ones included.
     async fn cooldowns(&mut self) -> Result<Vec<(String, Timestamp)>>;
-    /// Sets the permission mode sessions of `adapter` get (`runtime_policy`).
-    async fn set_permission_mode(&mut self, adapter: &str, mode: &str) -> Result<()>;
-    /// `(adapter, permission mode)` of every adapter with one set.
-    async fn permission_modes(&mut self) -> Result<Vec<(String, String)>>;
 }
 
 /// **Repository** for `session` and `handoff_pack` rows.
@@ -181,28 +177,6 @@ impl RuntimeRepo for Tx {
             .await?;
         rows.iter()
             .map(|row| Ok((row.try_get("account")?, parse_ts(row.try_get("until")?)?)))
-            .collect()
-    }
-
-    async fn set_permission_mode(&mut self, adapter: &str, mode: &str) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO runtime_policy (adapter, permission_mode) VALUES (?, ?) \
-             ON CONFLICT (adapter) DO UPDATE SET permission_mode = excluded.permission_mode",
-        )
-        .bind(adapter)
-        .bind(mode)
-        .execute(self.conn())
-        .await?;
-        Ok(())
-    }
-
-    async fn permission_modes(&mut self) -> Result<Vec<(String, String)>> {
-        let rows =
-            sqlx::query("SELECT adapter, permission_mode FROM runtime_policy ORDER BY adapter")
-                .fetch_all(self.conn())
-                .await?;
-        rows.iter()
-            .map(|row| Ok((row.try_get("adapter")?, row.try_get("permission_mode")?)))
             .collect()
     }
 }
