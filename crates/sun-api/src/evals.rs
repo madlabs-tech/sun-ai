@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::{Extension, Json};
 use serde::Deserialize;
 use sun_core::TaskId;
+use sun_core::model::Permission;
 use sun_core::model::{EvalRun, EvalSet};
 use sun_engine::{EvalSpec, OnWorkspace};
 
@@ -12,7 +13,7 @@ use crate::Api;
 use crate::auth::Caller;
 use crate::error::ApiResult;
 use crate::routes::{Body, id};
-use crate::workspace_access::visible;
+use crate::workspace_access::{NamedWorkspaces, visible};
 
 const PAGE: u32 = 50;
 const MAX_PAGE: u32 = 200;
@@ -39,11 +40,26 @@ pub(crate) async fn list(
     Ok(Json(out))
 }
 
-/// `POST /evals`: starts replaying; `202` with the `running` eval.
+/// `POST /evals`: starts replaying; `202` with the `running` eval. A
+/// candidate workflow with a `bypass_permissions` step needs what saving it
+/// needs: `manage_runtimes` on the picked tasks' workspaces and
+/// `runtimes.allow_bypass`.
 pub(crate) async fn start(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    named: Option<Extension<NamedWorkspaces>>,
     Body(spec): Body<EvalSpec>,
 ) -> ApiResult<(StatusCode, Json<EvalRun>)> {
+    if spec
+        .candidate
+        .workflow
+        .as_deref()
+        .is_some_and(sun_engine::sets_bypass)
+    {
+        let named = named.as_ref().map(|Extension(n)| n);
+        crate::auth::allowed_in(&caller, named, &[Permission::ManageRuntimes])?;
+        crate::hosts::check_bypass_allowed(&api, true)?;
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(api.engine.start_eval(spec).await?),
