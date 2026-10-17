@@ -154,6 +154,11 @@ pub struct Runtimes {
     /// (`claude-code.md`, `codex.md`, `opencode.md`) replaces that CLI's
     /// built-in one. Relative to the data dir. Unset = built-ins only.
     pub template_dir: Option<PathBuf>,
+    /// Where the runtime list is read from: `v1` (default) parses each
+    /// host's raw capabilities report, `v2` reads the projected
+    /// `host_runtime` rows. The kill switch of the runtime model rework.
+    #[serde(default)]
+    pub model: sun_api::RuntimesModel,
 }
 
 impl Default for Runtimes {
@@ -165,6 +170,7 @@ impl Default for Runtimes {
             fake: BTreeMap::new(),
             credits: BTreeMap::new(),
             template_dir: None,
+            model: sun_api::RuntimesModel::default(),
         }
     }
 }

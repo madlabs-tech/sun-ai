@@ -387,6 +387,7 @@ pub async fn start(
         .with_features(features)
         .with_entitlements(entitlements)
         .with_allow_bypass(config.runtimes.allow_bypass)
+        .with_runtimes_model(config.runtimes.model)
         .with_sun_cloud(sun_cloud)
         .with_mod_installer(installer)
         .with_mcp(mcp_sessions)

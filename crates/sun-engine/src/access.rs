@@ -9,7 +9,7 @@ use serde_json::json;
 use sun_core::entitlement::{Entitlement, Quota};
 use sun_core::model::SecretScope;
 use sun_core::model::{AuditAction, AuditEntry, Member, Runtime, RuntimeSource};
-use sun_core::{AuditId, Error, MemberId, Result, RuntimeId, WorkspaceId};
+use sun_core::{AuditId, Error, MemberId, Result, RuntimeId, Timestamp, WorkspaceId};
 use sun_store::{
     AuditRepo, LoginRepo, MemberRepo, ModInstallRepo, RuntimeRepo, SecretRepo, SettingRepo,
     WorkspaceRepo,
@@ -125,6 +125,15 @@ impl Engine {
     /// `(adapter, permission mode)` of every runtime with one set.
     pub async fn permission_modes(&self) -> Result<Vec<(String, String)>> {
         Ok(self.store.read().await?.permission_modes().await?)
+    }
+
+    /// `runtime name -> cooldown_until` of every runtime still cooling down
+    /// now. Keyed by chain name across the deployment, as failover cools.
+    // ponytail: by name until cooldowns are keyed by account (TRD item 5).
+    pub async fn cooldowns(&self) -> Result<std::collections::BTreeMap<String, Timestamp>> {
+        let now = chrono::Utc::now();
+        let rows = self.store.read().await?.cooldowns().await?;
+        Ok(rows.into_iter().filter(|(_, until)| *until > now).collect())
     }
 
     /// The `runtime` rows of `workspace` (`None`: of every workspace), by name.

@@ -58,6 +58,7 @@ import { is_vcs_route, vcs_route } from './mock_vcs';
 import { pull_request_route } from './mock_pull_requests';
 import { agents_route, find_agent } from './mock_agents';
 import { budget_route, has_ecosystem_secret, on_limit_route, settings_route } from './mock_settings';
+import { chain_names, runtime_name } from '../format';
 
 type StepDef = [key: string, name: string, type: StepType];
 
@@ -254,12 +255,31 @@ for (const s of SEEDS) {
   }
 }
 
+/** One per (host, tool), one in each state of the Runtimes page, then the key-backed ones (`host: null`). */
+const on_host = (host: number, host_name: string, tool: string, r: Partial<Runtime>): Runtime => ({
+  id: `${fake_id('H', host)}:${tool}`, name: tool, tool, adapter: tool, family: null, version: '1.0.0',
+  host: { id: fake_id('H', host), name: host_name }, presence: 'online', availability: 'ready', load: { active: 0, max: null },
+  state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: today('10:12'),
+  workspace_id: null, source: 'byo_runtime', permission_mode: null, allow_bypass: true, config: null, model: null, ...r,
+});
+const keyed = (name: string, r: Partial<Runtime>): Runtime => ({
+  id: name, name, tool: 'opencode', adapter: 'opencode', family: null, version: null, host: null, presence: 'online',
+  availability: 'ready', load: null, state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: null,
+  workspace_id: MAIN_WORKSPACE, source: 'byo_key', permission_mode: 'plan', allow_bypass: true, config: null, model: null, ...r,
+});
 export const RUNTIMES: Runtime[] = [
-  { id: 'claude-code', name: 'Claude Code', adapter: 'claude_code', source: 'byo_runtime', status: 'busy', cooldown_until: null, sessions: 2, max_sessions: 3, permission_mode: 'accept_edits', allow_bypass: true },
-  { id: 'codex', name: 'Codex', adapter: 'codex', source: 'byo_runtime', status: 'busy', cooldown_until: null, sessions: 1, max_sessions: 2, permission_mode: null, allow_bypass: true },
-  { id: 'opencode', name: 'OpenCode', adapter: 'opencode', source: 'byo_key', status: 'cooling_down', cooldown_until: today('14:00'), sessions: 0, max_sessions: 2, permission_mode: 'plan', allow_bypass: true },
-  { id: 'credits', name: 'Sun credits', adapter: 'opencode', source: 'credits', status: 'ready', cooldown_until: null, sessions: 0, max_sessions: 4, permission_mode: null, allow_bypass: true, model: 'qwen3-coder' },
+  on_host(1, 'hery-mbp', 'claude-code', { version: '2.1.291', state: 'busy', load: { active: 2, max: 3 }, permission_mode: 'accept_edits' }),
+  on_host(3, 'rina-laptop', 'claude-code', { version: '2.1.291', presence: 'offline', state: 'offline', detail: 'rina-laptop is offline', last_seen_at: today('06:40'), permission_mode: 'accept_edits' }),
+  on_host(2, 'build-box-01', 'claude-code', { version: '2.1.291', availability: 'needs_login', state: 'needs_login', detail: 'Run `claude auth login` on build-box-01', permission_mode: 'accept_edits' }),
+  on_host(2, 'build-box-01', 'codex', { availability: 'needs_login', state: 'needs_login', detail: 'Run `codex login` on build-box-01' }),
+  on_host(1, 'hery-mbp', 'codex', { version: '0.161.0', availability: 'outdated', detail: 'Codex 0.161.0 is untested. If it misbehaves, install the known-good version: npm install -g @openai/codex@0.160.0' }),
+  on_host(2, 'build-box-01', 'opencode', { availability: 'limited', state: 'limited', cooldown_until: today('14:00'), permission_mode: 'plan' }),
+  on_host(2, 'build-box-01', 'kiro-cli', { version: '1.4', availability: 'unsupported', state: 'unsupported' }),
+  keyed('lan-qwen', { config: { kind: 'openai_compatible', endpoint: 'http://localhost:11434/v1', model: 'qwen2.5-coder:7b', key_secret: null } }),
+  keyed('credits', { source: 'credits', permission_mode: null, model: 'qwen3-coder' }),
 ];
+/** A chain name as the mock's events say it: a host CLI by its product name. */
+const runtime_label = (name: string | null) => (name === null ? null : runtime_name(RUNTIMES, name));
 
 const MIB = 1024 * 1024;
 const tool = (ready: boolean, devices: string[] = [], detail: string | null = null) => ({ ready, version: ready ? '1.0' : null, devices, detail });
@@ -276,7 +296,7 @@ const HOSTS: Host[] = [
     maestro: tool(true),
   } }, sessions: 2, session_stats: [live(142, 'fix', 612, 38.5, 1460), live(147, 'draft', 248, 4.2, 312)],
   disk: [{ task_id: fake_id('T', 142), bytes: 1.4 * 1024 * MIB }, { task_id: fake_id('T', 147), bytes: 3 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
-  { id: fake_id('H', 2), name: 'build-box-01', status: 'online', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['opencode', 'codex'], devices: ['Pixel_8_API_35'] }, sessions: 1,
+  { id: fake_id('H', 2), name: 'build-box-01', status: 'online', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['claude-code', 'opencode', 'codex', 'kiro-cli'], devices: ['Pixel_8_API_35'] }, sessions: 1,
     session_stats: [live(139, 'fix', 410, 0.4, 7380)], disk: [{ task_id: fake_id('T', 139), bytes: 820 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
   { id: fake_id('H', 3), name: 'rina-laptop', status: 'offline', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['claude-code'], devices: [] }, sessions: 0, last_seen_at: today('06:40'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: 'm_me' },
 ];
@@ -671,7 +691,7 @@ function start_agent_run(t: TaskDetail, trigger: string) {
   t.run = run;
   run_history.set(t.id, [...history, { id: run.id, attempt: history.length + 1, trigger, status: 'running', cost_usd: 0, started_at: now, ended_at: null }]);
   log(t, 'run', { run_id: run.id, trigger });
-  event(run.id, 'dispatched', `Dispatched to ${RUNTIMES.find((r) => r.id === runtime)?.name ?? runtime} for ${agent.name}`);
+  event(run.id, 'dispatched', `Dispatched to ${runtime_label(runtime)} for ${agent.name}`);
   follow_run(t);
 }
 
@@ -1222,7 +1242,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
       if (!t.run.runtime_chain.includes(to)) throw new MockError(422, { error: { code: 'invalid_input', message: `runtime \`${to}\` is not in the chain` } });
       if (step.type !== 'agent' || !['running', 'limit_hit'].includes(step.status))
         throw new MockError(422, { error: { code: 'invalid_input', message: `step \`${step.step_key}\` is ${step.status}; only a running or limit_hit step can switch` } });
-      const name = (id: string | null) => RUNTIMES.find((r) => r.id === id)?.name ?? id;
+      const name = runtime_label;
       const from = step.runtime_id;
       [step.runtime_id, step.status, t.run.runtime_id] = [to, 'running', to];
       t.run.runtime_switches += 1;
@@ -1270,18 +1290,28 @@ function route(method: string, full_path: string, body: unknown): unknown {
     }
     case 'GET /usage': {
       if (params.get('by') === 'runtime')
-        return RUNTIMES.map((r, i) => {
+        return chain_names(RUNTIMES).map((name, n) => {
+          const [r, i] = [RUNTIMES.find((x) => x.name === name)!, Math.min(n, 2)];
           const usage = { input_tokens: 412_000 * (3 - i), output_tokens: 38_500 * (3 - i), cost_usd: 6.4 * (3 - i) };
           const window = { input_tokens: 61_200 * (3 - i), output_tokens: 5_400 * (3 - i), cost_usd: 0.9 * (3 - i) };
-          return { runtime: r.id, source: r.source, usage, quota_window: r.source === 'byo_runtime' ? { hours: 5, usage: window } : null };
+          return { runtime: r.name, source: r.source, usage, quota_window: r.source === 'byo_runtime' ? { hours: 5, usage: window } : null };
         });
       const cost = tasks.find((x) => x.run?.id === params.get('run_id'))?.run?.cost_usd ?? 0;
       return { input_tokens: Math.round(cost * 120_000), output_tokens: Math.round(cost * 9_000), cost_usd: cost };
     }
     // --- Per workspace (M5): a token enrols a host into its workspace; attach (a deployment owner, or whoever
     // enrolled the host; anyone else gets 404) and detach (404 when it isn't attached), all with manage_runtimes there.
-    case 'POST /workspaces/:id/hosts': // /workspaces/{id}/hosts/tokens
+    case 'POST /workspaces/:id/hosts': // /workspaces/{id}/hosts/tokens, /workspaces/{id}/hosts/{host}/reprobe
       need('manage_runtimes', find_workspace(parts[1]).id, 'manage runtimes');
+      if (parts[4] === 'reprobe') {
+        // "Check again": someone ran `codex login` on the host meanwhile, but not `claude auth login`.
+        const host = HOSTS.find((h) => h.id === parts[3] && h.workspace_ids.includes(find_workspace(parts[1]).id));
+        if (!host) throw not_found(`host ${parts[3]}`);
+        if (host.status === 'offline') throw new MockError(503, { error: { code: 'unavailable', message: `host ${host.id} is offline` } });
+        for (const r of RUNTIMES.filter((x) => x.host?.id === host.id && x.tool === 'codex' && x.state === 'needs_login'))
+          Object.assign(r, { availability: 'ready', state: 'idle', detail: null });
+        return null;
+      }
       return { token: 'sun_enrol_' + Math.random().toString(36).slice(2, 14), expires_at: new Date(Date.now() + 3600_000).toISOString(), kernel_url: location.origin };
     case 'PUT /workspaces/:id/hosts':
     case 'DELETE /workspaces/:id/hosts': {
@@ -1331,12 +1361,13 @@ function route(method: string, full_path: string, body: unknown): unknown {
     case 'GET /runtimes':
       return clone(RUNTIMES);
     case 'PUT /runtimes/:id/policy': {
-      const r = RUNTIMES.find((x) => x.id === parts[1]);
-      if (!r) throw not_found('Runtime');
+      // Per tool (adapter), on every host.
+      const of_tool = RUNTIMES.filter((x) => x.tool === parts[1]);
+      if (!of_tool.length) throw not_found('Runtime');
       const mode = (body as { permission_mode: PermissionMode }).permission_mode;
-      if (mode === 'bypass_permissions' && !r.allow_bypass) throw new MockError(422, { error: { code: 'invalid_input', message: 'bypass_permissions needs runtimes.allow_bypass in sun.yaml.' } });
-      r.permission_mode = mode;
-      return { id: r.id, permission_mode: mode };
+      if (mode === 'bypass_permissions' && !of_tool[0].allow_bypass) throw new MockError(422, { error: { code: 'invalid_input', message: 'bypass_permissions needs runtimes.allow_bypass in sun.yaml.' } });
+      for (const r of of_tool) r.permission_mode = mode;
+      return { id: parts[1], permission_mode: mode };
     }
     case 'GET /hosts': {
       // Each names only the workspaces the caller sees.
@@ -1399,11 +1430,9 @@ function route(method: string, full_path: string, body: unknown): unknown {
       if (endpoint.trim() && !/^https?:\/\/[^/@\s]+(\/\S*)?$/.test(endpoint.trim())) throw invalid('endpoint: must be an http(s) URL without credentials');
       if (!model.trim() || /\s/.test(model)) throw invalid('model: needs a model id without spaces, e.g. qwen2.5-coder:7b');
       if (key_secret !== null && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key_secret)) throw invalid('key_secret: a secret name is 1–64 letters, digits or _, not starting with a digit');
-      const r: Runtime = {
-        id: name, name, adapter, source: 'byo_key', status: 'offline', cooldown_until: null, sessions: 0, max_sessions: 0,
-        permission_mode: null, allow_bypass: true, config: { kind, endpoint, model, key_secret },
-      };
-      r.status = mock_readiness(r).logged_in ? 'ready' : 'offline';
+      const r = keyed(name, { tool: adapter, adapter, permission_mode: null, config: { kind, endpoint, model, key_secret } });
+      const ready = mock_readiness(r);
+      if (!ready.logged_in) Object.assign(r, { availability: 'needs_login', state: 'needs_login', detail: ready.detail });
       RUNTIMES.push(r);
       return clone(r);
     }

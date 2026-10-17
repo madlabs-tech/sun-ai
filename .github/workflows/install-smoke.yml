@@ -36,6 +36,7 @@ jobs:
       TAG: ${{ inputs.tag }}
     steps:
       - name: Install as a user would
+        shell: bash
         run: |
           if [ -n "$TAG" ]; then
             version_flag="--version $TAG"

@@ -72,12 +72,11 @@
   // chain with the same hand-off pack as an automatic failover, in the same worktree.
   const switchable = $derived(run?.steps.find((s) => s.type === 'agent' && (s.status === 'running' || s.status === 'limit_hit')) ?? null);
   const switch_targets = $derived.by(() => {
-    const on = app.runtimes.find((r) => r.id === switchable?.runtime_id);
     return (run?.runtime_chain ?? [])
-      .filter((r) => r !== switchable?.runtime_id && r !== on?.name)
+      .filter((r) => r !== switchable?.runtime_id)
       .map((r) => {
-        const rt = app.runtimes.find((x) => x.id === r || x.name === r);
-        const cooling = rt?.status === 'cooling_down' ? ` · cooling down${rt.cooldown_until ? ' until ' + clock(rt.cooldown_until) : ''}` : '';
+        const rt = app.runtimes.find((x) => x.name === r);
+        const cooling = rt?.cooldown_until ? ` · cooling down until ${clock(rt.cooldown_until)}` : '';
         return { value: r, label: runtime_name(app.runtimes, r), about: (rt ? SOURCE_LABEL[rt.source] : 'Runtime') + cooling };
       });
   });

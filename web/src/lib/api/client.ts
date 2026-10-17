@@ -488,6 +488,10 @@ export const api = {
   /** `manage_runtimes` in the workspace: the host it enrols is attached there. */
   create_host_token: (workspace: string = MAIN_WORKSPACE) =>
     request<HostToken>('POST', `/workspaces/${id_path(workspace)}/hosts/tokens`, {}),
+  /** `manage_runtimes` in the workspace: "Check again". The host re-probes its CLIs; 204 once any change is stored,
+   *  503 when it is offline or too old to re-probe. */
+  reprobe_host: (workspace: string, host_id: string) =>
+    request<null>('POST', `/workspaces/${id_path(workspace)}/hosts/${id_path(host_id)}/reprobe`, {}),
   /** `manage_runtimes` in the workspace, and a deployment owner or whoever enrolled the host. */
   attach_host: (workspace: string, host_id: string) =>
     request<null>('PUT', `/workspaces/${id_path(workspace)}/hosts/${id_path(host_id)}`),
