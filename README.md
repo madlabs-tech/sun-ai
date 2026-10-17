@@ -23,6 +23,8 @@ Linux (x86_64 or arm64, with systemd):
 curl -fsSL https://get-sun.madlabs.tech | sudo sh
 ```
 
+It needs `curl`, `openssh-client` (checks the release signature) and `xz-utils` (unpacks it). Minimal and container images may lack them: `apt install curl openssh-client xz-utils`.
+
 macOS (Apple silicon):
 
 ```sh
