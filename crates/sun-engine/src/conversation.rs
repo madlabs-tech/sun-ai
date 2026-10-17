@@ -8,7 +8,9 @@
 //! - **A comment continues the conversation.** A run a comment queued
 //!   ([`woken_by_comment`]) resumes the CLI session of the task's previous
 //!   run (`executor::dispatch`); when it can't, the fresh session reads the
-//!   thread ([`thread`]) before the messages left for it.
+//!   thread ([`thread`]) before the messages left for it. Only comments
+//!   resume: any other run (a move to Todo, a reassign) starts fresh with
+//!   the thread.
 //! - **An @mention brings an agent in.** A person's comment on a task may
 //!   name agents ([`mentioned`]); then only they wake, not the assignee
 //!   unless named. The assignee wakes on the task itself; any other agent in
@@ -140,13 +142,21 @@ pub(crate) async fn woken_by_comment(tx: &mut Tx, run_id: RunId) -> Result<bool>
         .is_some_and(|e| e.payload["reason"] == COMMENT))
 }
 
-/// The run of the same workflow just before `run` on its task.
+/// The run of the same workflow just before `run` on its task, unless the
+/// watchdog stopped it: resuming a stalled, looping or over-budget session
+/// would carry that context on, so those start fresh with the thread.
 pub(crate) async fn previous_run(tx: &mut Tx, run: &Run) -> Result<Option<Run>> {
     let runs = tx.runs_of_task(run.task_id).await?;
     let before = runs.iter().take_while(|r| r.id != run.id);
     Ok(before
         .last()
         .filter(|r| r.workflow_id == run.workflow_id)
+        .filter(|r| {
+            !matches!(
+                r.status,
+                RunStatus::Stalled | RunStatus::Looping | RunStatus::BudgetExceeded
+            )
+        })
         .cloned())
 }
 

@@ -52,6 +52,8 @@ struct HoldHost {
     /// The done claims a finishing session sends, in order (default: one
     /// `done`).
     claims: Mutex<Vec<String>>,
+    /// Sessions repeat one tool call until the watchdog stops them.
+    looping: AtomicBool,
     /// Each host event is delivered twice (a host redelivering unacked).
     redeliver: AtomicBool,
     /// Hosts that are not connected now.
@@ -104,6 +106,7 @@ impl HostLink for HoldHost {
         if claims.is_empty() {
             claims.push("done".into());
         }
+        let looping = self.looping.load(Ordering::SeqCst);
         let copies = if self.redeliver.load(Ordering::SeqCst) {
             2
         } else {
@@ -127,7 +130,17 @@ impl HostLink for HoldHost {
                 text: "working".into(),
             };
             send(1, working);
-            while !finish.load(Ordering::SeqCst) {
+            if looping {
+                for seq in 2..5 {
+                    let call = SunEvent::ToolCall {
+                        name: "Bash".into(),
+                        args_hash: 7,
+                        summary: "cargo test".into(),
+                    };
+                    send(seq, call);
+                }
+            }
+            while looping || !finish.load(Ordering::SeqCst) {
                 if !alive.lock().unwrap().contains(&id) {
                     return;
                 }
@@ -1741,6 +1754,30 @@ async fn resume_is_refused_when_the_previous_run_was_another_runtime() {
     k.sessions(3).await;
     let second = k.host.natives.lock().unwrap()[1].1.clone();
     assert_eq!(k.session(2).0, second);
+}
+
+/// 3. The watchdog stopped the previous run (here: looping): the
+/// comment-woken run starts fresh with the thread instead of carrying that
+/// session on.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_is_refused_when_the_watchdog_stopped_the_previous_run() {
+    let k = kernel().await;
+    k.host.native.store(true, Ordering::SeqCst);
+    k.host.looping.store(true, Ordering::SeqCst);
+    let ada = k.agent("Ada").await;
+    let task = k.task(ada, TaskStatus::Todo).await;
+    eventually("a looping run", || async {
+        k.runs(task).await.first().map(|r| r.status) == Some(RunStatus::Looping)
+    })
+    .await;
+    k.host.looping.store(false, Ordering::SeqCst);
+    k.host.finish.store(true, Ordering::SeqCst);
+    k.say(task, "user:ana", "Try again").await;
+    k.sessions(2).await;
+    assert_eq!(k.session(1).0, None, "fresh after a watchdog stop");
+    let fresh = k.host.envelopes()[1].clone();
+    assert!(fresh.contains("Your task: MAIN-1"), "{fresh}");
+    assert_eq!(thread_lines(&fresh), ["- ana: Try again"]);
 }
 
 /// 3 and 5. Two hosts: a comment-woken run goes to the previous run's host
