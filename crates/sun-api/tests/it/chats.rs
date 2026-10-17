@@ -87,6 +87,12 @@ async fn a_chat_is_its_creators_alone() {
         let (status, _) = call(app, "GET", read, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "token holder: {read}");
     }
+    // Nor by naming it in a body.
+    let eval = json!({ "name": "x", "pick": { "by": "tasks", "task_ids": [id] } });
+    let (status, _) = call_as(app, &bob, "POST", "/api/v1/evals", Some(eval.clone())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "bob: eval");
+    let (status, _) = call(app, "POST", "/api/v1/evals", Some(eval)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "token holder: eval");
     let say = json!({ "body": "sneaking in" });
     let (status, _) = call_as(app, &bob, "POST", &format!("{path}/comments"), Some(say)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);

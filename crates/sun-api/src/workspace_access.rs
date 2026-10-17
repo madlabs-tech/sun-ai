@@ -23,8 +23,8 @@
 //!   `task_id(s)`, `repo_id(s)`, `project_id`, `set_id`, `agent_id`, an eval
 //!   `pick` and a task's `assignee` (a workflow or an agent).
 //!
-//! For every caller, deployment owners too, a task or run in the path (or
-//! `?run_id=`) that is someone else's direct chat answers 404 as well
+//! For every caller, deployment owners too, a task or run named anywhere
+//! above that is someone else's direct chat answers 404 as well
 //! ([`sun_engine::Engine::chat_hidden`]).
 //!
 //! Lists without `?workspace=` filter themselves with [`Caller::sees`], or
@@ -132,7 +132,7 @@ pub(crate) fn hidden() -> ApiError {
 /// Middleware: 404 when the request names anything that doesn't exist or is
 /// on a workspace the caller can't see, else stores [`NamedWorkspaces`].
 /// Malformed ids name nothing (the handler answers 422). Deployment owners
-/// pass without a lookup.
+/// pass after the chat check.
 pub(crate) async fn guard(
     State(api): State<Api>,
     request: Request,
@@ -168,14 +168,6 @@ pub(crate) async fn guard(
             push(&mut named, &repo, Named::Repo);
         }
     }
-    for thing in &named {
-        if api.engine.chat_hidden(thing.on_workspace(), member).await? {
-            return Err(hidden());
-        }
-    }
-    if !restricted {
-        return Ok(next.run(Request::from_parts(parts, body)).await);
-    }
     let scan_body = matches!(parts.method, Method::POST | Method::PUT | Method::PATCH)
         && path != UPLOAD_PATH
         && parts
@@ -202,6 +194,14 @@ pub(crate) async fn guard(
             axum::body::Body::from(bytes)
         }
     };
+    for thing in &named {
+        if api.engine.chat_hidden(thing.on_workspace(), member).await? {
+            return Err(hidden());
+        }
+    }
+    if !restricted {
+        return Ok(next.run(Request::from_parts(parts, body)).await);
+    }
     let defaults = DEFAULTS_TO_MAIN
         .iter()
         .any(|(method, p)| *method == parts.method && *p == path);
