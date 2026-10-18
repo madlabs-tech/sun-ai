@@ -52,7 +52,8 @@ Commands marked *kernel* talk to a running kernel over REST: by default `http://
 | `sun user list\|invite\|reinvite\|promote\|deactivate\|activate` | Members of the deployment. |
 | `sun user set-password <email>` | Set a member's password (lockout recovery). |
 | `sun smtp set\|show\|test` | The mail server invitations go through. |
-| `sun runtime add <name> --byo-key ...` · `check` · `on-limit` | Bring-your-own-key runtimes, their readiness, and the default usage-limit policy. |
+| `sun credential add\|check\|rm` | API key credentials that pay for sessions: add one (its key lives in a named secret), check it can pay, remove it. |
+| `sun runtime check` · `on-limit` | A tool's readiness, and the default usage-limit policy. |
 
 ## Mods, skills and secrets
 

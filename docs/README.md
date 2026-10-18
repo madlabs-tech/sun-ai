@@ -85,7 +85,7 @@ The crate table, the dependency rule and the project layout are [below](#crates)
 
 **Agent CLIs.**
 - One Adapter per CLI in `crates/sun-runtime`: Claude Code, Codex, OpenCode. Each turns CLI output into `SunEvent`; a quota message becomes `SunEvent::LimitHit`.
-- A bring-your-own-key runtime (`sun runtime add … --byo-key`) runs through OpenCode with a provider config.
+- A bring-your-own-key credential (`sun credential add …`) names the secret holding your provider key; agents pick it under "Paid by", and it runs on OpenCode, Claude Code or Codex.
 - An extension can serve a runtime too, but extension runtimes reach only the in-process host for now.
 - A real quota hit has **not been tested** against a real account for any CLI.
 
