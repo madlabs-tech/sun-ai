@@ -2031,7 +2031,7 @@ steps:
     /// to the owner as "enable bypass permissions for ana", which would not
     /// help.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "BLO-172 follow-up: bypass::refused blames the cap for any Forbidden start of a capped step"]
+    #[ignore = "BLO-178: bypass::refused blames the cap for any Forbidden start of a capped step"]
     async fn qa_a_capped_session_refused_for_another_reason_does_not_blame_the_cap() {
         let h = owners_run_held(BYPASS).await;
         *h.local.refusal.lock().unwrap() = Some(

@@ -1966,7 +1966,7 @@ async fn failover_skips_an_entry_whose_tool_does_not_offer_the_steps_mode() {
 /// over. Her steer was queued, not sent; the hand-off session runs capped
 /// and gets her message, exactly once.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BLO-172 follow-up: a hand-off session never takes queued messages, so a capped steer queued during a session that fails over is never delivered"]
+#[ignore = "BLO-177: a hand-off session never takes queued messages, so a capped steer queued during a session that fails over is never delivered"]
 async fn qa_a_capped_steer_before_a_failover_reaches_the_hand_off_session_once() {
     let late_limit = r#"{"delay_ms":1500,"kind":"limit_hit","limit":"quota","reset_at":null,"reset_in_ms":3600000,"raw":"usage limit reached"}"#;
     let h = Harness::with(
