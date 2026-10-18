@@ -903,10 +903,10 @@ steps:
             .await
             .unwrap();
         w.engine
-            .comment(chat.id, "hi", actor_of(&w.ana), &[])
+            .comment(chat.task.id, "hi", actor_of(&w.ana), &[])
             .await
             .unwrap();
-        let (_, got, _) = w.run_latest(chat.id).await;
+        let (_, got, _) = w.run_latest(chat.task.id).await;
         assert_eq!(modes(&got), CAPPED, "direct chat");
     }
 
@@ -973,7 +973,11 @@ steps:
             tx.runs_of_task(task).await.unwrap().pop().unwrap()
         };
         w.engine
-            .retry_step(run.id, StepKey::new("check").unwrap(), "user:ana".into())
+            .retry_step(
+                run.id,
+                StepKey::new("check").unwrap(),
+                actor_of(&w.ana).unwrap(),
+            )
             .await
             .unwrap();
         until_run_ends(&w.store, run.id).await;
