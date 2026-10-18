@@ -354,8 +354,9 @@ pub(crate) const PLACEMENT_REFUSED_BYPASS_BARE: &str = "placement_refused_bypass
 
 /// Event kind of a run placement refused because it would run
 /// A permission mode no host of the run's workspace reports for the tool
-/// (BLO-168); payload `{runtime, exec_env, reason}`. The run fails; the mode
-/// is never swapped for another.
+/// (BLO-168); payload `{runtime, exec_env, reason}`, plus `capped` (the
+/// member) when a step was capped. The run fails; the mode is never swapped
+/// for another.
 pub(crate) const PLACEMENT_REFUSED_MODE_UNOFFERED: &str = "placement_refused_mode_unoffered";
 
 /// `bypass_permissions` while the operator's `allow_bypass` is off; payload
@@ -691,17 +692,20 @@ impl Scheduler {
                 .map(|workflow| failover::entries(workflow, &slot.runtime))
                 .unwrap_or_else(|| vec![ChainEntry::from(slot.runtime.as_str())]);
             let chain = sun_core::chain_names(&entries);
-            // Each agent step's mode; the host's default fills a `None`.
+            // Each agent step's mode; the host's default fills a `None`. And
+            // the member a step is capped for, said if the run is refused.
             let mut step_modes: Vec<Option<PermissionMode>> = Vec::new();
+            let mut capped_member = None;
             match &workflow {
                 Some(parsed) => {
                     for s in &parsed.steps {
                         if matches!(s.kind, sun_workflow::StepKind::Agent { .. }) {
                             let allow = self.engine.allow_bypass;
-                            let (mode, _) =
+                            let (mode, member) =
                                 crate::bypass::session_mode(&mut tx, &w.run, parsed, &s.id, allow)
                                     .await?;
                             step_modes.push(mode);
+                            capped_member = capped_member.or(member);
                         }
                     }
                 }
@@ -819,9 +823,12 @@ impl Scheduler {
             let (runtime, account) = match (runtime, refusal) {
                 (Some(picked), _) => picked,
                 (None, Some((name, kind, why))) => {
-                    let payload = json!({
+                    let mut payload = json!({
                         "runtime": name, "exec_env": env.kind(), "reason": why,
                     });
+                    if let Some(member) = capped_member {
+                        payload["capped"] = json!(member);
+                    }
                     refused.push((w.run.id, kind, payload));
                     continue;
                 }

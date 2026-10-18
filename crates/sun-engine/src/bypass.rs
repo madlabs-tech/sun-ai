@@ -216,11 +216,30 @@ pub(crate) async fn refused(tx: &mut Tx, step: &sun_core::model::Step, why: &str
         .filter(|e| e.payload["step_id"] == json!(step.id))
         .find_map(|e| e.payload["member"].as_str().map(str::to_owned));
     let Some(member) = member else { return Ok(()) };
-    let text = format!(
-        "The capped session for {member} was refused, so the run failed: {why}. \
-         Owner can enable bypass permissions for {member} in Settings → Security."
-    );
-    say(tx, step.run_id, &text).await
+    say(tx, step.run_id, &refused_line(Some(&member), why)).await
+}
+
+/// Queued run `run_id` the queue refused to place, said on the task's
+/// thread (BLO-175): `why`, and the cap when member `capped` was capped.
+pub(crate) async fn placement_refused(
+    tx: &mut Tx,
+    run_id: RunId,
+    capped: Option<&str>,
+    why: &str,
+) -> Result<()> {
+    say(tx, run_id, &refused_line(capped, why)).await
+}
+
+/// The visible line of a refused run: `why`, and when the session was
+/// capped for `member`, the cap.
+fn refused_line(member: Option<&str>, why: &str) -> String {
+    match member {
+        Some(member) => format!(
+            "bypass permissions is not enabled for {member}, so this run asked for \
+             Edit files and failed: {why}. Owner can enable it in Settings → Security."
+        ),
+        None => format!("This run failed before it started: {why}."),
+    }
 }
 
 /// `text` as a line on the thread of `run_id`'s task.
@@ -921,7 +940,7 @@ steps:
         assert_eq!(thread.len(), 3, "{thread:?}");
         assert_eq!(thread[..2], [STEER_QUEUED.to_owned(), capped_line("ana")]);
         assert!(
-            thread[2].starts_with("The capped session for ana was refused")
+            thread[2].starts_with("bypass permissions is not enabled for ana")
                 && thread[2].contains("doesn't offer permission mode `accept_edits`"),
             "{}",
             thread[2]

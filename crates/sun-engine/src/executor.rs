@@ -1157,9 +1157,10 @@ impl Executor {
     }
 
     /// [`Engine::refuse_run`]: `queued → running → failed` (a queued run has
-    /// no edge to `failed`), with no step started.
+    /// no edge to `failed`), with no step started, said on the task's thread.
     async fn refuse_run(&mut self, run_id: RunId, kind: &str, payload: Value) -> Result<()> {
         let reason = payload["reason"].as_str().unwrap_or(kind).to_owned();
+        let capped = payload["capped"].as_str().map(str::to_owned);
         let mut tx = self.store.begin().await?;
         tx.append_event(NewEvent::new(run_id, None, kind, payload))
             .await?;
@@ -1176,6 +1177,7 @@ impl Executor {
             &mut effects,
         )
         .await?;
+        crate::bypass::placement_refused(&mut tx, run_id, capped.as_deref(), &reason).await?;
         tx.commit().await?;
         self.apply(effects).await
     }

@@ -1336,7 +1336,7 @@ async fn queue_a_steps_permission_mode_wins_at_placement() {
     let plan = tasks_of(&store, PLAN, 1).await.remove(0);
     let host = add_host(&store, "bare", true).await;
     let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![host])));
-    let (_engine, queue) = kernel_on(&store, link, host, Caps::default()).await;
+    let (engine, queue) = kernel_on(&store, link, host, Caps::default()).await;
 
     queue.enqueue(bypass.id).await.unwrap();
     queue.enqueue(plan.id).await.unwrap();
@@ -1369,6 +1369,14 @@ async fn queue_a_steps_permission_mode_wins_at_placement() {
     assert!(
         !events.iter().any(|e| e.kind == "run_placed"),
         "never placed"
+    );
+    // Nobody was capped, so the thread says only why (BLO-175).
+    let why = refused.payload["reason"].as_str().unwrap();
+    let line = format!("This run failed before it started: {why}.");
+    let activity = engine.activity(bypass.id, 0).await.unwrap();
+    assert!(
+        activity.iter().any(|a| a.body["text"] == line.as_str()),
+        "thread doesn't say why: {activity:#?}"
     );
 }
 
@@ -2137,11 +2145,9 @@ async fn queue_refuses_a_capped_members_codex_bypass_run() {
 }
 
 /// BLO-168 case 4, the visible half: the task's thread says why the run
-/// failed, and that the member's bypass was capped. RED (BLO-175): the
-/// refusal only logs `todo -> failed`; the cap line is written at session
-/// start, which a refused run never reaches.
+/// failed, and that the member's bypass was capped (BLO-175): the cap line
+/// of a session start is never reached, so the refusal says both.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BLO-175: a placement refusal says nothing on the task thread"]
 async fn queue_a_refused_capped_codex_run_says_why_on_its_thread() {
     let (_dir, _store, engine, task) = capped_codex_refusal().await;
     let activity = engine.activity(task, 0).await.unwrap();
