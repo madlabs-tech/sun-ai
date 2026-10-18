@@ -398,20 +398,32 @@ impl ByoKey {
             .or_else(|| endpoint.strip_prefix("http://"))
             .and_then(|rest| rest.split('/').next())
             .unwrap_or_default();
-        // `@` would mean credentials in the URL, which end up in logs.
+        // `@` userinfo or a `?key=` query would put a key in the URL, which
+        // every credential response returns and logs keep.
         if !endpoint.is_empty()
             && (authority.is_empty()
                 || authority.contains('@')
+                || endpoint.contains(['?', '#'])
                 || endpoint.contains(char::is_whitespace))
         {
-            return invalid("endpoint: must be an http(s) URL without credentials");
+            return invalid("endpoint: must be an http(s) URL without credentials or a query");
         }
         if self.model.trim().is_empty() || self.model.contains(char::is_whitespace) {
             return invalid("model: needs a model id without spaces, e.g. qwen2.5-coder:7b");
         }
+        // Upper case only: a key pasted here instead of its secret's name
+        // (`gsk_…`, `sk-…`) nearly always has lower case, and the message
+        // must not repeat it.
+        let env_name = |n: &str| {
+            (1..=64).contains(&n.len())
+                && !n.starts_with(|c: char| c.is_ascii_digit())
+                && n.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        };
         match &self.key_secret {
-            Some(name) if crate::model::Secret::validate_name(name).is_err() => invalid(
-                "key_secret: a secret name is 1–64 letters, digits or _, not starting with a digit",
+            Some(name) if !env_name(name) => invalid(
+                "key_secret: the secret's name, not the key: 1–64 of A-Z, 0-9 or _, \
+                 not starting with a digit, e.g. OPENROUTER_KEY",
             ),
             _ => Ok(()),
         }

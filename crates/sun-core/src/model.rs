@@ -2858,5 +2858,17 @@ mod runtime_tests {
             panic!()
         };
         assert!(!m.contains("sk-secret"), "{m}");
+        for (endpoint, key_secret) in [
+            ("https://h/v1?key=AIzaQ", None),
+            ("https://h/v1#AIzaQ", None),
+            ("https://h/v1", Some("gsk_AIzaQ")),
+        ] {
+            let Err(crate::Error::InvalidInput(m)) =
+                with(byo(endpoint, "m", key_secret)).validate()
+            else {
+                panic!("{endpoint} {key_secret:?}")
+            };
+            assert!(!m.contains("AIzaQ"), "{m}");
+        }
     }
 }

@@ -1005,9 +1005,9 @@ function credential_fields(input: Partial<CreateCredential>, c: StoredCredential
     throw invalid('default_tool: opencode takes any key; claude-code takes an anthropic key, codex an openai_compatible one');
   if (!endpoint.trim() && family === 'openai_compatible')
     throw invalid('endpoint: no endpoint; set an OpenAI-compatible base URL, e.g. http://localhost:11434/v1');
-  if (endpoint.trim() && !/^https?:\/\/[^/@\s]+(\/\S*)?$/.test(endpoint.trim())) throw invalid('endpoint: must be an http(s) URL without credentials');
+  if (endpoint.trim() && !/^https?:\/\/[^/@\s?#]+(\/[^\s?#]*)?$/.test(endpoint.trim())) throw invalid('endpoint: must be an http(s) URL without credentials or a query');
   if (!default_model?.trim() || /\s/.test(default_model)) throw invalid('default_model: needs a model id without spaces, e.g. qwen2.5-coder:7b');
-  if (key_secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key_secret)) throw invalid('key_secret: a secret name is 1–64 letters, digits or _, not starting with a digit');
+  if (key_secret && !/^[A-Z_][A-Z0-9_]{0,63}$/.test(key_secret)) throw invalid("key_secret: the secret's name, not the key: 1–64 of A-Z, 0-9 or _, not starting with a digit, e.g. OPENROUTER_KEY");
   return { ...c, source, default_tool, family, endpoint: endpoint.trim() || null, default_model: default_model.trim(), key_secret: key_secret === undefined ? c.key_secret : key_secret || null };
 }
 
