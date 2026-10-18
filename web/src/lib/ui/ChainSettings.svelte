@@ -1,22 +1,30 @@
-<!-- Per-entry settings of a runtime chain: the host it must run on, the model and the effort level.
+<!-- Per-entry settings of a runtime chain: who pays (the CLI's own login or a workspace credential for that
+     tool), the host it must run on, the model and the effort level.
      Hosts are those that reported the tool; models and effort levels are exactly what the CLI on those
      hosts reported (GET /runtimes `models`, `effort_options`), per model where the CLI scopes them.
      Nothing is hardcoded: a tool with no catalog greys the effort picker out. An entry with no
      setting stays a bare name, so an older chain saves back unchanged. -->
 <script lang="ts">
   import { Input, Select } from '@hryer/madlabs-design-system/svelte';
-  import type { ChainEntry, ChainSpec, EffortLevel, Runtime } from '../api/types';
+  import type { ChainEntry, ChainSpec, Credential, EffortLevel, Runtime } from '../api/types';
   import { entry_name, tool_label } from '../format';
 
-  let { chain = $bindable([]), runtimes }: { chain?: ChainEntry[]; runtimes: Runtime[] } = $props();
+  /** `credential_picker`: off where the entry's credential is picked elsewhere (the direct chat's tool radios). */
+  let {
+    chain = $bindable([]),
+    runtimes,
+    credentials = [],
+    credential_picker = true,
+  }: { chain?: ChainEntry[]; runtimes: Runtime[]; credentials?: Credential[]; credential_picker?: boolean } = $props();
   const uid = $props.id();
 
   /** The tool (and paying key) an entry runs; `null` when Sun knows none (market, extension, unreported). */
   function target(e: ChainEntry): { tool: string; credential?: string } | null {
     if (typeof e !== 'string') return { tool: e.tool, credential: e.credential };
-    const r = runtimes.find((x) => x.name === e);
-    if (!r || e.startsWith('market:')) return null;
-    return r.host ? { tool: r.tool } : { tool: r.adapter, credential: r.name };
+    if (e.startsWith('market:')) return null;
+    const c = credentials.find((x) => x.name === e);
+    if (c) return { tool: c.default_tool, credential: c.name };
+    return runtimes.some((x) => x.name === e) ? { tool: e } : null;
   }
 
   const spec_of = (e: ChainEntry): ChainSpec | null => {
@@ -26,7 +34,7 @@
   };
 
   /** The hosts' reports of `tool`: the pinned host's, else every host's. */
-  const reports = (s: ChainSpec) => runtimes.filter((r) => r.host && r.tool === s.tool && (!s.host || r.host.id === s.host));
+  const reports = (s: ChainSpec) => runtimes.filter((r) => r.tool === s.tool && (!s.host || r.host.id === s.host));
 
   /** Effort levels for the entry's model: each report's per-model list when it has the model, else its tool-wide one. */
   function efforts(s: ChainSpec): EffortLevel[] {
@@ -41,15 +49,21 @@
   const models = (s: ChainSpec) => [...new Set(reports(s).flatMap((r) => r.models.map((m) => m.id)))];
 
   function host_options(s: ChainSpec) {
-    const hosts = runtimes.filter((r) => r.host && r.tool === s.tool && (r.presence === 'online' || r.host.id === s.host));
+    const hosts = runtimes.filter((r) => r.tool === s.tool && (r.presence === 'online' || r.host.id === s.host));
     return [
       { value: '', label: 'Any host' },
-      ...hosts.map((r) => ({ value: r.host!.id, label: r.presence === 'online' ? r.host!.name : `${r.host!.name} (offline)` })),
+      ...hosts.map((r) => ({ value: r.host.id, label: r.presence === 'online' ? r.host.name : `${r.host.name} (offline)` })),
     ];
   }
 
+  /** The credentials that can pay for the entry's tool (theirs is `default_tool`); the picked one stays listed. */
+  const payers = (s: ChainSpec) => [
+    { value: '', label: `${tool_label(s.tool)}’s own login` },
+    ...credentials.filter((c) => c.default_tool === s.tool || c.name === s.credential).map((c) => ({ value: c.name, label: c.name })),
+  ];
+
   /** Sets (or with '' clears) one field of entry `i`; an effort the new host or model doesn't offer is dropped. */
-  function set(i: number, field: 'host' | 'model' | 'effort', value: string) {
+  function set(i: number, field: 'credential' | 'host' | 'model' | 'effort', value: string) {
     const s = spec_of(chain[i]);
     if (!s) return;
     const next: ChainSpec = { ...s };
@@ -57,6 +71,8 @@
     else delete next[field];
     if (next.effort && !efforts(next).some((l) => l.value === next.effort)) delete next.effort;
     const plain = !next.host && !next.model && !next.effort;
+    // A credential change renames the entry; one already in the chain stays as it was.
+    if (chain.some((e, j) => j !== i && entry_name(e) === entry_name(next))) return;
     chain = chain.map((e, j) => (j === i ? (plain ? entry_name(next) : next) : e));
   }
 </script>
@@ -69,6 +85,9 @@
     {#if s}
       {@const levels = efforts(s)}
       <div class="chain-entry__fields">
+        {#if credential_picker && payers(s).length > 1}
+          <Select label="Paid by" size="sm" value={s.credential ?? ''} options={payers(s)} onchange={(e: Event) => set(i, 'credential', (e.currentTarget as HTMLSelectElement).value)} />
+        {/if}
         <Select label="Host" size="sm" value={s.host ?? ''} options={host_options(s)} onchange={(e: Event) => set(i, 'host', (e.currentTarget as HTMLSelectElement).value)} />
         <Input
           label="Model"

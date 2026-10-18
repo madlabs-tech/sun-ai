@@ -1,9 +1,9 @@
-// Shared UI state: workspace tasks, runtimes (sidebar + cards) and toasts.
+// Shared UI state: workspace tasks, runtimes and credentials (sidebar + cards) and toasts.
 import { api, ApiFailure } from './api/client';
 import { tick } from 'svelte';
 import { auth, type InvitationView, type Me, type Membership, type Permission, type Providers } from './api/auth';
 import { PERMISSIONS_OF } from './role';
-import type { Agent, Workspace, Features, Runtime, TaskSummary } from './api/types';
+import type { Agent, Credential, Workspace, Features, Runtime, TaskSummary } from './api/types';
 import { route, show_workspace } from './router.svelte';
 
 const ROLE_KEY = 'sun_role';
@@ -24,6 +24,8 @@ export const app = $state({
   /** That workspace's tasks. */
   tasks: [] as TaskSummary[],
   runtimes: [] as Runtime[],
+  /** The workspace's credentials (key-backed chain entries): where a chain name isn't a host's tool. */
+  credentials: [] as Credential[],
   /** The active agents (names, readiness): assignee pickers, cards and swimlanes. */
   agents: [] as Agent[],
   loaded: false,
@@ -173,10 +175,11 @@ export async function load_workspace() {
     app.workspaces = await api.list_workspaces();
     const workspace = pick_workspace();
     // Agents are advisory here: an older kernel without them shows tasks all the same.
-    [app.tasks, app.runtimes, app.agents] = await Promise.all([
+    [app.tasks, app.runtimes, app.credentials, app.agents] = await Promise.all([
       api.list_tasks(workspace || undefined),
       // The workspace's; with no workspace yet (onboarding) there are none.
       workspace ? api.list_runtimes(workspace) : ([] as Runtime[]),
+      workspace ? api.list_credentials(workspace).catch(() => app.credentials) : ([] as Credential[]),
       workspace ? api.list_agents(workspace).catch(() => app.agents) : ([] as Agent[]),
     ]);
     app.workspace = workspace;

@@ -7,8 +7,8 @@ import type { OutboxItem, Agent, Chat, ChainSpec, PermissionMode, MemoryItem,
   CatalogEntry,
   DryRun,
   Correction,
-  ByoKeyConfig,
-  CreateRuntime,
+  CreateCredential,
+  Credential,
   CreateTask,
   GateResult,
   Host,
@@ -55,7 +55,7 @@ import { knowledge_route, link_source } from './mock_knowledge';
 import { memory_route } from './mock_memory';
 import { is_vcs_route, vcs_route } from './mock_vcs';
 import { pull_request_route } from './mock_pull_requests';
-import { agents_route, find_agent } from './mock_agents';
+import { agents_naming, agents_route, find_agent } from './mock_agents';
 import { budget_route, has_ecosystem_secret, on_limit_route, settings_route } from './mock_settings';
 import { chain_modes, chain_names, entry_name, runtime_name } from '../format';
 
@@ -256,7 +256,7 @@ for (const s of SEEDS) {
 
 /** `?no_bypass`: the operator left `runtimes.allow_bypass` off. */
 const allow_bypass = !new URLSearchParams(location.search).has('no_bypass');
-/** One per (host, tool), one in each state of the Runtimes page, then the key-backed ones (`host: null`). */
+/** One per (host, tool), one in each state of the Runtimes page. */
 /** Modes a host doesn't report for a tool (BLO-163): Codex has no exact `accept_edits`, OpenCode no `auto`, and build-box-01 is a 2.1 host without `auto`. */
 const lacks = (host: number, tool: string, mode: string) =>
   (tool === 'codex' && mode === 'accept_edits') || (mode === 'auto' && (tool === 'opencode' || host === 2));
@@ -264,14 +264,8 @@ const on_host = (host: number, host_name: string, tool: string, r: Partial<Runti
   id: `${fake_id('H', host)}:${tool}`, name: tool, tool, adapter: tool, family: null, version: '1.0.0',
   host: { id: fake_id('H', host), name: host_name }, presence: 'online', availability: 'ready', load: { active: 0, max: null },
   state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: today('10:12'),
-  workspace_id: null, source: 'byo_runtime', allow_bypass, config: null, model: null,
+  workspace_id: null, source: 'byo_runtime', allow_bypass,
   effort_options: [], models: [], permission_modes: PERMISSION_MODES.filter((m) => !lacks(host, tool, m)), ...r,
-});
-const keyed = (name: string, r: Partial<Runtime>): Runtime => ({
-  id: name, name, tool: 'opencode', adapter: 'opencode', family: null, version: null, host: null, presence: 'online',
-  availability: 'ready', load: null, state: 'idle', detail: null, cooldown_until: null, probed_at: null, last_seen_at: null,
-  workspace_id: MAIN_WORKSPACE, source: 'byo_key', allow_bypass, config: null, model: null,
-  effort_options: [], models: [], permission_modes: null, ...r,
 });
 /** Effort catalogs as the CLIs report them (BLO-119): Claude Code one list per session, Codex per model. */
 const level = (value: string, label: string) => ({ value, label });
@@ -292,9 +286,30 @@ export const RUNTIMES: Runtime[] = [
   on_host(1, 'hery-mbp', 'codex', { version: '0.161.0', availability: 'outdated', detail: 'Codex 0.161.0 is untested. If it misbehaves, install the known-good version: npm install -g @openai/codex@0.160.0', ...codex_effort(true) }),
   on_host(2, 'build-box-01', 'opencode', { availability: 'limited', state: 'limited', cooldown_until: today('14:00') }),
   on_host(2, 'build-box-01', 'kiro-cli', { version: '1.4', availability: 'unsupported', state: 'unsupported' }),
-  keyed('lan-qwen', { config: { kind: 'openai_compatible', endpoint: 'http://localhost:11434/v1', model: 'qwen2.5-coder:7b', key_secret: null } }),
-  keyed('credits', { source: 'credits', model: 'qwen3-coder' }),
 ];
+
+/** A stored credential: the view plus its write-only `key_secret` (the workspace secret's name). */
+type StoredCredential = Omit<Credential, 'key_secret_set' | 'state' | 'detail'> & { key_secret: string | null };
+let credential_seq = 0;
+const stored_credential = (name: string, c: Partial<StoredCredential>): StoredCredential => ({
+  id: fake_id('C', ++credential_seq), name, workspace_id: MAIN_WORKSPACE, source: 'byo_key', family: 'openai_compatible',
+  default_tool: 'opencode', endpoint: null, default_model: null, key_secret: null, created_by: null, cooldown_until: null, ...c,
+});
+/** The workspaces' credentials, the key-backed runtimes of before (TRD BLO-117 item 7). */
+export const CREDENTIALS: StoredCredential[] = [
+  stored_credential('lan-qwen', { endpoint: 'http://localhost:11434/v1', default_model: 'qwen2.5-coder:7b' }),
+  stored_credential('credits', { source: 'credits', default_model: 'qwen3-coder' }),
+];
+/** `GET /credentials` row: never the secret's name; a named secret the workspace lacks needs a login. */
+export function credential_view({ key_secret, ...c }: StoredCredential): Credential {
+  const missing = key_secret && !has_ecosystem_secret(key_secret);
+  return {
+    ...c,
+    key_secret_set: !!key_secret,
+    state: missing ? 'needs_login' : 'idle',
+    detail: missing ? `key_secret: \`${key_secret}\` is not set in this workspace; add it in Settings → Secrets.` : null,
+  };
+}
 /** A chain name as the mock's events say it: a host CLI by its product name. */
 const runtime_label = (name: string | null) => (name === null ? null : runtime_name(RUNTIMES, name));
 
@@ -333,15 +348,6 @@ const MODS: ModInstall[] = [
 ];
 /** Installed extensions that declare plugin `name` (`plugin:<name>`), as `ModInstall::needs_plugin`. */
 const mod_dependents = (name: string) => MODS.filter((m) => m.installed && m.permissions.includes(`plugin:${name}`)).map((m) => m.name);
-
-/** `GET /runtimes/{id}/readiness`: OpenCode runs on build-box-01; a BYO key runtime also needs its key secret. */
-function mock_readiness(r: Runtime) {
-  const key = r.config?.key_secret;
-  const missing = key && !has_ecosystem_secret(key);
-  return missing
-    ? { installed: true, version: null, logged_in: false, detail: `key_secret: \`${key}\` is not set; set it with \`sun secret set ${key}\`` }
-    : { installed: true, version: null, logged_in: true, detail: null };
-}
 
 const entry = (e: Partial<CatalogEntry> & Pick<CatalogEntry, 'id' | 'kind' | 'description' | 'source' | 'author' | 'license' | 'version'>): CatalogEntry =>
   ({ stacks: [], reviewed: true, installed: null, matches: [], in_workflows: false, hosts: [], secrets: [], ...e });
@@ -988,6 +994,23 @@ function workspace_name(raw: unknown, self?: string): string {
   return name;
 }
 
+/** `input` checked onto `c` with the same field-prefixed messages as the API's credential checks. A missing
+ *  `key_secret` keeps `c`'s, `''` clears it. */
+function credential_fields(input: Partial<CreateCredential>, c: StoredCredential): StoredCredential {
+  const { source = 'byo_key', default_tool = 'opencode', family = 'openai_compatible', endpoint = '', default_model = '', key_secret } = input;
+  if (!/^[a-z0-9_-]{1,64}$/.test(c.name)) throw invalid('name: 1–64 lowercase letters, digits, - or _, e.g. ollama-qwen');
+  if (source === 'credits') throw invalid('source: Sun credits are not available on this deployment yet; bring your own key or runtime.');
+  if (source !== 'byo_key') throw invalid('source: byo_key or credits');
+  if (!BYO_KEY_ADAPTERS[family]?.includes(default_tool))
+    throw invalid('default_tool: opencode takes any key; claude-code takes an anthropic key, codex an openai_compatible one');
+  if (!endpoint.trim() && family === 'openai_compatible')
+    throw invalid('endpoint: no endpoint; set an OpenAI-compatible base URL, e.g. http://localhost:11434/v1');
+  if (endpoint.trim() && !/^https?:\/\/[^/@\s]+(\/\S*)?$/.test(endpoint.trim())) throw invalid('endpoint: must be an http(s) URL without credentials');
+  if (!default_model?.trim() || /\s/.test(default_model)) throw invalid('default_model: needs a model id without spaces, e.g. qwen2.5-coder:7b');
+  if (key_secret && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key_secret)) throw invalid('key_secret: a secret name is 1–64 letters, digits or _, not starting with a digit');
+  return { ...c, source, default_tool, family, endpoint: endpoint.trim() || null, default_model: default_model.trim(), key_secret: key_secret === undefined ? c.key_secret : key_secret || null };
+}
+
 /** Answers like the kernel would: status + JSON body. */
 export function mock_handle(method: string, full_path: string, body: unknown): { status: number; data: unknown } {
   try {
@@ -1340,11 +1363,11 @@ function route(method: string, full_path: string, body: unknown): unknown {
     }
     case 'GET /usage': {
       if (params.get('by') === 'runtime')
-        return chain_names(RUNTIMES).map((name, n) => {
-          const [r, i] = [RUNTIMES.find((x) => x.name === name)!, Math.min(n, 2)];
+        return chain_names(RUNTIMES, CREDENTIALS).map((name, n) => {
+          const [source, i] = [(RUNTIMES.find((x) => x.name === name) ?? CREDENTIALS.find((x) => x.name === name))!.source, Math.min(n, 2)];
           const usage = { input_tokens: 412_000 * (3 - i), output_tokens: 38_500 * (3 - i), cost_usd: 6.4 * (3 - i) };
           const window = { input_tokens: 61_200 * (3 - i), output_tokens: 5_400 * (3 - i), cost_usd: 0.9 * (3 - i) };
-          return { runtime: r.name, source: r.source, usage, quota_window: r.source === 'byo_runtime' ? { hours: 5, usage: window } : null };
+          return { runtime: name, source, usage, quota_window: source === 'byo_runtime' ? { hours: 5, usage: window } : null };
         });
       const cost = tasks.find((x) => x.run?.id === params.get('run_id'))?.run?.cost_usd ?? 0;
       return { input_tokens: Math.round(cost * 120_000), output_tokens: Math.round(cost * 9_000), cost_usd: cost };
@@ -1358,7 +1381,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
         const host = HOSTS.find((h) => h.id === parts[3] && h.workspace_ids.includes(find_workspace(parts[1]).id));
         if (!host) throw not_found(`host ${parts[3]}`);
         if (host.status === 'offline') throw new MockError(503, { error: { code: 'unavailable', message: `host ${host.id} is offline` } });
-        for (const r of RUNTIMES.filter((x) => x.host?.id === host.id && x.tool === 'codex' && x.state === 'needs_login'))
+        for (const r of RUNTIMES.filter((x) => x.host.id === host.id && x.tool === 'codex' && x.state === 'needs_login'))
           Object.assign(r, { availability: 'ready', state: 'idle', detail: null });
         return null;
       }
@@ -1455,32 +1478,35 @@ function route(method: string, full_path: string, body: unknown): unknown {
       Object.assign(mod, { installed: false, signed: false, tier: mod.tier ?? 'official', update: null });
       return { removed: mod.name, needed_by };
     }
-    case 'POST /runtimes': {
-      // Same checks and field-prefixed messages as `Runtime::validate` in sun-core and the API.
-      const { name = '', adapter = 'opencode', source = 'byo_key' } = input as Partial<CreateRuntime>;
-      const invalid = (message: string) => new MockError(422, { error: { code: 'invalid_input', message } });
-      if (!/^[a-z0-9_-]{1,64}$/.test(name)) throw invalid('name: 1–64 lowercase letters, digits, - or _, e.g. ollama-qwen');
-      if (RUNTIMES.some((r) => r.id === name)) throw new MockError(409, { error: { code: 'conflict', message: `name: a runtime named \`${name}\` already exists.` } });
-      if (source === 'credits') throw invalid('source: Sun credits are not available on this deployment yet; bring your own key or runtime.');
-      const { config } = input as { config?: ByoKeyConfig };
-      const { kind = 'openai_compatible', endpoint = '', model = '', key_secret = null } = config ?? {};
-      if (!BYO_KEY_ADAPTERS[kind]?.includes(adapter))
-        throw invalid('adapter: opencode takes any key; claude-code takes an anthropic key, codex an openai_compatible one');
-      if (!endpoint.trim() && kind === 'openai_compatible')
-        throw invalid('endpoint: no endpoint; set an OpenAI-compatible base URL, e.g. http://localhost:11434/v1');
-      if (endpoint.trim() && !/^https?:\/\/[^/@\s]+(\/\S*)?$/.test(endpoint.trim())) throw invalid('endpoint: must be an http(s) URL without credentials');
-      if (!model.trim() || /\s/.test(model)) throw invalid('model: needs a model id without spaces, e.g. qwen2.5-coder:7b');
-      if (key_secret !== null && !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key_secret)) throw invalid('key_secret: a secret name is 1–64 letters, digits or _, not starting with a digit');
-      const r = keyed(name, { tool: adapter, adapter, config: { kind, endpoint, model, key_secret } });
-      const ready = mock_readiness(r);
-      if (!ready.logged_in) Object.assign(r, { availability: 'needs_login', state: 'needs_login', detail: ready.detail });
-      RUNTIMES.push(r);
-      return clone(r);
+    case 'POST /runtimes':
+    case 'PUT /runtimes/:id':
+      throw new MockError(410, { error: { code: 'gone', message: 'Key-backed runtimes are credentials now: use /api/v1/credentials.' } });
+    case 'GET /credentials': {
+      const workspace = listed();
+      return CREDENTIALS.filter((c) => !workspace || c.workspace_id === workspace).sort((a, b) => a.name.localeCompare(b.name)).map(credential_view);
     }
-    case 'GET /runtimes/:id/readiness': {
-      const r = RUNTIMES.find((x) => x.id === parts[1]);
-      if (!r) throw not_found('Runtime');
-      return mock_readiness(r);
+    case 'POST /credentials':
+    case 'PUT /credentials/:id':
+    case 'DELETE /credentials/:id': {
+      const workspace = named();
+      need('manage_runtimes', workspace, 'manage runtimes');
+      const at = CREDENTIALS.findIndex((c) => c.workspace_id === workspace && c.name === (parts[1] ?? input.name));
+      if (method === 'POST') {
+        if (at >= 0) throw conflict(`name: a credential named \`${input.name}\` already exists.`);
+        const created = credential_fields(input as Partial<CreateCredential>, stored_credential(String(input.name ?? ''), { workspace_id: workspace, created_by: mock_me().id }));
+        CREDENTIALS.push(created);
+        return credential_view(created);
+      }
+      if (at < 0) throw not_found('Credential');
+      if (method === 'PUT') {
+        if (input.name !== undefined && input.name !== parts[1]) throw invalid('name: a credential can’t be renamed; add one under the new name.');
+        CREDENTIALS[at] = credential_fields(input as Partial<CreateCredential>, CREDENTIALS[at]);
+        return credential_view(CREDENTIALS[at]);
+      }
+      const users = agents_naming(parts[1]);
+      if (users.length) throw conflict(`\`${parts[1]}\` is in the chain of ${users.join(', ')}; take it out first.`);
+      CREDENTIALS.splice(at, 1);
+      return null;
     }
     case 'POST /mods/:id/install': {
       // Same checks as sun-cli's KernelInstaller: listed, consent = exactly what it asks for.

@@ -18,7 +18,7 @@ test.describe('a viewer', () => {
     const absent: [route: string, heading: string, names: RegExp[]][] = [
       ['workflows', 'Workflows', [/^New workflow$/]],
       ['agents', 'Agents', [/^New agent$/, /^Edit /, /^Archive /]],
-      ['runtimes', 'Runtimes', [/^Add runtime$/]],
+      ['runtimes', 'Runtimes', [/^Add credential$/, /^Delete /]],
       ['memory', 'Memory', [/^Approve$/, /^Reject$/, /^Retire$/]],
     ];
     for (const [route, heading, names] of absent) {

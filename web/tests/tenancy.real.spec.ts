@@ -106,7 +106,7 @@ test('a viewer of a workspace sees it read-only and no deployment page', async (
   await expect(switcher(page)).toHaveAccessibleName(`Workspace: ${ws.name}`);
   for (const [route, heading, button] of [
     ['agents', 'Agents', 'New agent'],
-    ['runtimes', 'Runtimes', 'Add runtime'],
+    ['runtimes', 'Runtimes', 'Add credential'],
     ['workflows', 'Workflows', 'New workflow'],
     // The workspace's hosts read for any member (no 422 for a missing ?workspace=).
     ['hosts', 'Hosts', 'Add host'],
@@ -139,4 +139,22 @@ test('a viewer of a workspace sees it read-only and no deployment page', async (
   await page.goto('/#/tasks?workspace=main');
   await expect(switcher(page)).toHaveAccessibleName(`Workspace: ${ws.name}`);
   await expect(main(page).getByText(`Only in ${ws.name}`)).toBeVisible();
+});
+
+// TRD BLO-117 item 7: any member lists the workspace's credentials; the key's secret name is write-only.
+test('credentials: a viewer lists them, never with the key’s secret name', async ({ playwright }, info) => {
+  const origin = new URL(info.project.use.baseURL!).origin;
+  const owner = await as_owner(await playwright.request.newContext({ baseURL: origin }));
+  const ws = await seeded(owner, unique());
+  const data = { name: 'keyed', source: 'byo_key', family: 'openai_compatible', default_tool: 'opencode', endpoint: 'https://openrouter.ai/api/v1', default_model: 'qwen/qwen3-coder', key_secret: 'OPENROUTER_KEY' };
+  expect(await ok(owner.post(`/api/v1/credentials?workspace=${ws.id}`, { data }))).not.toHaveProperty('key_secret');
+  await owner.dispose();
+
+  const viewer = await playwright.request.newContext({ baseURL: origin });
+  expect((await viewer.post('/api/v1/session', { data: { email: ws.email, password: ws.password } })).status()).toBe(204);
+  const rows: Record<string, unknown>[] = await ok(viewer.get(`/api/v1/credentials?workspace=${ws.id}`));
+  expect(rows.map((r) => r.name)).toEqual(['keyed']);
+  for (const row of rows) expect(row).not.toHaveProperty('key_secret');
+  expect(rows[0].key_secret_set).toBe(true);
+  await viewer.dispose();
 });

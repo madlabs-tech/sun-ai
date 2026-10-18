@@ -589,14 +589,14 @@ export interface AgentFields {
   permission_mode?: PermissionMode | null;
 }
 
-/** One runtime of a chain: a runtime name (`claude-code`, `ollama-qwen`, `market:codex`) or a tool
+/** One runtime of a chain: a tool or credential name (`claude-code`, `ollama-qwen`, `market:codex`) or a tool
  *  with its settings. Exactly these five fields: the shape lands in workflow YAML users commit. */
 export type ChainEntry = string | ChainSpec;
 
 export interface ChainSpec {
   /** The tool id, e.g. `codex` */
   tool: string;
-  /** A key-backed runtime's name that pays; absent: the CLI's own login */
+  /** The name of the `Credential` that pays; absent: the CLI's own login */
   credential?: string;
   /** The host id it must run on; absent: any eligible host */
   host?: string;
@@ -621,22 +621,22 @@ export interface ModelEffort {
   default_effort?: string;
 }
 
-/** GET /api/v1/runtimes: one per (host, tool), then the workspace's key-backed runtimes (`host: null`). */
+/** GET /api/v1/runtimes: one per (host, tool). Key-backed ways to pay are `Credential`s, listed apart. */
 export interface Runtime {
-  /** `<host id>:<tool>` for a host's CLI; the name for a key-backed one */
+  /** `<host id>:<tool>` */
   id: string;
-  /** What chains name: the tool id for a host's CLI */
+  /** What chains name: the tool id */
   name: string;
   tool: string;
   /** Same as `tool` (kept for older screens) */
   adapter: string;
   family: string | null;
   version: string | null;
-  /** The host that reported the CLI; `null` for a key-backed runtime (any online host with its CLI) */
-  host: { id: Ulid; name: string } | null;
+  /** The host that reported the CLI */
+  host: { id: Ulid; name: string };
   presence: 'online' | 'offline';
   availability: RuntimeAvailability;
-  /** Live sessions; `max` is `null` until hosts report their cap. `null` for a key-backed runtime. */
+  /** Live sessions; `max` is `null` until hosts report their cap. */
   load: { active: number; max: number | null } | null;
   state: RuntimeState;
   /** What to do about the state, e.g. "Run `claude auth login` on vps-sg-1" */
@@ -644,20 +644,16 @@ export interface Runtime {
   cooldown_until: Timestamp | null;
   probed_at: Timestamp | null;
   last_seen_at: Timestamp | null;
-  /** The workspace whose chains it serves; `null` for a host's CLI (every workspace's). */
+  /** `null`: a host's CLI serves every workspace's chains. */
   workspace_id: Ulid | null;
   source: RuntimeSource;
   /** The operator allows `bypass_permissions` (sun.yaml `runtimes.allow_bypass`) */
   allow_bypass: boolean;
-  /** A stored `byo_key` runtime's source; `null` for the others */
-  config: ByoKeyConfig | null;
-  /** A `credits` runtime's gateway model (OpenCode only); `null` for the others */
-  model: string | null;
-  /** The effort levels the CLI on this host offers, tool-wide; empty when it has none (or a key-backed runtime) */
+  /** The effort levels the CLI on this host offers, tool-wide; empty when it has none */
   effort_options: EffortLevel[];
   /** Models the CLI lists, when it scopes effort per model (Codex); a model not here uses `effort_options` */
   models: ModelEffort[];
-  /** The permission modes the CLI on this host can enforce; `null` for a key-backed runtime (any host with the tool) */
+  /** The permission modes the CLI on this host can enforce; `null` when the host doesn't report them */
   permission_modes: PermissionMode[] | null;
 }
 
@@ -1436,21 +1432,52 @@ export const BYO_KEY_ADAPTERS: Record<ByoKeyKind, ByoKeyAdapter[]> = {
 
 export type ByoKeyAdapter = 'opencode' | 'claude-code' | 'codex';
 
-/** A `byo_key` runtime's source: a provider kind and endpoint (empty = the provider's own; required
- *  for `openai_compatible`), a model and the *name* of the ecosystem secret holding the key (`null`
- *  for keyless endpoints such as a local Ollama). */
-export interface ByoKeyConfig {
-  kind: ByoKeyKind;
-  endpoint: string;
-  model: string;
-  key_secret: string | null;
+/** Who pays through a credential: a workspace API key, or Sun credits. */
+export type CredentialSource = 'byo_key' | 'credits';
+/** A credential's state, same vocabulary and precedence as `RuntimeState` (it is never busy). */
+export type CredentialState = Exclude<RuntimeState, 'busy'>;
+
+/** `GET /api/v1/credentials` (any member): a workspace's key-backed way to pay for a tool (TRD BLO-117 item 7).
+ *  A chain entry names it in `credential`; its tool runs on any eligible host. The API key is a workspace secret
+ *  whose *name* is write-only: only `key_secret_set` comes back. */
+export interface Credential {
+  id: Ulid;
+  /** What chain entries name */
+  name: string;
+  workspace_id: Ulid;
+  source: CredentialSource;
+  /** The provider API the key speaks */
+  family: ByoKeyKind;
+  /** The CLI that runs it */
+  default_tool: ByoKeyAdapter;
+  /** `null`: the provider's own */
+  endpoint: string | null;
+  /** For `credits`, the gateway model (OpenCode only); `null`: the CLI's own */
+  default_model: string | null;
+  key_secret_set: boolean;
+  created_by: Ulid | null;
+  state: CredentialState;
+  /** What to do about the state, e.g. "key_secret: `OLLAMA_KEY` is not set in this workspace; …" */
+  detail: string | null;
+  cooldown_until: Timestamp | null;
 }
 
-/** `POST /runtimes` (admin). A 422 message starts with the field to fix, e.g. `endpoint: no endpoint; …`.
- *  `credits` needs Sun Cloud on the kernel; OpenCode on credits needs a gateway `model`. */
-export type CreateRuntime =
-  | { name: string; adapter: ByoKeyAdapter; source: 'byo_key'; config: ByoKeyConfig }
-  | { name: string; adapter: ByoKeyAdapter; source: 'credits'; model: string | null };
+/** `POST /credentials` (`manage_runtimes`). A 422 message starts with the field to fix, e.g. `endpoint: no endpoint; …`;
+ *  a 409 means the name is taken. `key_secret` is the *name* of the workspace secret holding the key (absent: keyless,
+ *  such as a local Ollama). `credits` needs Sun Cloud on the kernel. */
+export interface CreateCredential {
+  name: string;
+  source: CredentialSource;
+  default_tool: ByoKeyAdapter;
+  family?: ByoKeyKind;
+  endpoint?: string;
+  default_model: string | null;
+  key_secret?: string;
+}
+
+/** `PUT /credentials/{name}`: the same fields; it can't be renamed (`name`, when sent, must match). Omitting
+ *  `key_secret` keeps the stored one, `''` clears it. */
+export type UpdateCredential = Omit<CreateCredential, 'name'> & { name?: string };
 
 /** `GET|PUT /settings/budget`: the ecosystem's monthly spend cap and this month's spend. */
 export interface Spend {
@@ -1462,14 +1489,6 @@ export interface Spend {
   since: Timestamp;
 }
 
-/** `GET /runtimes/{id}/readiness` */
-export interface Readiness {
-  installed: boolean;
-  version: string | null;
-  logged_in: boolean;
-  /** What to fix when not ready */
-  detail: string | null;
-}
 /** Text messages of the live device socket, GET /api/v1/tasks/{id}/device.
  *  After `live`, binary messages are `mime` images in device pixels, or H.264 Annex B access units for
  *  `video/h264` (asked for with `?video=h264`). `connecting` is client-side. */
