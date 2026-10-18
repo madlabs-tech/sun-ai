@@ -59,8 +59,9 @@ pub struct HostConfig {
     pub mod_envs: Option<exec_env::ModEnvs>,
     /// The permission mode the adapters fall back to when a session spec
     /// carries none (`sun.yaml` `runtimes.permission_mode`). Checked with the
-    /// spec's to refuse `bypass_permissions` outside a container or VM, and
-    /// then written into the spec so the adapter runs the mode checked.
+    /// spec's to refuse `bypass_permissions` outside a container or VM and a
+    /// mode the adapter doesn't report (BLO-168), then written into the spec
+    /// so the adapter runs the mode checked.
     pub permission_mode: Option<sun_core::PermissionMode>,
     /// How often runtime readiness is probed again; a change goes to the
     /// kernel as a `capabilities` frame.
@@ -441,9 +442,9 @@ impl Host {
         // bare here (the spec's mode, else this host's own default). A mode
         // outside Sun's names is refused before anything reads it, and the
         // adapter gets the canonical mode that was checked, nothing else.
-        let mode = sun_core::PermissionMode::parse_opt(spec.permission_mode.as_deref())
+        let asked = sun_core::PermissionMode::parse_opt(spec.permission_mode.as_deref())
             .map_err(|why| Error::InvalidInput(format!("session permission_mode: {why}")))?;
-        let mode = mode.or(self.config.permission_mode);
+        let mode = asked.or(self.config.permission_mode);
         if let Some(why) = sun_core::bypass_refusal(mode, &spec.exec_env) {
             return Err(Error::Forbidden(format!(
                 "this host refuses the session: {why}"
@@ -455,6 +456,24 @@ impl Host {
             .get(adapter_id)
             .cloned()
             .ok_or_else(|| Error::NotFound(format!("runtime adapter `{adapter_id}`")))?;
+        // BLO-168: a mode the CLI reports no exact equivalent for is refused,
+        // never run as another, whether the kernel asked for it or this
+        // host's default (`runtimes.permission_mode`) filled it in. The id
+        // is set before the first kernel frame is handled.
+        if let (Some(mode), Some(&host_id)) = (mode, self.host_id.get()) {
+            let offered = adapter.permission_modes(&HostCtx { host_id }).await;
+            if let Some(why) = sun_core::unoffered_mode(adapter_id, mode, &offered) {
+                let fix = match asked {
+                    Some(_) => "pick one of those on the agent",
+                    None => {
+                        "it is this host's default (sun.yaml `runtimes.permission_mode`); pick a mode on the agent"
+                    }
+                };
+                return Err(Error::Forbidden(format!(
+                    "this host refuses the session: {why}; {fix}"
+                )));
+            }
+        }
         spec.worktree = self.worktrees.check(&spec.worktree)?;
         let id = spec.session_id;
         if self.sessions().contains_key(&id) {
