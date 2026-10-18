@@ -1910,3 +1910,48 @@ async fn qa_crash_recovery_keeps_who_the_run_acts_for() {
     let events = h.events().await;
     assert!(events.iter().any(|e| e.kind == "host_unreachable"));
 }
+
+/// BLO-168 case 3: entry 1's tool reports no `auto`, entry 2's does. Entry
+/// 1 is passed over with `runtime_skipped` and the one rule's reason, and
+/// entry 2's session runs in `auto` itself, never another mode.
+#[tokio::test(flavor = "multi_thread")]
+async fn failover_skips_an_entry_whose_tool_does_not_offer_the_steps_mode() {
+    let ready = serde_json::json!({"installed": true, "version": "1", "logged_in": true});
+    let setup = Setup {
+        capabilities: Some(serde_json::json!({
+            "os": "linux", "arch": "x86_64", "cpus": 4,
+            "runtimes": [
+                {"adapter": "fake-limit", "readiness": ready,
+                 "permission_modes": ["default", "accept_edits", "plan", "bypass_permissions"]},
+                {"adapter": "fake-ok", "readiness": ready,
+                 "permission_modes": ["default", "plan", "auto"]},
+            ],
+        })),
+        step_mode: "auto",
+        ..Setup::default()
+    };
+    let h = Harness::with(
+        "switch",
+        &[
+            ("fake-limit", vec![script(&[TALK, EDIT, DONE, EXIT])]),
+            ("fake-ok", vec![script(&[TALK, EDIT, DONE, EXIT])]),
+        ],
+        setup,
+    )
+    .await;
+    h.wait_for(|s| s.is_terminal()).await;
+    assert_eq!(h.moves("implement").await.last().unwrap(), "succeeded");
+    assert_eq!(h.adapters(), ["fake-ok"], "entry 1 never started");
+    assert_eq!(
+        *h.host.modes.lock().unwrap(),
+        [Some("auto".to_owned())],
+        "entry 2 ran in the step's exact mode"
+    );
+    let skipped = first_event(&h, "runtime_skipped").await;
+    assert_eq!(skipped.payload["runtime"], "fake-limit");
+    assert_eq!(
+        skipped.payload["reason"],
+        "fake-limit doesn't offer permission mode `auto`; \
+         it offers default, accept_edits, plan, bypass_permissions"
+    );
+}

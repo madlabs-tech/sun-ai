@@ -22,6 +22,7 @@ mod mcp_servers;
 mod membership;
 mod mentions;
 mod mod_install;
+mod mode_unoffered;
 mod no_secret_leaks;
 mod payments;
 mod preview;
