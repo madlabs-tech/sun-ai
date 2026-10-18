@@ -36,9 +36,12 @@ type Agent = Box<dyn Fn(&Path, &str) + Send + Sync>;
 pub(crate) struct LocalHost {
     work: PathBuf,
     agent: Agent,
-    envelopes: Mutex<Vec<String>>,
+    pub(crate) envelopes: Mutex<Vec<String>>,
     /// Each started session's permission mode, in start order.
     pub(crate) modes: Mutex<Vec<Option<String>>>,
+    /// While set, the only modes the CLI offers: a session in another is
+    /// refused, like a real host does (BLO-168).
+    pub(crate) offered: Mutex<Option<Vec<String>>>,
     /// Tasks whose worktrees were removed (recorded only).
     pub(crate) removed: Mutex<Vec<TaskId>>,
     /// While set, a started session says one line and waits before claiming
@@ -61,6 +64,7 @@ impl LocalHost {
             agent: Box::new(agent),
             envelopes: Mutex::default(),
             modes: Mutex::default(),
+            offered: Mutex::default(),
             removed: Mutex::default(),
             hold: Arc::default(),
             passes: Arc::default(),
@@ -112,6 +116,14 @@ fn sh_env(
 #[async_trait]
 impl HostLink for LocalHost {
     async fn start_session(&self, _: HostId, _: &str, spec: SessionSpec) -> Result<SessionHandle> {
+        let mode = spec.permission_mode.clone().unwrap_or_default();
+        if let Some(offered) = self.offered.lock().unwrap().as_ref()
+            && !offered.contains(&mode)
+        {
+            return Err(sun_core::Error::Forbidden(format!(
+                "this host refuses the session: fake doesn't offer permission mode `{mode}`"
+            )));
+        }
         (self.agent)(&self.worktree(), &spec.envelope);
         self.envelopes.lock().unwrap().push(spec.envelope);
         self.modes.lock().unwrap().push(spec.permission_mode);

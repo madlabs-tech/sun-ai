@@ -374,6 +374,7 @@ enum Command {
         run_id: RunId,
         question_id: NoteId,
         answer: String,
+        by: Actor,
         reply: oneshot::Sender<Result<()>>,
     },
     /// A person moves a task (`tasks`).
@@ -752,14 +753,23 @@ impl Engine {
     }
 
     /// Answers question `question_id` an agent of `run_id` asked with
-    /// `sun.ask` (`POST /runs/{id}/questions/{qid}/answer`). When the agent
-    /// gave options, `answer` must be one of them (`InvalidInput`). The
+    /// `sun.ask` (`POST /runs/{id}/questions/{qid}/answer`), as `by`. When
+    /// the agent gave options, `answer` must be one of them (`InvalidInput`).
+    /// A capped `by` may not answer a bypass session (`Forbidden`,
+    /// [`crate::bypass::ANSWER_REFUSED`]); the question stays open. The
     /// agent's step runs again.
-    pub async fn answer(&self, run_id: RunId, question_id: NoteId, answer: String) -> Result<()> {
+    pub async fn answer(
+        &self,
+        run_id: RunId,
+        question_id: NoteId,
+        answer: String,
+        by: Actor,
+    ) -> Result<()> {
         self.request(|reply| Command::Answer {
             run_id,
             question_id,
             answer,
+            by,
             reply,
         })
         .await
@@ -787,7 +797,9 @@ impl Engine {
     /// Sends `by`'s message to the run's running agent session and
     /// journals it as an `intervention` event. `InvalidInput` when no agent
     /// session of the run is live. From the next session on the run acts
-    /// for `by` (its bypass cap, [`crate::bypass`]).
+    /// for `by` (its bypass cap, [`crate::bypass`]). A capped `by`'s steer
+    /// of a bypass session is queued for the next session instead, the
+    /// returned `message_queued` event saying so in its `summary` (BLO-172).
     pub async fn steer(&self, run_id: RunId, text: String, by: Actor) -> Result<EventRecord> {
         self.request(|reply| Command::Steer {
             run_id,
@@ -1035,9 +1047,10 @@ impl Executor {
                 run_id,
                 question_id,
                 answer,
+                by,
                 reply,
             } => {
-                let _ = reply.send(self.answer(run_id, question_id, answer).await);
+                let _ = reply.send(self.answer(run_id, question_id, answer, &by).await);
             }
             Command::RetryStep {
                 run_id,
@@ -1189,7 +1202,9 @@ impl Executor {
     }
 
     /// Sends `text` to the run's live agent session and journals it as an
-    /// `intervention` by `by`. `InvalidInput` when no agent is running.
+    /// `intervention` by `by`. `InvalidInput` when no agent is running. A
+    /// capped `by`'s steer of a bypass session is left for the next session
+    /// instead ([`crate::bypass::queue_steer`]).
     // ponytail: the engine task waits for the host's reply, like start_session.
     async fn steer(
         &mut self,
@@ -1212,6 +1227,13 @@ impl Executor {
             .find(|(step_id, _)| running.contains(step_id))
             .cloned()
             .ok_or_else(|| Error::InvalidInput("no agent is running in this run".into()))?;
+        let mut tx = self.store.begin().await?;
+        if crate::bypass::live_bypass(&mut tx, run_id, handle.session_id, by).await? {
+            let event = crate::bypass::queue_steer(&mut tx, run_id, &text, by).await?;
+            tx.commit().await?;
+            return Ok(event);
+        }
+        drop(tx);
         self.hosts
             .steer(&handle, sun_core::Steer { text: text.clone() })
             .await?;
@@ -2199,6 +2221,8 @@ impl Executor {
                 "model": model,
                 "effort": effort,
                 "effort_ignored": effort_ignored,
+                // The mode it starts in (`bypass::live_bypass`).
+                "permission_mode": permission_mode,
             }),
         )
         .await?;
