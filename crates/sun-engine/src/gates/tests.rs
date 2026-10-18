@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command as Process;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -45,6 +45,8 @@ pub(crate) struct LocalHost {
     /// done (to steer, pause or switch it); a session stopped meanwhile
     /// says nothing more.
     pub(crate) hold: Arc<AtomicBool>,
+    /// While `hold` is set, this many held sessions may go on (one each).
+    pub(crate) passes: Arc<AtomicUsize>,
     stopped: Arc<Mutex<HashSet<SessionId>>>,
     sink: Arc<Mutex<Option<mpsc::UnboundedSender<HostEvent>>>>,
 }
@@ -61,6 +63,7 @@ impl LocalHost {
             modes: Mutex::default(),
             removed: Mutex::default(),
             hold: Arc::default(),
+            passes: Arc::default(),
             stopped: Arc::default(),
             sink: Arc::default(),
         })
@@ -114,6 +117,7 @@ impl HostLink for LocalHost {
         self.modes.lock().unwrap().push(spec.permission_mode);
         let (id, sink) = (spec.session_id, self.sink.clone());
         let (hold, stopped) = (self.hold.clone(), self.stopped.clone());
+        let passes = self.passes.clone();
         tokio::spawn(async move {
             // Real output first: the watchdog fails an empty done claim.
             let script = [
@@ -128,8 +132,13 @@ impl HostLink for LocalHost {
             ];
             for (seq, event) in (1..).zip(script) {
                 tokio::time::sleep(Duration::from_millis(5)).await;
-                if seq > 1 && hold.load(Ordering::SeqCst) {
-                    while hold.load(Ordering::SeqCst) {
+                if seq == 2 && hold.load(Ordering::SeqCst) {
+                    let pass = |n: usize| n.checked_sub(1);
+                    while hold.load(Ordering::SeqCst)
+                        && passes
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, pass)
+                            .is_err()
+                    {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                     }
                     if stopped.lock().unwrap().contains(&id) {
