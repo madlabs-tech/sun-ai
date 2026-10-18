@@ -107,7 +107,7 @@ async fn codex_agent_task(k: &Kernel, mode: Option<&str>) -> String {
 }
 
 /// The task's runs once its latest one has ended.
-async fn ended_runs(k: &Kernel, task: &str) -> Vec<Run> {
+pub(crate) async fn ended_runs(k: &Kernel, task: &str) -> Vec<Run> {
     let task: TaskId = task.parse().unwrap();
     for _ in 0..1000 {
         let runs = k
