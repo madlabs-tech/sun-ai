@@ -26,8 +26,8 @@ use sun_core::{
 use sun_engine::{DecisionClient, Engine, EngineConfig, MarketPolicy, Principal, WatchdogConfig};
 use sun_runtime::FakeRuntime;
 use sun_store::{
-    EventLog, HostRepo, OutboxRepo, RepoRepo, RunRepo, SettingRepo, Store, TaskContext, TaskRepo,
-    WorkflowRepo, WorkspaceRepo,
+    EventLog, HostRepo, MemberRepo, OutboxRepo, RepoRepo, RunRepo, SettingRepo, Store, TaskContext,
+    TaskRepo, WorkflowRepo, WorkspaceRepo,
 };
 use sun_workflow::OnLimit;
 use tokio::sync::mpsc;
@@ -143,6 +143,8 @@ struct LocalHost {
     starts: Mutex<Vec<(String, String)>>,
     /// `spec.resume` of every session started.
     resumes: Mutex<Vec<Option<String>>>,
+    /// `spec.permission_mode` of every session started.
+    modes: Mutex<Vec<Option<String>>>,
     owners: Mutex<HashMap<SessionId, (String, usize)>>,
     /// The current `events()` subscriber (a new one per engine start).
     sink: Mutex<mpsc::UnboundedSender<HostEvent>>,
@@ -200,6 +202,10 @@ impl HostLink for LocalHost {
             }
         }
         self.resumes.lock().unwrap().push(spec.resume.clone());
+        self.modes
+            .lock()
+            .unwrap()
+            .push(spec.permission_mode.clone());
         let queue = self
             .runtimes
             .get(adapter)
@@ -354,6 +360,11 @@ struct Setup {
     runtimes_model: Option<&'static str>,
     /// The agent step's own `permission_mode:`; empty: none.
     step_mode: &'static str,
+    /// The workflow's `exec_env:`; empty: none (bare).
+    exec_env: &'static str,
+    /// Member `ana` leaves a message for the run before it starts, so it
+    /// acts for her from its first session (its bypass cap).
+    ana_acts: bool,
 }
 
 impl Harness {
@@ -388,6 +399,10 @@ impl Harness {
             setup.chain,
             setup.step_mode,
         );
+        let source = match setup.exec_env {
+            "" => source,
+            env => format!("exec_env: {env}\n{source}"),
+        };
         let repo = Repo {
             id: RepoId::generate(),
             workspace_id: sun_core::WorkspaceId::MAIN,
@@ -510,6 +525,7 @@ impl Harness {
             runtimes,
             starts: Mutex::default(),
             resumes: Mutex::default(),
+            modes: Mutex::default(),
             owners: Mutex::default(),
             sink: Mutex::new(mpsc::unbounded_channel().0),
             offline: Mutex::new(setup.offline),
@@ -536,6 +552,22 @@ impl Harness {
             .unwrap();
         if let Some(policy) = &setup.market {
             engine.set_market_policy(policy).await.unwrap();
+        }
+        if setup.ana_acts {
+            let mut tx = store.begin().await.unwrap();
+            let ana = tx
+                .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let by = sun_engine::Actor {
+                member_id: Some(ana.id),
+                name: "user:ana".into(),
+            };
+            engine
+                .queue_message(run.id, "keep the tests green".into(), by)
+                .await
+                .unwrap();
         }
         engine.start_run(run.id).await.unwrap();
         Self {
@@ -1751,4 +1783,130 @@ async fn failover_journal_holds_no_account_key() {
         .map(|e| format!("{}: {}", e.kind, e.payload))
         .collect();
     assert!(leaks.is_empty(), "account keys in the journal: {leaks:?}");
+}
+
+// ------------------------------------------------ BLO-171 QA pass
+
+/// A bypass step in a container, the run acting for member `ana` (she left
+/// it a message): under the default policy `off` every session is capped.
+fn ana_acts() -> Setup {
+    Setup {
+        step_mode: "bypass_permissions",
+        exec_env: "{ kind: container, image: 'node:22' }",
+        ana_acts: true,
+        ..Setup::default()
+    }
+}
+
+impl Harness {
+    /// Case 3: what the engine did by itself stamped nothing, so all
+    /// `sessions` stayed capped for `ana`, each one journalled.
+    async fn assert_still_acts_for_ana(&self, sessions: usize) {
+        let run = self.wait_for(|s| s.is_terminal()).await;
+        assert_eq!(run.status, RunStatus::Succeeded, "{:?}", run.end_reason);
+        let modes = self.host.modes.lock().unwrap().clone();
+        let capped = vec![Some("accept_edits".to_owned()); sessions];
+        assert_eq!(modes, capped, "a machine path changed who the run acts for");
+        let events = self.events().await;
+        let journalled = events.iter().filter(|e| e.kind == "bypass_capped");
+        assert_eq!(journalled.count(), sessions);
+        let stamped: Vec<_> = events
+            .iter()
+            .filter(|e| e.payload.get("acts_for").is_some())
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(stamped, ["message_queued"], "only ana's message stamps");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qa_an_automatic_failover_keeps_who_the_run_acts_for() {
+    let limit = limit_hit(Duration::from_secs(3600));
+    let h = Harness::with(
+        "switch",
+        &[
+            ("fake-limit", vec![script(&[TALK, EDIT, &limit, EXIT])]),
+            ("fake-ok", vec![script(&[TALK, DONE, EXIT])]),
+        ],
+        ana_acts(),
+    )
+    .await;
+    h.assert_still_acts_for_ana(2).await;
+    assert_eq!(h.adapters(), ["fake-limit", "fake-ok"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qa_a_switch_back_keeps_who_the_run_acts_for() {
+    let limit = limit_hit(Duration::from_secs(3));
+    let call = tool_call(1);
+    let late_result = r#"{"delay_ms":3000,"kind":"tool_result","ok":true,"summary":"ok"}"#;
+    let h = Harness::with(
+        "switch",
+        &[
+            (
+                "fake-limit",
+                vec![
+                    script(&[TALK, EDIT, &limit, EXIT]),
+                    script(&[TALK, DONE, EXIT]),
+                ],
+            ),
+            ("fake-ok", vec![script(&[TALK, &call, late_result, LINGER])]),
+        ],
+        Setup {
+            runtime_extra: "switch_back: true",
+            ..ana_acts()
+        },
+    )
+    .await;
+    h.assert_still_acts_for_ana(3).await;
+    assert_eq!(h.adapters(), ["fake-limit", "fake-ok", "fake-limit"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn qa_a_context_rotation_keeps_who_the_run_acts_for() {
+    let (high, fresh) = (usage(850), usage(120));
+    let call = tool_call(1);
+    let h = Harness::with(
+        "switch",
+        &[(
+            "fake-limit",
+            vec![
+                script(&[TALK, EDIT, &high, &call, TOOL_RESULT, LINGER]),
+                script(&[TALK, &fresh, DONE, EXIT]),
+            ],
+        )],
+        Setup {
+            context_windows: vec![("fake-limit", 1000)],
+            ..ana_acts()
+        },
+    )
+    .await;
+    h.assert_still_acts_for_ana(2).await;
+    let events = h.events().await;
+    assert!(events.iter().any(|e| e.kind == "rotation"), "it rotated");
+}
+
+/// Crash recovery: the kernel restarts mid-run and the lost session is
+/// resumed by the engine, not by a person.
+#[tokio::test(flavor = "multi_thread")]
+async fn qa_crash_recovery_keeps_who_the_run_acts_for() {
+    let slow_done = r#"{"delay_ms":60000,"kind":"done_claimed","summary":"finished"}"#;
+    let mut h = Harness::with(
+        "switch",
+        &[(
+            "fake-limit",
+            vec![
+                script(&[TALK, EDIT, slow_done, EXIT]),
+                script(&[TALK, DONE, EXIT]),
+            ],
+        )],
+        ana_acts(),
+    )
+    .await;
+    first_event(&h, "context_pack").await;
+    *h.host.probes.lock().unwrap() = vec![Err(Error::Unavailable("host offline".into()))];
+    h.restart().await;
+    h.assert_still_acts_for_ana(2).await;
+    let events = h.events().await;
+    assert!(events.iter().any(|e| e.kind == "host_unreachable"));
 }
