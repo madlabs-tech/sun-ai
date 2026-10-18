@@ -290,6 +290,18 @@ fn effort_missing(entry: &ChainEntry, host: Option<&model::Host>, adapter: &str)
     })
 }
 
+/// Why `adapter` can't run in `mode` on `host`: the host reported the tool
+/// without that mode ([`sun_core::unoffered_mode`], BLO-168). A host that
+/// reported no such tool says nothing here.
+pub(crate) fn mode_missing(
+    mode: Option<sun_core::PermissionMode>,
+    host: &model::Host,
+    adapter: &str,
+) -> Option<String> {
+    let offered = host.permission_modes(adapter)?;
+    sun_core::unoffered_mode(adapter, mode?, &offered)
+}
+
 /// The entry of `chain` named `name` ([`ChainEntry::name`]), if any.
 pub(crate) fn entry<'a>(chain: &'a [ChainEntry], name: &str) -> Option<&'a ChainEntry> {
     chain.iter().find(|e| e.name() == name)
@@ -443,7 +455,8 @@ impl Executor {
     /// passed over is journalled as `runtime_skipped {runtime, reason}`. A
     /// host that reported no capabilities is trusted. An entry pinned to
     /// another host (`host:`), or whose `effort:` this host doesn't list,
-    /// is unready here. A runtime whose
+    /// is unready here, and so is one the host reported without the step's
+    /// permission mode ([`mode_missing`]). A runtime whose
     /// step's permission mode (an agent's, on its system workflow) is `bypass_permissions` is unready while the operator
     /// turned it off ([`bypass_disabled`]) and for a run outside a
     /// container or VM ([`sun_core::mode_refusal`]). A `market:` entry is
@@ -482,6 +495,7 @@ impl Executor {
         let allow = self.config.allow_bypass;
         let (mode, _) =
             crate::bypass::session_mode(tx, &run, &workflow, &step.step_key, allow).await?;
+        let parsed = mode;
         let mode = mode.map(sun_core::PermissionMode::as_str);
         // A `market:` runtime runs on the seller's host, not this one.
         for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
@@ -494,7 +508,11 @@ impl Executor {
             let effort = entry.and_then(|e| effort_missing(e, host.as_ref(), &adapter));
             let why = pinned
                 .or(effort)
-                .or_else(|| reported.as_ref().and_then(|r| r.unready(&adapter)));
+                .or_else(|| reported.as_ref().and_then(|r| r.unready(&adapter)))
+                .or_else(|| {
+                    host.as_ref()
+                        .and_then(|h| mode_missing(parsed, h, &adapter))
+                });
             let why = why
                 .or_else(|| bypass_disabled(mode, self.config.allow_bypass))
                 .or_else(|| sun_core::mode_refusal(mode, &env));

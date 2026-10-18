@@ -1868,3 +1868,80 @@ async fn queue_a_workspaces_cooling_key_never_blocks_another_workspaces_host() {
         "Main's key cools: its run waits, and never goes to Ops' host"
     );
 }
+
+/// BLO-168, mixed fleets: a step's own permission mode goes only to the
+/// hosts whose CLI reports it, however busy they are. A workspace where no
+/// host reports it refuses the run, journalled, instead of running it in
+/// another mode or leaving it queued.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_places_a_steps_mode_only_on_hosts_that_report_it() {
+    const AUTO: &str = "name: auto\nsteps:\n  \
+                        - {id: implement, type: agent, prompt: do it, permission_mode: auto}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let tasks = tasks_of(&store, AUTO, 3).await;
+    // Reports no `permission_modes`: the legacy four, no `auto`.
+    let legacy = add_host(&store, "legacy", true).await;
+    let current = add_host(&store, "current", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![legacy, current])));
+    let (engine, queue) = kernel_on(&store, link, legacy, Caps::default()).await;
+    let with_auto = serde_json::json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4,
+        "runtimes": [{"adapter": "fake", "readiness":
+            {"installed": true, "version": "1", "logged_in": true, "detail": null},
+            "permission_modes": ["default", "accept_edits", "plan", "auto", "bypass_permissions"]}],
+    });
+    engine
+        .set_host_capabilities(current, &with_auto)
+        .await
+        .unwrap();
+    for task in &tasks {
+        queue.enqueue(task.id).await.unwrap();
+    }
+    for task in &tasks {
+        eventually("the auto run placed", || async {
+            placed_on(&store, task.id).await.is_some()
+        })
+        .await;
+        assert_eq!(placed_on(&store, task.id).await, Some(current));
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let task = tasks_of(&store, AUTO, 1).await.remove(0);
+    let legacy = add_host(&store, "legacy", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![legacy])));
+    let (_engine, queue) = kernel_on(&store, link, legacy, Caps::default()).await;
+    queue.enqueue(task.id).await.unwrap();
+    let failed = || async {
+        let mut read = store.read().await.unwrap();
+        let run = read.runs_of_task(task.id).await.unwrap().pop();
+        run.filter(|r| r.status == RunStatus::Failed)
+    };
+    eventually("the auto run refused", || async {
+        failed().await.is_some()
+    })
+    .await;
+    let run = failed().await.unwrap();
+    let reason = run.end_reason.unwrap_or_default();
+    assert!(
+        reason.contains("fake doesn't offer permission mode `auto`"),
+        "{reason}"
+    );
+    let events = store
+        .read()
+        .await
+        .unwrap()
+        .events_after(Some(run.id), 0, 32)
+        .await
+        .unwrap();
+    let refused = events
+        .iter()
+        .find(|e| e.kind == "placement_refused_mode_unoffered")
+        .expect("journalled");
+    assert_eq!(refused.payload["runtime"], "fake");
+    assert!(
+        !events.iter().any(|e| e.kind == "run_placed"),
+        "never placed"
+    );
+}

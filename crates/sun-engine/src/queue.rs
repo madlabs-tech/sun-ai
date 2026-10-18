@@ -30,6 +30,11 @@
 //!   mode. The host refuses it again on its side. While the operator's
 //!   `allow_bypass` is off ([`crate::EngineConfig::allow_bypass`]) the same
 //!   holds in every env, journalled as `placement_refused_bypass_disabled`.
+//! - A step's own **permission mode** (an agent's, a workflow step's; not
+//!   the host's default) goes only to hosts whose CLI reports it for the
+//!   entry's tool (mixed fleets). An entry no attached host offers it on is
+//!   passed over, and a run left with none fails
+//!   (`placement_refused_mode_unoffered`); the host refuses it again.
 //! - Under `runtimes.model: v2` ([`crate::RUNTIMES_MODEL`]) hosts' runtimes
 //!   come from `host_runtime`, and each host takes at most its reported
 //!   `max_sessions` (else `Caps::max_sessions`) runs of one runtime.
@@ -348,6 +353,11 @@ pub(crate) const RUN_PLACED: &str = "run_placed";
 pub(crate) const PLACEMENT_REFUSED_BYPASS_BARE: &str = "placement_refused_bypass_bare";
 
 /// Event kind of a run placement refused because it would run
+/// A permission mode no host of the run's workspace reports for the tool
+/// (BLO-168); payload `{runtime, exec_env, reason}`. The run fails; the mode
+/// is never swapped for another.
+pub(crate) const PLACEMENT_REFUSED_MODE_UNOFFERED: &str = "placement_refused_mode_unoffered";
+
 /// `bypass_permissions` while the operator's `allow_bypass` is off; payload
 /// as [`PLACEMENT_REFUSED_BYPASS_BARE`]'s.
 pub(crate) const PLACEMENT_REFUSED_BYPASS_DISABLED: &str = "placement_refused_bypass_disabled";
@@ -724,7 +734,7 @@ impl Scheduler {
                     .map_or(name.as_str(), |row| row.adapter.as_str());
                 // `host:` pins the entry to that host; an `effort:` goes only
                 // to hosts whose catalog lists it for the tool and model.
-                let only = failover::entry(&entries, name).and_then(|entry| {
+                let mut only = failover::entry(&entries, name).and_then(|entry| {
                     let fits = |h: &Host| {
                         entry.host().is_none_or(|pin| h.id.to_string() == pin)
                             && entry.effort().is_none_or(|effort| {
@@ -771,6 +781,33 @@ impl Scheduler {
                     if let Some((kind, why)) = step_modes.iter().find_map(|m| refusal_of(*m)) {
                         refusal.get_or_insert((name, kind, why));
                         continue;
+                    }
+                    // A mode the steps ask for goes only to the hosts whose
+                    // CLI reports it; with none of them, the entry is passed
+                    // over like a bypass one, never run in another mode.
+                    let missing = |h: &Host| {
+                        step_modes
+                            .iter()
+                            .find_map(|m| failover::mode_missing(*m, h, adapter))
+                    };
+                    let reporting: Vec<&Host> = every_host
+                        .iter()
+                        .filter(|h| may_take(&attached, h.id, w.workspace) && eligible(&h.id))
+                        .filter(|h| h.permission_modes(adapter).is_some())
+                        .collect();
+                    let offering: HashSet<HostId> = reporting
+                        .iter()
+                        .filter(|h| missing(h).is_none())
+                        .map(|h| h.id)
+                        .collect();
+                    if offering.is_empty()
+                        && let Some(why) = reporting.iter().find_map(|h| missing(h))
+                    {
+                        refusal.get_or_insert((name, PLACEMENT_REFUSED_MODE_UNOFFERED, why));
+                        continue;
+                    }
+                    if offering.len() < reporting.len() {
+                        only = Some(offering);
                     }
                 }
                 runtime = Some((name, account));
