@@ -2025,11 +2025,6 @@ async fn queue_a_mixed_fleet_refuses_auto_once_its_only_host_detaches() {
         .detach_from_workspace(sun_core::WorkspaceId::MAIN, host, "owner")
         .await
         .unwrap();
-    // Detaching doesn't start a placement pass (BLO-174, pinned by
-    // `queue_detaching_the_only_auto_host_refuses_its_waiting_runs`); the
-    // next queue event does: here an unrelated plain task.
-    let plain = tasks_of(&store, WORKFLOW, 1).await.remove(0);
-    queue.enqueue(plain.id).await.unwrap();
     for task in &tasks[1..3] {
         eventually("the waiting auto run refused", || async {
             failed_run(&store, task.id).await.is_some()
@@ -2166,11 +2161,9 @@ async fn queue_a_refused_capped_codex_run_says_why_on_its_thread() {
 }
 
 /// BLO-168 case 2, as specified: detaching the only host that reports
-/// `auto` refuses the runs waiting for it, with no other queue event.
-/// RED (BLO-174): `Engine::detach_from_workspace` starts no placement
-/// pass, so the runs stay queued until something else wakes the queue.
+/// `auto` refuses the runs waiting for it, with no other queue event
+/// (BLO-174: `Engine::detach_from_workspace` wakes the queue).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "BLO-174: detaching a host starts no placement pass"]
 async fn queue_detaching_the_only_auto_host_refuses_its_waiting_runs() {
     let (_dir, store, engine, queue, tasks, current) = auto_fleet(2).await;
     for task in &tasks {

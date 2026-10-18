@@ -14,8 +14,8 @@
 //!   to its task's workspace (`workspace_host`) that is
 //!   online with the runtime installed and logged in, within the per-host cap
 //!   (journaled as `run_placed {host, runtime, memory_mb, cpus}`). Its
-//!   worktree and every later session stay there. A host joining wakes the
-//!   pump. A run whose exec env (task override, else workflow `exec_env:`)
+//!   worktree and every later session stay there. A host joining, or
+//!   attached to or detached from a workspace, wakes the pump. A run whose exec env (task override, else workflow `exec_env:`)
 //!   is a container or VM only goes to hosts that report that kind ready;
 //!   a VM's RAM and CPUs count against its host's cap.
 //!   A chain entry pinned to a host (`{tool, host}`) only goes there, and
@@ -225,7 +225,7 @@ impl Queue {
         config: QueueConfig,
         clock: fn() -> Timestamp,
     ) -> (Self, JoinHandle<Result<()>>) {
-        let wake = Arc::new(Notify::new());
+        let wake = engine.queue_wake.clone();
         let scheduler = Scheduler {
             store: store.clone(),
             engine,
