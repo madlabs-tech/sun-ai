@@ -132,6 +132,18 @@ export interface Me {
   must_enroll_two_step?: boolean;
   /** The role view this member picked, e.g. `marketing`; absent on an older kernel. */
   view_role?: string | null;
+  /** They may start “Anything” (bypass) sessions: sun.yaml allows it, and they are an owner or the owner's
+   *  bypass policy lets them. Otherwise their sessions run as Edit files. Absent on an older kernel. */
+  can_bypass?: boolean;
+}
+
+/** Settings → Security → Bypass permissions: who besides the owners may run “Anything” sessions. */
+export interface BypassPolicy {
+  mode: 'off' | 'members' | 'everyone';
+  /** Who may under `members`. */
+  member_ids: string[];
+  /** The operator's sun.yaml `runtimes.allow_bypass`, the ceiling above the policy (read-only). */
+  allow_bypass: boolean;
 }
 
 /** How a sign-in provider works: the Google and GitHub presets, or any OIDC provider. */
@@ -264,6 +276,8 @@ export const auth = {
   reset_two_step: (id: string) => call<Member>('DELETE', `/members/${encodeURIComponent(id)}/two_step`),
   get_security: () => call<SecurityPolicy>('GET', '/settings/security'),
   set_security: (policy: SecurityPolicy) => call<SecurityPolicy>('PUT', '/settings/security', policy),
+  get_bypass: () => call<BypassPolicy>('GET', '/settings/bypass'),
+  set_bypass: (policy: Pick<BypassPolicy, 'mode' | 'member_ids'>) => call<BypassPolicy>('PUT', '/settings/bypass', policy),
   set_email: (email: string) => call<{ email: string }>('PUT', '/me/email', { email }),
   /** Deployment owner: an account in `workspace_id` as `role`. With `password`, no mail goes out (and SMTP isn't
    *  needed); `must_change` forces a change at first sign-in. */
@@ -364,6 +378,12 @@ let sso: SsoProvider[] = [
   { id: 'keycloak', kind: 'oidc', name: 'Keycloak', client_id: 'sun', issuer_url: ISSUER, allowed_domains: ['acme.io'], has_secret: true },
 ];
 const sso_view = (): SsoView => ({ providers: structuredClone(sso), redirect_url: `${location.origin}/api/v1/auth/sso/{id}/callback` });
+/** `?no_bypass`: sun.yaml `runtimes.allow_bypass` is off. `?bypass=members|everyone`: the saved bypass policy. */
+let bypass: Omit<BypassPolicy, 'allow_bypass'> = {
+  mode: (mock_params.get('bypass') as BypassPolicy['mode'] | null) ?? 'off',
+  member_ids: [],
+};
+const mock_allow_bypass = !mock_params.has('no_bypass');
 /** The signed-in person (`m_me` at first). `?owner_email=0`: the owner hasn't given an email yet (first run).
  *  `?signed_out=1`: nobody until a sign-in. */
 const me_state = {
@@ -646,7 +666,9 @@ function fake(method: string, path: string, body: unknown): unknown {
     const must_enroll_two_step = policy.require_two_step && me_state.via === 'local' && !factors_of(me_state.user).length;
     const { signed_in: _, ...me } = me_state;
     const memberships_of_me = memberships.filter((m) => m.member_id === me_id()).map((m) => ({ ...m }));
-    return { ...me, memberships: memberships_of_me, email_verified: verified.has(me_id()), needs_email: !me_state.email, must_enroll_two_step, view_role };
+    const may = me_state.is_owner || bypass.mode === 'everyone' || (bypass.mode === 'members' && bypass.member_ids.includes(me_id()));
+    const can_bypass = mock_allow_bypass && may;
+    return { ...me, memberships: memberships_of_me, email_verified: verified.has(me_id()), needs_email: !me_state.email, must_enroll_two_step, view_role, can_bypass };
   }
   if (route === 'POST /session') {
     const input = body as { email?: string; password?: string };
@@ -760,6 +782,14 @@ function fake(method: string, path: string, body: unknown): unknown {
     return { ...member, has_two_step: false };
   }
   if (route === 'GET /settings/security') return { ...policy };
+  if (route === 'GET /settings/bypass') return { ...bypass, allow_bypass: mock_allow_bypass };
+  if (route === 'PUT /settings/bypass') {
+    const input = body as Omit<BypassPolicy, 'allow_bypass'>;
+    for (const id of input.member_ids) member_by_id(id);
+    bypass = { mode: input.mode, member_ids: [...new Set(input.member_ids)] };
+    audit_entry('settings_change', 'bypass_policy', `bypass permissions: ${bypass.mode} (${bypass.member_ids.length} member(s) listed)`);
+    return { ...bypass, allow_bypass: mock_allow_bypass };
+  }
   if (route === 'PUT /settings/security') {
     policy = { ...policy, ...(body as Partial<SecurityPolicy>) };
     audit_entry('settings_change', 'security', `2-step required: ${policy.require_two_step}, for password changes: ${policy.two_step_for_password_change}`);

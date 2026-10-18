@@ -151,10 +151,11 @@
   /** Another tool, credential or host than the switched chat's is a new chat. */
   const patching = $derived(!!switching?.runtime && !!spec && same_target(switching.runtime, spec));
 
-  /** The last settings picked here, if any. */
+  /** The last settings picked here, if their tool can take a chat now. */
   function remembered(): DirectSettings | null {
     try {
-      return JSON.parse(local_get(REMEMBER)) as DirectSettings;
+      const settings = JSON.parse(local_get(REMEMBER)) as DirectSettings;
+      return tools.some((t) => t.name === entry_name(settings.runtime) && !t.why) ? settings : null;
     } catch {
       return null;
     }

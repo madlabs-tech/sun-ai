@@ -15,6 +15,7 @@
   import SettingsSupport from './SettingsSupport.svelte';
   import SettingsSignIn from './SettingsSignIn.svelte';
   import SettingsTwoStep from './SettingsTwoStep.svelte';
+  import SettingsBypass from './SettingsBypass.svelte';
   import SettingsEmail from './SettingsEmail.svelte';
   import SettingsSecrets from './SettingsSecrets.svelte';
   import SettingsLimit from './SettingsLimit.svelte';
@@ -60,6 +61,7 @@
     { id: 'users', label: 'Users', icon: 'user-cog', group: 'deployment', show: owner, parts: [SettingsAccounts] },
     { id: 'audit', label: 'Audit log', icon: 'scroll-text', group: 'deployment', show: owner, parts: [SettingsAudit] },
     { id: 'sign-in', label: 'Sign-in & 2-step', icon: 'shield-check', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSignIn, SettingsTwoStep] },
+    { id: 'bypass', label: 'Bypass permissions', icon: 'shield-off', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsBypass] },
     { id: 'email', label: 'Email', icon: 'mail', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsEmail] },
     { id: 'deployment-secrets', label: 'Deployment secrets', icon: 'key-round', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSecrets] },
     { id: 'usage', label: 'Usage limits', icon: 'gauge', group: 'deployment', subgroup: 'Agents', show: owner, parts: [SettingsLimit, SettingsSpend] },

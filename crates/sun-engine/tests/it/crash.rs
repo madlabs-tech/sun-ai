@@ -699,13 +699,27 @@ async fn step_retry_keeps_completed_steps() {
     let implement = sun_core::StepKey::new("implement").unwrap();
     // Only a step that ended badly can be retried.
     let err = engine
-        .retry_step(run, implement.clone(), "ana".into())
+        .retry_step(
+            run,
+            implement.clone(),
+            sun_engine::Actor {
+                member_id: None,
+                name: "user:ana".into(),
+            },
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("succeeded"), "{err}");
 
     engine
-        .retry_step(run, pr.clone(), "ana".into())
+        .retry_step(
+            run,
+            pr.clone(),
+            sun_engine::Actor {
+                member_id: None,
+                name: "user:ana".into(),
+            },
+        )
         .await
         .unwrap();
     eventually("run succeeded", || async move {
@@ -832,7 +846,17 @@ async fn step_retry_hands_a_cancelled_agent_off() {
     .await;
     host.go.store(true, Ordering::SeqCst);
     let pr = sun_core::StepKey::new("pr").unwrap();
-    engine.retry_step(run, pr, "ana".into()).await.unwrap();
+    engine
+        .retry_step(
+            run,
+            pr,
+            sun_engine::Actor {
+                member_id: None,
+                name: "user:ana".into(),
+            },
+        )
+        .await
+        .unwrap();
     eventually("run succeeded", || async move {
         run_status(store_ref, run).await == RunStatus::Succeeded
     })

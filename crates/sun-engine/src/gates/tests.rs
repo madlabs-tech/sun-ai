@@ -481,7 +481,17 @@ async fn send_backs_reset_on_a_manual_retry() {
     assert_eq!(until_run_ends(&store, run).await.status, RunStatus::Failed);
 
     let verify = StepKey::new("verify").unwrap();
-    engine.retry_step(run, verify, "ana".into()).await.unwrap();
+    engine
+        .retry_step(
+            run,
+            verify,
+            crate::Actor {
+                member_id: None,
+                name: "user:ana".into(),
+            },
+        )
+        .await
+        .unwrap();
     for _ in 0..500 {
         if events(&store, run, ESCALATED).await.len() == 2 {
             break;

@@ -457,6 +457,13 @@ async fn acl_permission_matrix_opens_exactly_its_routes() {
         // 2-step resets, the 2-step policy, SMTP and SSO providers.
         ("DELETE", "/members/nope/two_step".into(), None, DEPLOYMENT),
         ("GET", "/settings/security".into(), None, DEPLOYMENT),
+        ("GET", "/settings/bypass".into(), None, DEPLOYMENT),
+        (
+            "PUT",
+            "/settings/bypass".into(),
+            Some(json!({ "mode": "everyone" })),
+            DEPLOYMENT,
+        ),
         (
             "PUT",
             "/settings/security".into(),

@@ -43,7 +43,7 @@ pub(crate) async fn list(
 /// `POST /evals`: starts replaying; `202` with the `running` eval. A
 /// candidate workflow with a `bypass_permissions` step needs what saving it
 /// needs: `manage_runtimes` on the picked tasks' workspaces and
-/// `runtimes.allow_bypass`.
+/// `runtimes.allow_bypass`, and the caller allowed by the owner's bypass policy.
 pub(crate) async fn start(
     State(api): State<Api>,
     Extension(caller): Extension<Caller>,
@@ -59,6 +59,8 @@ pub(crate) async fn start(
         let named = named.as_ref().map(|Extension(n)| n);
         crate::auth::allowed_in(&caller, named, &[Permission::ManageRuntimes])?;
         crate::hosts::check_bypass_allowed(&api, true)?;
+        // It runs at once in a sandbox, as nobody the engine could cap.
+        crate::bypass::check_can_bypass(&api, &caller).await?;
     }
     Ok((
         StatusCode::ACCEPTED,

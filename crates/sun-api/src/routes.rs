@@ -374,6 +374,10 @@ pub(crate) fn router(api: Api) -> Router {
             "/settings/security",
             get(auth::get_security_policy).put(auth::put_security_policy),
         )
+        .route(
+            "/settings/bypass",
+            get(crate::bypass::get_policy).put(crate::bypass::put_policy),
+        )
         .route("/settings/sso", get(auth::list_sso))
         .route(
             "/settings/sso/{id}",
@@ -890,9 +894,11 @@ async fn create_task(
 
 /// A webhook: creates and queues a task on a workflow whose `on:`
 /// has `webhook`. Body `{title?, text?, url?, repo?, key?, ..}`; a repeated
-/// `key` answers 200 with the task it made the first time.
+/// `key` answers 200 with the task it made the first time. The run acts
+/// for the caller, so their bypass policy caps it.
 async fn trigger_workflow(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
     Path(workflow): Path<String>,
     Body(payload): Body<Value>,
 ) -> ApiResult<(StatusCode, Json<TaskView>)> {
@@ -903,7 +909,11 @@ async fn trigger_workflow(
         return Err(ApiError::invalid("The payload is longer than 64 KB."));
     }
     let workflow_id: WorkflowId = id(&workflow, "workflow")?;
-    let (task_id, created) = api.engine.trigger_webhook(workflow_id, &payload).await?;
+    let by = caller.task_actor();
+    let (task_id, created) = api
+        .engine
+        .trigger_webhook(workflow_id, &payload, Some(&by))
+        .await?;
     let Json(view) = summary(&api, task_id).await?;
     let status = match created {
         true => StatusCode::CREATED,
@@ -1037,15 +1047,20 @@ async fn bump(
     summary(&api, task_id).await
 }
 
-/// Queues a new run of a finished run's task.
-async fn retry(State(api): State<Api>, Path(run): Path<String>) -> ApiResult<Json<TaskView>> {
+/// Queues a new run of a finished run's task, as the caller.
+async fn retry(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path(run): Path<String>,
+) -> ApiResult<Json<TaskView>> {
     let run = api.engine.run(id(&run, "run")?).await?;
     if !run.status.is_terminal() {
         return Err(ApiError::conflict(
             "This run is still going; cancel it first.",
         ));
     }
-    api.queue.enqueue(run.task_id).await?;
+    let by = caller.task_actor();
+    api.queue.enqueue_by(run.task_id, Some(&by)).await?;
     summary(&api, run.task_id).await
 }
 
@@ -1116,7 +1131,7 @@ async fn retry_step(
         .map_err(|_| ApiError::invalid(format!("`{key}` is not a valid step key.")))?;
     let run = api.engine.run(run_id).await?;
     api.engine
-        .retry_step(run_id, step_key, by.principal.user)
+        .retry_step(run_id, step_key, by.task_actor())
         .await?;
     summary(&api, run.task_id).await
 }
