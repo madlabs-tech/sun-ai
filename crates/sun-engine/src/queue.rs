@@ -22,7 +22,8 @@
 //!   one with an `effort` only to hosts whose catalog lists that level for
 //!   its tool and model.
 //!   A run a comment queued prefers the host of its task's previous run,
-//!   where the agent's last CLI session is (`conversation`).
+//!   where the agent's last CLI session is (`conversation`), while that one
+//!   may take it; elsewhere it starts fresh with a "moved" line (`dispatch`).
 //! - **`bypass_permissions`** (a runtime's permission mode) runs only in a
 //!   container or VM: outside one, a chain entry with it is passed over, and
 //!   a run whose every usable entry has it fails at once

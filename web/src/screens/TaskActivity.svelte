@@ -31,7 +31,7 @@
     workflows: Workflow[];
     projects: Project[];
     on_comment: (entry: TaskActivity) => void;
-    /** A chat: its messages only (no moves or runs), and nobody to mention. */
+    /** A chat: its messages only (no moves or runs, but a move to another host), and nobody to mention. */
     chat?: boolean;
   } = $props();
 
@@ -90,6 +90,7 @@
       case 'description':
         return { ...base, icon: 'pencil', text: 'edited the description' };
       case 'run':
+        if (b.moved_to) return { ...base, who: runner, icon: 'server', text: `moved to ${String(b.moved_to)}, started a fresh session. It reads the last 20 messages.` };
         return { ...base, who: runner, icon: 'play', text: b.trigger === 'comment' ? 'started a run for a comment' : 'started a run' };
       case 'pull_request': {
         const pr = `PR #${String(b.number ?? '')}${b.repo ? ` on ${String(b.repo)}` : ''}`;
@@ -115,7 +116,7 @@
 
   const entries = $derived(
     chat
-      ? activity.filter((a) => a.kind === 'comment' || a.kind === 'settings').map(describe)
+      ? activity.filter((a) => a.kind === 'comment' || a.kind === 'settings' || (a.kind === 'run' && a.body.moved_to)).map(describe)
       : [...activity.map(describe), ...runs.map(ended).filter((e): e is Entry => !!e)].sort((a, b) => a.at.localeCompare(b.at)),
   );
 

@@ -934,7 +934,9 @@ string_enum! {
         Description => "description",
         /// The task was created `{status}`.
         Created => "created",
-        /// A run of the task `{run_id}` was queued.
+        /// A run of the task `{run_id}` was queued; `{run_id, moved_to}`: a
+        /// comment's run started fresh on host `moved_to`, not resuming on
+        /// its previous run's host.
         Run => "run",
         /// A pull request was linked, unlinked or merged:
         /// `{action: linked|unlinked|merged, number, url, repo, source}`.
