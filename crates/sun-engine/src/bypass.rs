@@ -535,4 +535,457 @@ steps:
                 .unwrap()
         );
     }
+
+    // ------------------------------------------------ BLO-167 QA pass
+
+    use sun_core::model::{Assignee, Priority};
+    use sun_core::{AgentId, TaskId, TaskStatus, WorkspaceId};
+
+    use crate::{AgentFields, NewTask, WorkflowPick};
+
+    /// A [`BYPASS`]-shaped workflow every queue path can start: a webhook
+    /// and the board.
+    const HOOKED: &str = "name: hooked
+on: [manual, webhook]
+exec_env: { kind: container, image: 'node:22' }
+steps:
+  - id: implement
+    type: agent
+    prompt: fix it
+    permission_mode: bypass_permissions
+";
+
+    /// One engine over a [`LocalHost`] that records each session's mode,
+    /// with `ana` (a member) and `olu` (a deployment owner).
+    struct World {
+        engine: Engine,
+        store: Store,
+        local: Arc<LocalHost>,
+        ana: sun_core::model::Member,
+        olu: sun_core::model::Member,
+        _dir: tempfile::TempDir,
+    }
+
+    use std::sync::Arc;
+
+    async fn world(policy: impl FnOnce(MemberId) -> BypassPolicy, allow_bypass: bool) -> World {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let local = LocalHost::new(dir.path(), |_, _| {});
+        let config = crate::EngineConfig {
+            allow_bypass,
+            host: HostId::generate(),
+            adapter: "fake".into(),
+            delivery_timeout: Duration::from_secs(5),
+            watchdog: crate::WatchdogConfig::default(),
+        };
+        let (engine, _task) = Engine::start(store.clone(), local.clone(), mods(json!({})), config)
+            .await
+            .unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let ana = tx
+            .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+            .await
+            .unwrap();
+        let olu = tx
+            .upsert_member("local", "olu@sun.test", "olu", Some("olu@sun.test"), true)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        engine
+            .set_bypass_policy(policy(ana.id), "user:olu")
+            .await
+            .unwrap();
+        World {
+            engine,
+            store,
+            local,
+            ana,
+            olu,
+            _dir: dir,
+        }
+    }
+
+    fn actor_of(member: &sun_core::model::Member) -> Option<Actor> {
+        Some(Actor {
+            member_id: Some(member.id),
+            name: format!("user:{}", member.username),
+        })
+    }
+
+    impl World {
+        /// Starts the task's latest run (no queue pump here) and waits for
+        /// its end: the modes of the sessions it started and its
+        /// `bypass_capped` payloads.
+        async fn run_latest(&self, task: TaskId) -> (RunStatus, Vec<Option<String>>, Vec<Value>) {
+            let before = self.local.modes.lock().unwrap().len();
+            let run = {
+                let mut tx = self.store.read().await.unwrap();
+                tx.runs_of_task(task)
+                    .await
+                    .unwrap()
+                    .pop()
+                    .expect("a queued run")
+            };
+            assert_eq!(run.status, RunStatus::Queued, "the path queued no new run");
+            self.engine.start_run(run.id).await.unwrap();
+            let ended = until_run_ends(&self.store, run.id).await;
+            let modes = self.local.modes.lock().unwrap()[before..].to_vec();
+            let capped = events(&self.store, run.id, BYPASS_CAPPED).await;
+            (ended.status, modes, capped)
+        }
+
+        async fn task_by(&self, by: &sun_core::model::Member, pick: WorkflowPick) -> TaskId {
+            let new = NewTask {
+                workspace_id: Some(WorkspaceId::MAIN),
+                title: "Fix the login".into(),
+                body: String::new(),
+                workflow: pick,
+                exec_env: None,
+                priority: Priority::None,
+                status: TaskStatus::Todo,
+                project_id: None,
+                actor: actor_of(by),
+            };
+            self.engine.create_task(new).await.unwrap().id
+        }
+
+        async fn bypass_agent(&self) -> AgentId {
+            let fields = AgentFields {
+                name: Some("Rex".into()),
+                instructions: Some("You are Rex.".into()),
+                runtime_chain: Some(vec!["fake".into()]),
+                permission_mode: Some(Some(PermissionMode::BypassPermissions)),
+                ..AgentFields::default()
+            };
+            let plan = sun_core::entitlement::Entitlement::community(
+                sun_core::entitlement::EntitlementStatus::Community,
+            );
+            self.engine
+                .create_agent(WorkspaceId::MAIN, fields, "user:olu", &plan)
+                .await
+                .unwrap()
+                .id
+        }
+
+        async fn hooked(&self) -> sun_core::WorkflowId {
+            self.engine.save_workflow(None, HOOKED).await.unwrap().0.id
+        }
+    }
+
+    fn off(_: MemberId) -> BypassPolicy {
+        BypassPolicy::default()
+    }
+
+    const CAPPED: [Option<&str>; 1] = [Some("accept_edits")];
+    const BYPASS_ONE: [Option<&str>; 1] = [Some("bypass_permissions")];
+
+    /// Case 1: the owner, the token holder and the engine bypass under every
+    /// mode, `members` with nobody listed included.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_owners_bypass_under_off_members_and_everyone() {
+        for mode in [BypassMode::Off, BypassMode::Members, BypassMode::Everyone] {
+            for by in [By::Owner, By::TokenHolder, By::Engine] {
+                let (status, got, capped, thread, audit) = run(by, mode, false, true).await;
+                assert_eq!(status, RunStatus::Succeeded, "{mode:?}");
+                assert_eq!(modes(&got), BYPASSED, "{mode:?}");
+                assert!(capped.is_empty() && thread.is_empty() && audit.is_empty());
+            }
+        }
+    }
+
+    /// Case 2: the cap's journal, audit and thread line carry the member's
+    /// name and the two modes, nothing else: no email, no token.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_the_cap_payload_names_the_member_and_leaks_nothing() {
+        let (_, _, capped, thread, audit) = run(By::Member, BypassMode::Off, false, true).await;
+        assert_eq!(capped.len(), 2, "one per session: {capped:?}");
+        for payload in &capped {
+            let mut keys: Vec<_> = payload.as_object().unwrap().keys().cloned().collect();
+            keys.sort();
+            assert_eq!(keys, ["effective", "member", "requested", "step_id"]);
+        }
+        let all = format!("{capped:?} {thread:?} {audit:?}");
+        for secret in ["ana@sun.test", "@", "token", "session-"] {
+            assert!(!all.contains(secret), "`{secret}` in {all}");
+        }
+    }
+
+    /// Case 2: the thread is told once per run, not once per task: a second
+    /// capped run of the same task adds a second line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_each_capped_run_says_so_once_on_the_thread() {
+        let w = world(off, true).await;
+        let task = w.task_by(&w.ana, WorkflowPick::Id(w.hooked().await)).await;
+        let (_, got, _) = w.run_latest(task).await;
+        assert_eq!(modes(&got), CAPPED);
+        w.engine
+            .move_task_manually(task, TaskStatus::Todo, actor_of(&w.ana))
+            .await
+            .unwrap();
+        let (_, got, _) = w.run_latest(task).await;
+        assert_eq!(modes(&got), CAPPED);
+        let mut tx = w.store.read().await.unwrap();
+        let lines = tx
+            .activity_of(task, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.body["text"] == capped_line("ana"))
+            .count();
+        assert_eq!(lines, 2);
+    }
+
+    /// Case 3: a member taken off the allowlist, or listed and then
+    /// deactivated, is capped on their next run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_unlisting_or_deactivating_a_listed_member_caps_them() {
+        let listed = |ana| BypassPolicy {
+            mode: BypassMode::Members,
+            member_ids: vec![ana],
+        };
+        let w = world(listed, true).await;
+        let hooked = w.hooked().await;
+        let task = w.task_by(&w.ana, WorkflowPick::Id(hooked)).await;
+        let (_, got, _) = w.run_latest(task).await;
+        assert_eq!(modes(&got), BYPASS_ONE, "listed");
+
+        let unlisted = BypassPolicy {
+            mode: BypassMode::Members,
+            member_ids: vec![],
+        };
+        w.engine
+            .set_bypass_policy(unlisted, "user:olu")
+            .await
+            .unwrap();
+        let task = w.task_by(&w.ana, WorkflowPick::Id(hooked)).await;
+        let (_, got, capped) = w.run_latest(task).await;
+        assert_eq!(
+            (modes(&got), capped.len()),
+            (CAPPED.to_vec(), 1),
+            "unlisted"
+        );
+
+        w.engine
+            .set_bypass_policy(listed(w.ana.id), "user:olu")
+            .await
+            .unwrap();
+        let task = w.task_by(&w.ana, WorkflowPick::Id(hooked)).await;
+        let mut tx = w.store.begin().await.unwrap();
+        assert!(tx.set_member_active(w.ana.id, false).await.unwrap());
+        tx.commit().await.unwrap();
+        let (_, got, capped) = w.run_latest(task).await;
+        assert_eq!(modes(&got), CAPPED, "listed but deactivated");
+        assert_eq!(capped[0]["member"], "ana");
+    }
+
+    /// Case 3: a run queued by someone the store no longer knows is capped
+    /// and named as removed; a `by` that is no id fails the session rather
+    /// than run uncapped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_an_unknown_or_garbled_by_never_bypasses() {
+        let everyone = |_| BypassPolicy {
+            mode: BypassMode::Everyone,
+            member_ids: vec![],
+        };
+        let w = world(everyone, true).await;
+        for (by, ok) in [
+            (json!(MemberId::generate()), true),
+            (json!("not-an-id"), false),
+        ] {
+            let run_id = seed(&w.store, BYPASS).await;
+            let queued = json!({ "from": null, "to": "queued", "reason": "created", "by": by });
+            let mut tx = w.store.begin().await.unwrap();
+            tx.append_event(NewEvent::new(run_id, None, "run_status", queued))
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            let started = w.engine.start_run(run_id).await;
+            if ok {
+                started.unwrap();
+                let run = until_run_ends(&w.store, run_id).await;
+                assert_eq!(run.status, RunStatus::Succeeded);
+                let capped = events(&w.store, run_id, BYPASS_CAPPED).await;
+                assert_eq!(capped[0]["member"], "a removed member");
+            } else {
+                // Only the engine writes `by`; garbled, the start is refused.
+                assert!(started.is_err(), "{started:?}");
+            }
+            let got = w.local.modes.lock().unwrap().clone();
+            assert!(
+                !got.iter()
+                    .any(|m| m.as_deref() == Some("bypass_permissions")),
+                "{by}: {got:?}"
+            );
+        }
+    }
+
+    /// Case 4: `allow_bypass: false` refuses the token holder and the
+    /// engine too; nobody is capped into running something else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_allow_bypass_off_refuses_the_token_holder_and_the_engine() {
+        for by in [By::TokenHolder, By::Engine] {
+            let (status, got, capped, thread, _) = run(by, BypassMode::Everyone, true, false).await;
+            assert_eq!((status, got.len(), capped.len()), (RunStatus::Failed, 0, 0));
+            assert!(thread.is_empty(), "{thread:?}");
+        }
+    }
+
+    /// Case 5: every queue path a member drives runs as them, so `off` caps
+    /// it: creating, moving on the board, commenting, @mentioning and a
+    /// direct chat (BLO-162).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_every_queue_path_a_member_drives_is_capped() {
+        let w = world(off, true).await;
+        let hooked = w.hooked().await;
+        let agent = w.bypass_agent().await;
+
+        // Created by the member.
+        let task = w.task_by(&w.ana, WorkflowPick::Id(hooked)).await;
+        let (_, got, _) = w.run_latest(task).await;
+        assert_eq!(modes(&got), CAPPED, "created");
+
+        // The owner's task, moved back to Todo by the member.
+        let task = w.task_by(&w.olu, WorkflowPick::Id(hooked)).await;
+        let (_, got, _) = w.run_latest(task).await;
+        assert_eq!(modes(&got), BYPASS_ONE, "the owner's run");
+        w.engine
+            .move_task_manually(task, TaskStatus::Todo, actor_of(&w.ana))
+            .await
+            .unwrap();
+        let (_, got, _) = w.run_latest(task).await;
+        assert_eq!(modes(&got), CAPPED, "moved");
+
+        // The owner's agent task, blocked, woken by the member's comment.
+        let task = w.task_by(&w.olu, WorkflowPick::Agent(agent)).await;
+        let (_, got, _) = w.run_latest(task).await;
+        assert_eq!(modes(&got), BYPASS_ONE, "the owner's agent run");
+        w.engine
+            .move_task_manually(task, TaskStatus::Blocked, actor_of(&w.olu))
+            .await
+            .unwrap();
+        w.engine
+            .comment(task, "go on", actor_of(&w.ana), &[])
+            .await
+            .unwrap();
+        let (_, got, _) = w.run_latest(task).await;
+        assert_eq!(modes(&got), CAPPED, "comment");
+
+        // The member @mentions the bypass agent on the owner's plain task.
+        let plain = w.task_by(&w.olu, WorkflowPick::None).await;
+        w.engine
+            .comment(plain, "@Rex look", actor_of(&w.ana), &[agent])
+            .await
+            .unwrap();
+        let chat = {
+            let mut tx = w.store.read().await.unwrap();
+            tx.mention_chat(plain, agent)
+                .await
+                .unwrap()
+                .expect("a mention chat")
+                .id
+        };
+        let (_, got, _) = w.run_latest(chat).await;
+        assert_eq!(modes(&got), CAPPED, "mention");
+
+        // A direct chat in bypass, the member's first message.
+        let runtime = sun_core::ChainSpec {
+            tool: "fake".into(),
+            credential: None,
+            host: None,
+            model: None,
+            effort: None,
+        };
+        let bypass = Some(PermissionMode::BypassPermissions);
+        let chat = w
+            .engine
+            .create_direct_chat(WorkspaceId::MAIN, runtime, bypass, Some(w.ana.id))
+            .await
+            .unwrap();
+        w.engine
+            .comment(chat.task.id, "hi", actor_of(&w.ana), &[])
+            .await
+            .unwrap();
+        let (_, got, _) = w.run_latest(chat.task.id).await;
+        assert_eq!(modes(&got), CAPPED, "direct chat");
+    }
+
+    /// Case 6: assignment keys on the assigner. The owner's plain task,
+    /// assigned by the member to a bypass agent (or a bypass workflow), runs
+    /// capped; the owner assigning the same runs in bypass.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_assignment_keys_on_the_assigner_not_the_creator() {
+        let w = world(off, true).await;
+        let agent = w.bypass_agent().await;
+        let hooked = w.hooked().await;
+        for to in [
+            Assignee::Agent { id: agent },
+            Assignee::Workflow { id: hooked },
+        ] {
+            let task = w.task_by(&w.olu, WorkflowPick::None).await;
+            w.engine
+                .assign_task(task, Some(to), actor_of(&w.ana))
+                .await
+                .unwrap();
+            let (_, got, capped) = w.run_latest(task).await;
+            assert_eq!(modes(&got), CAPPED, "{to:?} by the member");
+            assert_eq!(capped[0]["member"], "ana");
+
+            let task = w.task_by(&w.ana, WorkflowPick::None).await;
+            w.engine
+                .assign_task(task, Some(to), actor_of(&w.olu))
+                .await
+                .unwrap();
+            let (_, got, _) = w.run_latest(task).await;
+            assert_eq!(modes(&got), BYPASS_ONE, "{to:?} by the owner");
+        }
+    }
+
+    /// Case 5 (abuse): a member retrying a failed step of the owner's run
+    /// makes a bypass session go, so it should be capped like
+    /// `POST /runs/{id}/retry`. `retry_step` takes only a name, and the run
+    /// keeps acting for the owner who queued it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_a_members_step_retry_of_an_owners_run_is_capped() {
+        const FLAKY: &str = "name: flaky
+exec_env: { kind: container, image: 'node:22' }
+steps:
+  - id: check
+    type: gate
+    gates: [{test: {command: \"test -f ok || { touch ok; false; }\"}}]
+  - id: implement
+    type: agent
+    prompt: fix it
+    permission_mode: bypass_permissions
+    needs: [check]
+";
+        let w = world(off, true).await;
+        let flaky = w.engine.save_workflow(None, FLAKY).await.unwrap().0.id;
+        let task = w.task_by(&w.olu, WorkflowPick::Id(flaky)).await;
+        let (status, got, _) = w.run_latest(task).await;
+        assert_eq!(
+            (status, got.len()),
+            (RunStatus::Failed, 0),
+            "the gate fails once"
+        );
+        let run = {
+            let mut tx = w.store.read().await.unwrap();
+            tx.runs_of_task(task).await.unwrap().pop().unwrap()
+        };
+        w.engine
+            .retry_step(
+                run.id,
+                StepKey::new("check").unwrap(),
+                actor_of(&w.ana).unwrap(),
+            )
+            .await
+            .unwrap();
+        until_run_ends(&w.store, run.id).await;
+        let got = w.local.modes.lock().unwrap().clone();
+        assert_eq!(
+            modes(&got),
+            CAPPED,
+            "the member's retry ran a bypass session as the owner"
+        );
+    }
 }
