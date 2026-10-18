@@ -13,6 +13,7 @@ use sun_core::model::Role;
 use sun_store::{EventLog, RunRepo};
 
 use crate::common::{Kernel, kernel};
+use crate::mode_unoffered::ended_runs;
 use crate::workspaces::{call, call_as, member_token};
 
 const MAIN: &str = "00000000000000000000000001";
@@ -159,14 +160,14 @@ async fn every_board_route_queues_as_the_calling_member() {
     let chat = json!({ "id": chat.id.to_string() });
     assert_eq!(&by_of_latest(&s.k, &chat).await, bob_id, "mention");
 
-    // The owner's run, cancelled, retried by the member.
+    // The owner's run, once it has ended, retried by the member. Waits for
+    // the end instead of cancelling: the queue may refuse (fail) the run
+    // before a cancel lands, and Failed can't move to Cancelled (BLO-179).
     let task = s.owners_task(json!({ "workflow_id": s.workflow })).await;
     assert_eq!(by_of_latest(&s.k, &task).await, "token", "the token holder");
-    let cancel = Some(json!({ "status": "cancelled" }));
-    ok(app, "PATCH", &Setup::path(&task), cancel).await;
-    let runs = ok(app, "GET", &format!("{}/runs", Setup::path(&task)), None).await;
-    let run = runs[0]["id"].as_str().unwrap_or_else(|| panic!("{runs}"));
-    let retry = format!("/api/v1/runs/{run}/retry");
+    let runs = ended_runs(&s.k, task["id"].as_str().unwrap()).await;
+    assert_eq!(runs.len(), 1);
+    let retry = format!("/api/v1/runs/{}/retry", runs[0].id);
     ok_as(app, bob, "POST", &retry, None).await;
     assert_eq!(runs_of(&s.k, &task).await, 2);
     assert_eq!(&by_of_latest(&s.k, &task).await, bob_id, "retry");
