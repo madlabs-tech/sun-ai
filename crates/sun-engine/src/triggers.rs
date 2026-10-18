@@ -808,16 +808,24 @@ impl Engine {
         }
         tx.put_setting(&claim, &json!(run_id)).await?;
         tx.commit().await?;
-        if self
+        let Some(principal) = self
             .chat_actor(event, run_id, Permission::Run, &occurrence(p))
             .await?
-            .is_none()
-        {
+        else {
             return Ok(false);
-        }
+        };
+        // The member `chat_actor` matched, for the bypass cap. Never the
+        // token holder's `None`: that would act for the deployment.
+        let Some(member) = self.chat_member(field("email")).await? else {
+            return Ok(false);
+        };
+        let by = Actor {
+            member_id: Some(member.id),
+            name: format!("user:{}", principal.user),
+        };
         // ponytail: claimed before steering, so at most once: a failed steer
         // (no agent running) is not retried.
-        self.steer(run_id, text.to_owned()).await?;
+        self.steer(run_id, text.to_owned(), by).await?;
         Ok(true)
     }
 

@@ -999,14 +999,18 @@ async fn pause(State(api): State<Api>, Path(task): Path<String>) -> ApiResult<Js
     summary(&api, task_id).await
 }
 
-/// Resumes the task's paused run.
-async fn resume(State(api): State<Api>, Path(task): Path<String>) -> ApiResult<Json<TaskView>> {
+/// Resumes the task's paused run, as the caller.
+async fn resume(
+    State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
+    Path(task): Path<String>,
+) -> ApiResult<Json<TaskView>> {
     let task_id = id(&task, "task")?;
     let run = latest_run(&api, task_id).await?;
     if run.status != RunStatus::Paused {
         return Err(ApiError::conflict("This task is not paused."));
     }
-    api.engine.resume(run.id).await?;
+    api.engine.resume(run.id, caller.task_actor()).await?;
     summary(&api, task_id).await
 }
 
@@ -1074,9 +1078,10 @@ struct Message {
 }
 
 /// Steers the run's live agent, or with `queue: true` leaves the
-/// message for its next step.
+/// message for its next step, as the caller.
 async fn send_message(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
     Path(run): Path<String>,
     Body(input): Body<Message>,
 ) -> ApiResult<Json<wire::EventView>> {
@@ -1086,8 +1091,16 @@ async fn send_message(
         return Err(ApiError::invalid("Write a message of up to 64 KB first."));
     }
     let event = match input.queue {
-        true => api.engine.queue_message(run_id, text.to_string()).await?,
-        false => api.engine.steer(run_id, text.to_string()).await?,
+        true => {
+            let by = caller.task_actor();
+            api.engine
+                .queue_message(run_id, text.to_string(), by)
+                .await?
+        }
+        false => {
+            let by = caller.task_actor();
+            api.engine.steer(run_id, text.to_string(), by).await?
+        }
     };
     Ok(Json(wire::event_view(event)))
 }
@@ -1099,9 +1112,10 @@ struct Switch {
 }
 
 /// Moves a running or limit-hit agent step to another runtime of its chain,
-/// with a hand-off pack, in the same worktree.
+/// with a hand-off pack, in the same worktree, as the caller.
 async fn switch_runtime(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
     Path((run, key)): Path<(String, String)>,
     Body(input): Body<Switch>,
 ) -> ApiResult<Json<TaskView>> {
@@ -1114,7 +1128,7 @@ async fn switch_runtime(
     }
     let run = api.engine.run(run_id).await?;
     api.engine
-        .switch_runtime(run_id, step_key, to.to_owned())
+        .switch_runtime(run_id, step_key, to.to_owned(), caller.task_actor())
         .await?;
     summary(&api, run.task_id).await
 }

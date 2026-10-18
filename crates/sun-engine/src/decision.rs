@@ -1512,7 +1512,16 @@ steps:
                 .unwrap()
                 .contains("change.txt")
         );
-        engine.resume(run).await.unwrap();
+        engine
+            .resume(
+                run,
+                crate::Actor {
+                    member_id: None,
+                    name: "user:lead".into(),
+                },
+            )
+            .await
+            .unwrap();
         until(&store, run, "flag", StepStatus::WaitingApproval).await;
         let assigned = events(&store, run, "session_assigned").await;
         assert_eq!(assigned[0]["adapter"], "fake-b", "routed past fake-a");
@@ -1533,7 +1542,16 @@ steps:
         let task = engine.task(task_id).await.unwrap();
         // A raised flag waits for a person to decide: Needs you, not Blocked.
         assert_eq!(task.status, TaskStatus::NeedsYou);
-        engine.resume(run).await.unwrap();
+        engine
+            .resume(
+                run,
+                crate::Actor {
+                    member_id: None,
+                    name: "user:lead".into(),
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(
             until_run_ends(&store, run).await.status,
             RunStatus::Succeeded

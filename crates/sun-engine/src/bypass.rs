@@ -14,12 +14,16 @@
 //!
 //! The person is whoever last made the run go: the commenter, mover or
 //! assigner (each queue path's actor), the retry's caller, the webhook's
-//! caller, or the latest person to retry one of its steps (`acts_for` on
-//! `step_retry`; a `retry:` policy's retry changes nothing). A run no person
-//! queued (a cron schedule, a mod event, an eval) acts for the deployment:
-//! it runs what was saved, which only the bypass gate's holders could save.
-//! Known gap (BLO-169): a resume, runtime switch or steer still acts for
-//! whoever made the run go before it.
+//! caller, or the latest person to act on the run since ([`ACTS_FOR`] on
+//! the event of a step retry, a resume, a runtime switch, a steer or a
+//! message left for the next session; see [`STAMPED`]). What the engine
+//! does by itself (a `retry:` policy, a failover, crash recovery) records
+//! nothing. Approving a gate doesn't count either: a yes/no carries no
+//! instructions, and the approvers are named by whoever saved the workflow.
+//! A run no person queued (a cron schedule, a mod event, an eval) acts for
+//! the deployment: it runs what was saved, which only the bypass gate's
+//! holders could save. The cap applies from the next session on: a steer
+//! reaches a live session in the mode it started with.
 
 use serde_json::{Value, json};
 use sun_core::model::{ActivityKind, AuditAction, BypassPolicy, OWNER_ISSUER, Run};
@@ -28,7 +32,10 @@ use sun_store::{AuditRepo, EventLog, EventQuery, MemberRepo, RunRepo, SettingRep
 
 use crate::Engine;
 use crate::executor::Actor;
+use crate::executor::failover::HANDOFF_STARTED;
+use crate::executor::kind::{INTERVENTION, RUN_STATUS};
 use crate::executor::retry::STEP_RETRY;
+use crate::queued::QUEUED;
 
 /// `kernel_setting` key of the [`BypassPolicy`].
 const POLICY: &str = "bypass_policy";
@@ -36,14 +43,24 @@ const POLICY: &str = "bypass_policy";
 pub(crate) const BYPASS_CAPPED: &str = "bypass_capped";
 /// Its key in the first `run_status` event: who queued the run.
 const BY: &str = "by";
-/// Its key in a person's `step_retry` event: whom the run acts for from there.
+/// Its key in an event a person's action journals: whom the run acts for
+/// from there ([`stamp`]).
 pub(crate) const ACTS_FOR: &str = "acts_for";
+/// The kinds [`ACTS_FOR`] is read from: a step retry, a resume, a runtime
+/// switch, a steer and a message left for the next session.
+const STAMPED: [&str; 5] = [
+    STEP_RETRY,
+    RUN_STATUS,
+    HANDOFF_STARTED,
+    INTERVENTION,
+    QUEUED,
+];
 /// What a capped session runs as.
 const CAPPED_TO: PermissionMode = PermissionMode::AcceptEdits;
 
-/// The `by` of a run's first `run_status` event (or a `step_retry`'s
-/// [`ACTS_FOR`]) for `actor`: their member id, the token holder's
-/// [`OWNER_ISSUER`], nothing for the engine.
+/// The `by` of a run's first `run_status` event (or an [`ACTS_FOR`]) for
+/// `actor`: their member id, the token holder's [`OWNER_ISSUER`], nothing
+/// for the engine.
 pub(crate) fn by_of(actor: Option<&Actor>) -> Option<Value> {
     let actor = actor?;
     Some(match actor.member_id {
@@ -52,14 +69,28 @@ pub(crate) fn by_of(actor: Option<&Actor>) -> Option<Value> {
     })
 }
 
-/// Who `run` acts for: the latest person to retry one of its steps, else
+/// Stamps the `payload` of a [`STAMPED`] event with whom the run acts for
+/// from there: `by` (nothing for the engine).
+pub(crate) fn stamp(payload: &mut Value, by: Option<&Actor>) {
+    if let Some(acts_for) = by_of(by) {
+        payload[ACTS_FOR] = acts_for;
+    }
+}
+
+/// Who `run` acts for: the latest person to act on it ([`stamp`]), else
 /// whoever queued it. `None` for the deployment (the token holder, or no
 /// person); else the member.
 async fn trigger(tx: &mut Tx, run: &Run) -> Result<Option<MemberId>> {
-    let retries = tx
-        .search_events(run.id, Some(STEP_RETRY), None, 0, u32::MAX)
+    // The text filter only narrows the scan; the key is read from the payload.
+    let stamped = tx
+        .search_events(run.id, None, Some(ACTS_FOR), 0, u32::MAX)
         .await?;
-    let by = match retries.iter().rev().find_map(|e| e.payload.get(ACTS_FOR)) {
+    let latest = stamped
+        .iter()
+        .rev()
+        .filter(|e| STAMPED.contains(&e.kind.as_str()))
+        .find_map(|e| e.payload.get(ACTS_FOR));
+    let by = match latest {
         Some(by) => Some(by.clone()),
         None => {
             let first = tx.events_after(Some(run.id), 0, 1).await?;
@@ -498,6 +529,167 @@ steps:
             let capped = events(&store, run_id, BYPASS_CAPPED).await;
             assert_eq!(capped.len(), usize::from(owner_queues), "{capped:?}");
         }
+    }
+
+    /// The owner's run of [`BYPASS`] under `off`, its `plan` session live
+    /// and held (`LocalHost::hold`) for member `ana` to act on.
+    struct Held {
+        _dir: tempfile::TempDir,
+        store: Store,
+        engine: Engine,
+        local: std::sync::Arc<LocalHost>,
+        run_id: RunId,
+        ana: Actor,
+    }
+
+    async fn owners_run_held(yaml: &str) -> Held {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let (engine, local) = start(&store, dir.path(), true).await;
+        let mut tx = store.begin().await.unwrap();
+        let ana = tx
+            .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+            .await
+            .unwrap();
+        let olu = tx
+            .upsert_member("local", "olu@sun.test", "olu", Some("olu@sun.test"), true)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let actor = |member_id: MemberId, name: &str| Actor {
+            member_id: Some(member_id),
+            name: format!("user:{name}"),
+        };
+        let run_id = seed(&store, yaml).await;
+        let mut queued = json!({ "from": null, "to": "queued", "reason": "created" });
+        queued["by"] = by_of(Some(&actor(olu.id, "olu"))).unwrap();
+        let mut tx = store.begin().await.unwrap();
+        tx.append_event(NewEvent::new(run_id, None, "run_status", queued))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        local.hold.store(true, std::sync::atomic::Ordering::SeqCst);
+        engine.start_run(run_id).await.unwrap();
+        let plan = StepKey::new("plan").unwrap();
+        for _ in 0..2000 {
+            let mut tx = store.read().await.unwrap();
+            let steps = crate::state::latest(tx.steps_of_run(run_id).await.unwrap());
+            if steps.get(&plan).map(|s| s.status) == Some(sun_core::StepStatus::Running) {
+                return Held {
+                    _dir: dir,
+                    store,
+                    engine,
+                    local,
+                    run_id,
+                    ana: actor(ana.id, "ana"),
+                };
+            }
+            drop(tx);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("`plan` never ran");
+    }
+
+    impl Held {
+        fn release(&self) {
+            self.local
+                .hold
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        /// Ends the run: the modes its sessions got and its `bypass_capped`
+        /// events, the thread told once.
+        async fn finish(&self) -> (Vec<Option<String>>, Vec<Value>) {
+            let run = until_run_ends(&self.store, self.run_id).await;
+            assert_eq!(run.status, RunStatus::Succeeded, "{:?}", run.end_reason);
+            let modes = self.local.modes.lock().unwrap().clone();
+            let capped = events(&self.store, self.run_id, BYPASS_CAPPED).await;
+            let (thread, _) = thread_and_audit(&self.store, self.run_id).await;
+            assert_eq!(thread, [capped_line("ana")]);
+            (modes, capped)
+        }
+    }
+
+    /// BLO-169: a member resuming the owner's paused bypass run under `off`
+    /// gets every session from there capped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resume_acts_for_its_resumer() {
+        let h = owners_run_held(BYPASS).await;
+        h.engine.pause(h.run_id).await.unwrap();
+        h.release();
+        h.engine.resume(h.run_id, h.ana.clone()).await.unwrap();
+        let (got, capped) = h.finish().await;
+        let capped_twice = [Some("accept_edits"), Some("accept_edits")];
+        assert_eq!(
+            modes(&got),
+            [&[Some("bypass_permissions")][..], &capped_twice].concat()
+        );
+        assert_eq!(capped.len(), 2, "{capped:?}");
+        let resumed = events(&h.store, h.run_id, "run_status").await;
+        let stamped: Vec<_> = resumed.iter().filter_map(|e| e.get(ACTS_FOR)).collect();
+        assert_eq!(
+            stamped,
+            [&json!(h.ana.member_id)],
+            "only the person's resume"
+        );
+    }
+
+    /// BLO-169: a member switching the owner's live bypass step to another
+    /// runtime under `off` gets the new session, and the next, capped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_runtime_switch_acts_for_its_switcher() {
+        let chained = BYPASS.replace("steps:\n", "runtime: { chain: [fake, spare] }\nsteps:\n");
+        let h = owners_run_held(&chained).await;
+        let plan = StepKey::new("plan").unwrap();
+        h.engine
+            .switch_runtime(h.run_id, plan, "spare".into(), h.ana.clone())
+            .await
+            .unwrap();
+        h.release();
+        let (got, capped) = h.finish().await;
+        let capped_twice = [Some("accept_edits"), Some("accept_edits")];
+        assert_eq!(
+            modes(&got),
+            [&[Some("bypass_permissions")][..], &capped_twice].concat()
+        );
+        assert_eq!(capped.len(), 2, "{capped:?}");
+    }
+
+    /// BLO-169: a member steering the owner's live bypass session under
+    /// `off` gets the run's next session capped. The live one keeps the mode
+    /// it started with.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_steer_acts_for_its_steerer() {
+        let h = owners_run_held(BYPASS).await;
+        h.engine
+            .steer(h.run_id, "use tabs".into(), h.ana.clone())
+            .await
+            .unwrap();
+        h.release();
+        let (got, capped) = h.finish().await;
+        assert_eq!(
+            modes(&got),
+            [Some("bypass_permissions"), Some("accept_edits")]
+        );
+        assert_eq!(capped.len(), 1, "{capped:?}");
+    }
+
+    /// BLO-169: so does a message a member leaves for the next session (a
+    /// comment when no agent is live falls back to this).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_message_acts_for_its_author() {
+        let h = owners_run_held(BYPASS).await;
+        h.engine
+            .queue_message(h.run_id, "use tabs".into(), h.ana.clone())
+            .await
+            .unwrap();
+        h.release();
+        let (got, capped) = h.finish().await;
+        assert_eq!(
+            modes(&got),
+            [Some("bypass_permissions"), Some("accept_edits")]
+        );
+        assert_eq!(capped.len(), 1, "{capped:?}");
     }
 
     #[tokio::test]

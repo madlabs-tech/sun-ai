@@ -181,9 +181,7 @@ impl Executor {
         append(tx, &step, kind::STEP_STATUS, payload).await?;
         let mut payload = json!({ "step_id": step.id, "attempt": step.attempt });
         payload["by"] = json!(by.map_or(BY_POLICY, |a| a.name.as_str()));
-        if let Some(acts_for) = crate::bypass::by_of(by) {
-            payload[crate::bypass::ACTS_FOR] = acts_for;
-        }
+        crate::bypass::stamp(&mut payload, by);
         append(tx, &step, STEP_RETRY, payload).await?;
         if agent {
             let runtime = self.runtime_of(tx, &step).await?;

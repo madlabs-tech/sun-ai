@@ -39,6 +39,14 @@ const EXIT: &str = r#"{"kind":"exited","code":0}"#;
 
 /// A limit that resets `reset_in` after the fake emits it (not after the
 /// script is written: setting up a harness under load can take longer).
+/// The token holder, switching runtimes by hand.
+fn holder() -> sun_engine::Actor {
+    sun_engine::Actor {
+        member_id: None,
+        name: "user:ana".into(),
+    }
+}
+
 fn limit_hit(reset_in: Duration) -> String {
     format!(
         r#"{{"kind":"limit_hit","limit":"quota","reset_at":null,"reset_in_ms":{},"raw":"usage limit reached"}}"#,
@@ -784,7 +792,7 @@ async fn agent_get_resolves_run_pointers_and_ask_waits_for_a_human() {
 
     // A manual switch from `running` is a hand-off, not an interruption.
     h.engine
-        .switch_runtime(h.run_id, key, "fake-ok".into())
+        .switch_runtime(h.run_id, key, "fake-ok".into(), holder())
         .await
         .unwrap();
     let moves = h.moves("implement").await;
@@ -943,14 +951,14 @@ async fn failover_pauses_then_a_manual_switch_continues() {
     let key = StepKey::new("implement").unwrap();
     let refused = h
         .engine
-        .switch_runtime(h.run_id, key.clone(), "gpt-nowhere".into())
+        .switch_runtime(h.run_id, key.clone(), "gpt-nowhere".into(), holder())
         .await;
     assert!(
         matches!(refused, Err(Error::InvalidInput(_))),
         "{refused:?}"
     );
     h.engine
-        .switch_runtime(h.run_id, key, "fake-ok".into())
+        .switch_runtime(h.run_id, key, "fake-ok".into(), holder())
         .await
         .unwrap();
     h.assert_handed_off("fake-limit").await;

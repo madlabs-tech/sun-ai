@@ -18,7 +18,7 @@ use sun_store::{EventLog, NewEvent, RunRepo, Tx};
 use sun_workflow::StepKind;
 use tokio::sync::oneshot;
 
-use super::{Command, Effect, Engine, Executor, move_run, move_step, state};
+use super::{Actor, Command, Effect, Engine, Executor, move_run, move_run_by, move_step, state};
 use crate::approval::Principal;
 
 /// Step reason of agent steps a pause interrupted.
@@ -42,10 +42,11 @@ impl Engine {
         self.request(|reply| Command::Pause { run_id, reply }).await
     }
 
-    /// Resumes a paused run (also one `on_limit: pause_and_notify` paused).
-    /// `InvalidTransition` unless the run is `paused`.
-    pub async fn resume(&self, run_id: RunId) -> Result<()> {
-        self.request(|reply| Command::Resume { run_id, reply })
+    /// Resumes a paused run (also one `on_limit: pause_and_notify` paused)
+    /// as `by`: from here it acts for them (its bypass cap,
+    /// [`crate::bypass`]). `InvalidTransition` unless the run is `paused`.
+    pub async fn resume(&self, run_id: RunId, by: Actor) -> Result<()> {
+        self.request(|reply| Command::Resume { run_id, by, reply })
             .await
     }
 
@@ -151,22 +152,25 @@ impl Executor {
         Ok(Some(step.run_id))
     }
 
-    pub(super) async fn resume_run(&mut self, run_id: RunId) -> Result<()> {
+    pub(super) async fn resume_run(&mut self, run_id: RunId, by: &Actor) -> Result<()> {
         let mut tx = self.store.begin().await?;
         let mut effects = Vec::new();
-        self.resume_in(&mut tx, run_id, &mut effects).await?;
+        self.resume_in(&mut tx, run_id, Some(by), &mut effects)
+            .await?;
         tx.commit().await?;
         self.apply(effects).await
     }
 
-    /// `paused → running`, in the caller's transaction.
+    /// `paused → running` by `by` (`None`: the engine), in the caller's
+    /// transaction.
     pub(super) async fn resume_in(
         &mut self,
         tx: &mut Tx,
         run_id: RunId,
+        by: Option<&Actor>,
         effects: &mut Vec<Effect>,
     ) -> Result<()> {
-        move_run(tx, run_id, RunStatus::Running, None).await?;
+        move_run_by(tx, run_id, RunStatus::Running, None, by).await?;
         for (_, mut step) in state::latest(tx.steps_of_run(run_id).await?) {
             match step.status {
                 StepStatus::Interrupted | StepStatus::HandingOff => {

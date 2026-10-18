@@ -344,9 +344,10 @@ impl Executor {
             }
             RunAction::Resume(run) => {
                 if let Some(text) = &message {
-                    queued::leave(&mut tx, run, text).await?;
+                    queued::leave(&mut tx, run, text, actor.as_ref()).await?;
                 }
-                self.resume_in(&mut tx, run, &mut effects).await?;
+                self.resume_in(&mut tx, run, actor.as_ref(), &mut effects)
+                    .await?;
             }
             RunAction::Queue => {
                 let trigger = if message.is_some() {
@@ -356,7 +357,7 @@ impl Executor {
                 };
                 let run = queue::queue_run(&mut tx, task_id, trigger, actor.as_ref()).await?;
                 if let Some(text) = &message {
-                    queued::leave(&mut tx, run, text).await?;
+                    queued::leave(&mut tx, run, text, actor.as_ref()).await?;
                 }
             }
             RunAction::Cancel(run) => {
@@ -484,12 +485,12 @@ impl Executor {
             None => text.clone(),
         };
         match active.map(|r| (r.id, r.status)) {
-            Some((run, RunStatus::Running)) => match self.steer(run, text).await {
+            Some((run, RunStatus::Running)) => match self.steer(run, text, actor.as_ref()).await {
                 // No live agent session: the next one gets it.
-                Err(Error::InvalidInput(_)) => self.leave(run, &left).await,
+                Err(Error::InvalidInput(_)) => self.leave(run, &left, actor.as_ref()).await,
                 steered => steered.map(drop),
             },
-            Some((run, RunStatus::Queued)) => self.leave(run, &left).await,
+            Some((run, RunStatus::Queued)) => self.leave(run, &left, actor.as_ref()).await,
             _ if matches!(
                 task.status,
                 TaskStatus::Blocked | TaskStatus::NeedsYou | TaskStatus::Failed
@@ -502,10 +503,10 @@ impl Executor {
         }
     }
 
-    /// Leaves `text` for the run's next agent session.
-    async fn leave(&mut self, run: RunId, text: &str) -> Result<()> {
+    /// Leaves `by`'s `text` for the run's next agent session.
+    async fn leave(&mut self, run: RunId, text: &str, by: Option<&Actor>) -> Result<()> {
         let mut tx = self.store.begin().await?;
-        queued::leave(&mut tx, run, text).await?;
+        queued::leave(&mut tx, run, text, by).await?;
         Ok(tx.commit().await?)
     }
 }
