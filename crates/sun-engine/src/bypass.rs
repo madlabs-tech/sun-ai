@@ -1679,4 +1679,376 @@ steps:
             envelopes[1]
         );
     }
+
+    // ------------------------------------------------ BLO-176 QA pass
+
+    /// The steer paths a person drives into a live session.
+    #[derive(Debug, Clone, Copy)]
+    enum SteerPath {
+        /// `POST /runs/{id}/messages` (the route calls `Engine::steer`).
+        Rest,
+        /// A comment on the task while its agent runs.
+        Comment,
+        /// A Slack reply in the thread of the run's notify message.
+        Chat,
+    }
+
+    impl Held {
+        /// `ana` says `text` to the run's live session over `path`.
+        async fn steer_by_ana(&self, path: SteerPath, text: &str) {
+            match path {
+                SteerPath::Rest => {
+                    let event = self
+                        .engine
+                        .steer(self.run_id, text.into(), self.ana.clone())
+                        .await
+                        .unwrap();
+                    assert_eq!(event.kind, QUEUED);
+                    assert_eq!(event.payload["summary"], STEER_QUEUED);
+                }
+                SteerPath::Comment => {
+                    // A comment steers only a task an agent answers.
+                    let fields = crate::AgentFields {
+                        name: Some("Rex".into()),
+                        runtime_chain: Some(vec!["fake".into()]),
+                        ..crate::AgentFields::default()
+                    };
+                    let plan = sun_core::entitlement::Entitlement::community(
+                        sun_core::entitlement::EntitlementStatus::Community,
+                    );
+                    let agent = self
+                        .engine
+                        .create_agent(sun_core::WorkspaceId::MAIN, fields, "user:olu", &plan)
+                        .await
+                        .unwrap()
+                        .id;
+                    let mut tx = self.store.begin().await.unwrap();
+                    let task = tx.get_run(self.run_id).await.unwrap().task_id;
+                    let mut row = tx.get_task(task).await.unwrap();
+                    row.assignee_agent_id = Some(agent);
+                    tx.update_task(&row).await.unwrap();
+                    tx.commit().await.unwrap();
+                    self.engine
+                        .comment(task, text, Some(self.ana.clone()), &[])
+                        .await
+                        .unwrap();
+                }
+                SteerPath::Chat => {
+                    let mut reply = chat_reply(self.run_id, "ana@sun.test", "7.1");
+                    reply.payload["text"] = json!(text);
+                    assert!(self.engine.steer_from_chat(&reply).await.unwrap());
+                }
+            }
+        }
+    }
+
+    /// Case 1: on every steer path, a capped member's words never reach the
+    /// owner's live bypass session, neither as a steer (its stdin) nor in its
+    /// envelope. They reach the next session, once, and it runs capped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_no_steer_path_puts_a_capped_members_words_in_a_bypass_session() {
+        for path in [SteerPath::Rest, SteerPath::Comment, SteerPath::Chat] {
+            let h = owners_run_held(BYPASS).await;
+            h.steer_by_ana(path, "rm -rf the fixtures").await;
+            assert!(
+                h.local.steers.lock().unwrap().is_empty(),
+                "{path:?}: steered the bypass session live"
+            );
+            assert!(events(&h.store, h.run_id, INTERVENTION).await.is_empty());
+            let queued = events(&h.store, h.run_id, QUEUED).await;
+            assert_eq!(queued.len(), 1, "{path:?}: {queued:?}");
+            assert_eq!(queued[0][ACTS_FOR], json!(h.ana.member_id), "{path:?}");
+            h.release();
+            let (got, capped, thread) = h.end().await;
+            assert_eq!(modes(&got), [BP, AE], "{path:?}");
+            assert_eq!(capped.len(), 1, "{path:?}");
+            let envelopes = h.local.envelopes.lock().unwrap().clone();
+            assert!(!envelopes[0].contains("rm -rf the fixtures"), "{path:?}");
+            assert_eq!(
+                envelopes[1].matches("rm -rf the fixtures").count(),
+                1,
+                "{path:?}: {}",
+                envelopes[1]
+            );
+            let said = thread.iter().filter(|t| *t == STEER_QUEUED).count();
+            assert_eq!(said, 1, "{path:?}: {thread:?}");
+            assert!(h.local.steers.lock().unwrap().is_empty(), "{path:?}");
+        }
+    }
+
+    /// Case 2 and the policy-change race: `ana` is capped when the owner's
+    /// bypass session starts, so her answer is refused (the question stays
+    /// open). The owner then puts her on the allowlist and her answer goes
+    /// through: the rule reads the policy when she acts, not when the
+    /// session started. That is right: she may now start bypass sessions
+    /// herself. Unlisting her again mid-session refuses her again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_a_member_listed_after_the_session_started_may_answer_it() {
+        let listed = |on: bool, ana: MemberId| BypassPolicy {
+            mode: BypassMode::Members,
+            member_ids: if on { vec![ana] } else { vec![] },
+        };
+        let h = owners_run_held(BYPASS).await;
+        let ana = h.ana.member_id.unwrap();
+        let (question, waiting) = h.ask().await;
+        let err = h
+            .engine
+            .answer(h.run_id, question, "yes".into(), h.ana.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err, Error::Forbidden(ANSWER_REFUSED.into()));
+        assert_eq!(h.plan().await, sun_core::StepStatus::WaitingApproval);
+        assert!(events(&h.store, h.run_id, "answer").await.is_empty());
+
+        // Listed, then unlisted again: refused again.
+        for on in [true, false] {
+            h.engine
+                .set_bypass_policy(listed(on, ana), "user:olu")
+                .await
+                .unwrap();
+        }
+        let err = h
+            .engine
+            .answer(h.run_id, question, "yes".into(), h.ana.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err, Error::Forbidden(ANSWER_REFUSED.into()), "unlisted");
+        assert!(!waiting.is_finished());
+
+        h.engine
+            .set_bypass_policy(listed(true, ana), "user:olu")
+            .await
+            .unwrap();
+        h.engine
+            .answer(h.run_id, question, "yes".into(), h.ana.clone())
+            .await
+            .unwrap();
+        assert_eq!(waiting.await.unwrap().unwrap(), "yes");
+        assert_eq!(events(&h.store, h.run_id, "answer").await.len(), 1);
+        h.release();
+        let (got, capped, thread) = h.end().await;
+        assert_eq!(modes(&got), BYPASSED);
+        assert!(capped.is_empty() && thread.is_empty(), "{thread:?}");
+    }
+
+    /// Case 3: a member removed mid-run (deactivated, or gone from the
+    /// store) is capped even under `everyone`: their steer is queued, their
+    /// answer refused, nothing panics, and the next session runs capped,
+    /// naming them (or "a removed member").
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_a_member_removed_mid_run_is_capped_on_steer_and_answer() {
+        let everyone = BypassPolicy {
+            mode: BypassMode::Everyone,
+            member_ids: vec![],
+        };
+        for gone in [false, true] {
+            let h = owners_run_held(BYPASS).await;
+            h.engine
+                .set_bypass_policy(everyone.clone(), "user:olu")
+                .await
+                .unwrap();
+            let by = match gone {
+                false => {
+                    let mut tx = h.store.begin().await.unwrap();
+                    let ana = h.ana.member_id.unwrap();
+                    assert!(tx.set_member_active(ana, false).await.unwrap());
+                    tx.commit().await.unwrap();
+                    h.ana.clone()
+                }
+                true => Actor {
+                    member_id: Some(MemberId::generate()),
+                    name: "user:ghost".into(),
+                },
+            };
+            let event = h
+                .engine
+                .steer(h.run_id, "use tabs".into(), by.clone())
+                .await
+                .unwrap();
+            assert_eq!(event.kind, QUEUED, "gone: {gone}");
+            assert!(h.local.steers.lock().unwrap().is_empty(), "gone: {gone}");
+            let (question, waiting) = h.ask().await;
+            let err = h
+                .engine
+                .answer(h.run_id, question, "yes".into(), by)
+                .await
+                .unwrap_err();
+            assert_eq!(err, Error::Forbidden(ANSWER_REFUSED.into()), "gone: {gone}");
+            assert_eq!(h.plan().await, sun_core::StepStatus::WaitingApproval);
+            h.engine
+                .answer(h.run_id, question, "yes".into(), h.owner())
+                .await
+                .unwrap();
+            assert_eq!(waiting.await.unwrap().unwrap(), "yes");
+            h.release();
+            let (got, capped, thread) = h.end().await;
+            assert_eq!(modes(&got), [BP, AE], "gone: {gone}");
+            let name = if gone { "a removed member" } else { "ana" };
+            assert_eq!(capped[0]["member"], name);
+            assert_eq!(thread, [STEER_QUEUED.to_owned(), capped_line(name)]);
+        }
+    }
+
+    /// Case 4, the documented limit: a `session_assigned` without
+    /// `permission_mode` (journalled before BLO-172) or with it `null` is
+    /// taken as not in bypass, so a capped member's steer goes live. Only a
+    /// journalled `bypass_permissions` for that very session holds it back,
+    /// and only for a capped person.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_a_session_with_no_recorded_mode_takes_a_capped_steer_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).await.unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let ana = tx
+            .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let ana = Actor {
+            member_id: Some(ana.id),
+            name: "user:ana".into(),
+        };
+        let owner = Actor {
+            member_id: None,
+            name: "user:root".into(),
+        };
+        let run_id = seed(&store, BYPASS).await;
+        let (old, null, bypass, other) = (
+            SessionId::generate(),
+            SessionId::generate(),
+            SessionId::generate(),
+            SessionId::generate(),
+        );
+        let mut tx = store.begin().await.unwrap();
+        for payload in [
+            json!({ "session_id": old, "adapter": "fake" }),
+            json!({ "session_id": null, "adapter": "fake", "permission_mode": null }),
+            json!({ "session_id": bypass, "permission_mode": "bypass_permissions" }),
+        ] {
+            tx.append_event(NewEvent::new(run_id, None, SESSION_ASSIGNED, payload))
+                .await
+                .unwrap();
+        }
+        let by = Some(&ana);
+        let live = live_bypass(&mut tx, run_id, old, by).await.unwrap();
+        assert!(!live, "no mode recorded: delivered live");
+        let live = live_bypass(&mut tx, run_id, null, by).await.unwrap();
+        assert!(!live, "mode null: delivered live");
+        let live = live_bypass(&mut tx, run_id, other, by).await.unwrap();
+        assert!(!live, "no session_assigned at all: delivered live");
+        let live = live_bypass(&mut tx, run_id, bypass, by).await.unwrap();
+        assert!(live, "bypass: held back");
+        let live = live_bypass(&mut tx, run_id, bypass, Some(&owner)).await;
+        assert!(!live.unwrap(), "the owner is never capped");
+        let live = live_bypass(&mut tx, run_id, bypass, None).await;
+        assert!(!live.unwrap(), "the engine is never capped");
+    }
+
+    /// Case 5, the documented limit: a capped steer during the run's last
+    /// step is queued and never delivered (no session follows). The run
+    /// still succeeds, the thread says it was queued, and nothing errors.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_a_capped_steer_in_the_last_step_is_queued_and_the_run_ends() {
+        let h = owners_run_held(BYPASS).await;
+        h.pass_one();
+        h.until_running("implement").await;
+        h.steer_by_ana(SteerPath::Rest, "rm -rf the fixtures").await;
+        h.release();
+        let (got, capped, thread) = h.end().await;
+        assert_eq!(modes(&got), BYPASSED, "no session after the queued steer");
+        assert!(capped.is_empty(), "{capped:?}");
+        assert_eq!(thread, [STEER_QUEUED.to_owned()]);
+        assert!(h.local.steers.lock().unwrap().is_empty());
+        let envelopes = h.local.envelopes.lock().unwrap().clone();
+        assert!(envelopes.iter().all(|e| !e.contains("rm -rf the fixtures")));
+        assert!(
+            events(&h.store, h.run_id, "messages_delivered")
+                .await
+                .is_empty()
+        );
+        // Once the run has ended, a late steer is a clear refusal, no panic.
+        let late = h
+            .engine
+            .steer(h.run_id, "again".into(), h.ana.clone())
+            .await;
+        assert!(matches!(late, Err(Error::InvalidInput(_))), "{late:?}");
+    }
+
+    /// Case 7: the same chat reply delivered three times queues one message
+    /// and says `STEER_QUEUED` once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_a_redelivered_chat_reply_says_steer_queued_once() {
+        let h = owners_run_held(BYPASS).await;
+        let reply = chat_reply(h.run_id, "ana@sun.test", "3.3");
+        let handled = [
+            h.engine.steer_from_chat(&reply).await.unwrap(),
+            h.engine.steer_from_chat(&reply).await.unwrap(),
+            h.engine.steer_from_chat(&reply).await.unwrap(),
+        ];
+        assert_eq!(handled, [true, false, false]);
+        assert_eq!(events(&h.store, h.run_id, QUEUED).await.len(), 1);
+        h.release();
+        let (_, _, thread) = h.end().await;
+        assert_eq!(thread, [STEER_QUEUED.to_owned(), capped_line("ana")]);
+    }
+
+    /// Case 7: the refusal line names the member and the mode, and carries
+    /// no path, env value, email, session id or token.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn qa_the_refusal_line_leaks_nothing() {
+        let h = owners_run_held(BYPASS).await;
+        *h.local.offered.lock().unwrap() = Some(vec!["bypass_permissions".into()]);
+        h.steer_by_ana(SteerPath::Rest, "use tabs").await;
+        h.release();
+        let run = until_run_ends(&h.store, h.run_id).await;
+        assert_eq!(run.status, RunStatus::Failed);
+        let (thread, _) = thread_and_audit(&h.store, h.run_id).await;
+        let refused = thread.last().unwrap();
+        assert!(refused.starts_with("The capped session for ana was refused"));
+        let sessions = events(&h.store, h.run_id, SESSION_ASSIGNED).await;
+        let mut secrets = vec![
+            h._dir.path().display().to_string(),
+            "ana@sun.test".to_owned(),
+            "token".to_owned(),
+            "SUN_".to_owned(),
+            "=".to_owned(),
+        ];
+        for s in &sessions {
+            secrets.push(s["session_id"].as_str().unwrap().to_owned());
+        }
+        secrets.push(h.run_id.to_string());
+        for line in [refused.as_str(), STEER_QUEUED, ANSWER_REFUSED] {
+            for secret in &secrets {
+                assert!(!line.contains(secret.as_str()), "`{secret}` in {line}");
+            }
+            assert!(!line.contains('/'), "a path in {line}");
+        }
+    }
+
+    /// Case 7: the refusal line blames the cap only when the host refused
+    /// the capped mode. A capped session refused for another reason (here a
+    /// secret withheld from a marketplace runtime, `with_byo_key`) is told
+    /// to the owner as "enable bypass permissions for ana", which would not
+    /// help.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "BLO-172 follow-up: bypass::refused blames the cap for any Forbidden start of a capped step"]
+    async fn qa_a_capped_session_refused_for_another_reason_does_not_blame_the_cap() {
+        let h = owners_run_held(BYPASS).await;
+        *h.local.refusal.lock().unwrap() = Some(
+            "the secret `OR_KEY` is withheld from the marketplace runtime; \
+             allow it when renting, or use a runtime that needs no key"
+                .into(),
+        );
+        h.steer_by_ana(SteerPath::Rest, "use tabs").await;
+        h.release();
+        let run = until_run_ends(&h.store, h.run_id).await;
+        assert_eq!(run.status, RunStatus::Failed);
+        let (thread, _) = thread_and_audit(&h.store, h.run_id).await;
+        assert!(
+            thread
+                .iter()
+                .all(|t| !t.contains("enable bypass permissions")),
+            "{thread:?}"
+        );
+    }
 }

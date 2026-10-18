@@ -1958,3 +1958,71 @@ async fn failover_skips_an_entry_whose_tool_does_not_offer_the_steps_mode() {
          it offers default, accept_edits, plan, bypass_permissions"
     );
 }
+
+// ------------------------------------------------ BLO-176 QA pass (BLO-172)
+
+/// Case 6: member `ana` steers the owner's live bypass session (policy
+/// `off`, so she is capped), and that session then hits its limit and fails
+/// over. Her steer was queued, not sent; the hand-off session runs capped
+/// and gets her message, exactly once.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "BLO-172 follow-up: a hand-off session never takes queued messages, so a capped steer queued during a session that fails over is never delivered"]
+async fn qa_a_capped_steer_before_a_failover_reaches_the_hand_off_session_once() {
+    let late_limit = r#"{"delay_ms":1500,"kind":"limit_hit","limit":"quota","reset_at":null,"reset_in_ms":3600000,"raw":"usage limit reached"}"#;
+    let h = Harness::with(
+        "switch",
+        &[
+            ("fake-limit", vec![script(&[TALK, EDIT, late_limit, EXIT])]),
+            ("fake-ok", vec![script(&[TALK, DONE, EXIT])]),
+        ],
+        Setup {
+            step_mode: "bypass_permissions",
+            exec_env: "{ kind: container, image: 'node:22' }",
+            ..Setup::default()
+        },
+    )
+    .await;
+    let mut tx = h.store.begin().await.unwrap();
+    let ana = tx
+        .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let ana = sun_engine::Actor {
+        member_id: Some(ana.id),
+        name: "user:ana".into(),
+    };
+    first_event(&h, "text").await;
+    let event = h
+        .engine
+        .steer(h.run_id, "rm -rf the fixtures".into(), ana)
+        .await
+        .unwrap();
+    assert_eq!(
+        event.kind, "message_queued",
+        "it reached the bypass session"
+    );
+
+    let run = h.wait_for(|s| s.is_terminal()).await;
+    assert_eq!(run.status, RunStatus::Succeeded, "{:?}", run.end_reason);
+    assert_eq!(h.adapters(), ["fake-limit", "fake-ok"]);
+    let modes = h.host.modes.lock().unwrap().clone();
+    assert_eq!(
+        modes,
+        [
+            Some("bypass_permissions".to_owned()),
+            Some("accept_edits".to_owned())
+        ],
+        "the hand-off session runs capped"
+    );
+    let events = h.events().await;
+    assert!(events.iter().all(|e| e.kind != "intervention"));
+    let starts = h.host.starts.lock().unwrap().clone();
+    assert!(!starts[0].1.contains("rm -rf the fixtures"));
+    assert_eq!(
+        starts[1].1.matches("rm -rf the fixtures").count(),
+        1,
+        "the hand-off session got the capped steer once: {}",
+        starts[1].1
+    );
+}

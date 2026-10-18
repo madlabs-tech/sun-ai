@@ -42,6 +42,10 @@ pub(crate) struct LocalHost {
     /// While set, the only modes the CLI offers: a session in another is
     /// refused, like a real host does (BLO-168).
     pub(crate) offered: Mutex<Option<Vec<String>>>,
+    /// While set, every session start is refused with this reason.
+    pub(crate) refusal: Mutex<Option<String>>,
+    /// The text of every steer a live session got, in order (its stdin).
+    pub(crate) steers: Mutex<Vec<String>>,
     /// Tasks whose worktrees were removed (recorded only).
     pub(crate) removed: Mutex<Vec<TaskId>>,
     /// While set, a started session says one line and waits before claiming
@@ -65,6 +69,8 @@ impl LocalHost {
             envelopes: Mutex::default(),
             modes: Mutex::default(),
             offered: Mutex::default(),
+            steers: Mutex::default(),
+            refusal: Mutex::default(),
             removed: Mutex::default(),
             hold: Arc::default(),
             passes: Arc::default(),
@@ -116,6 +122,9 @@ fn sh_env(
 #[async_trait]
 impl HostLink for LocalHost {
     async fn start_session(&self, _: HostId, _: &str, spec: SessionSpec) -> Result<SessionHandle> {
+        if let Some(why) = self.refusal.lock().unwrap().clone() {
+            return Err(sun_core::Error::Forbidden(why));
+        }
         let mode = spec.permission_mode.clone().unwrap_or_default();
         if let Some(offered) = self.offered.lock().unwrap().as_ref()
             && !offered.contains(&mode)
@@ -173,7 +182,8 @@ impl HostLink for LocalHost {
         })
     }
 
-    async fn steer(&self, _: &SessionHandle, _: Steer) -> Result<()> {
+    async fn steer(&self, _: &SessionHandle, steer: Steer) -> Result<()> {
+        self.steers.lock().unwrap().push(steer.text);
         Ok(())
     }
 
