@@ -220,13 +220,23 @@ pub trait RunRepo {
     /// previous status. Sets `started_at` on the first move to `running` and
     /// `ended_at` on a terminal status.
     async fn set_step_status(&mut self, id: StepId, next: StepStatus) -> Result<StepStatus>;
-    /// Records the runtime and session an agent step was dispatched to.
+    /// Records the session an agent step was dispatched to and what pays
+    /// for it: the tool row of a CLI's own login, or a credential.
     async fn assign_step_session(
         &mut self,
         id: StepId,
-        runtime_id: RuntimeId,
+        paid_by: StepPayer,
         session_id: SessionId,
     ) -> Result<()>;
+}
+
+/// What pays for an agent step's session ([`RunRepo::assign_step_session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepPayer {
+    /// The CLI's own login: the tool's `runtime` row.
+    Login(RuntimeId),
+    /// A workspace credential.
+    Credential(sun_core::CredentialId),
 }
 
 /// An event to append; the store assigns `seq`.
@@ -729,8 +739,8 @@ impl TaskRepo for Tx {
 
 const RUN_COLUMNS: &str =
     "id, task_id, workflow_id, workflow_version, status, end_reason, budget_json, repo_ids_json";
-const STEP_COLUMNS: &str =
-    "id, run_id, step_key, attempt, status, runtime_id, session_id, started_at, ended_at";
+const STEP_COLUMNS: &str = "id, run_id, step_key, attempt, status, runtime_id, credential_id, \
+     session_id, started_at, ended_at";
 
 #[async_trait]
 impl RunRepo for Tx {
@@ -828,7 +838,7 @@ impl RunRepo for Tx {
 
     async fn insert_step(&mut self, step: &Step) -> Result<()> {
         sqlx::query(&format!(
-            "INSERT INTO step ({STEP_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+            "INSERT INTO step ({STEP_COLUMNS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
         ))
         .bind(step.id.to_string())
         .bind(step.run_id.to_string())
@@ -836,6 +846,7 @@ impl RunRepo for Tx {
         .bind(i64::from(step.attempt))
         .bind(step.status.as_str())
         .bind(step.runtime_id.map(|id| id.to_string()))
+        .bind(step.credential_id.map(|id| id.to_string()))
         .bind(step.session_id.map(|id| id.to_string()))
         .bind(step.started_at.as_ref().map(ts))
         .bind(step.ended_at.as_ref().map(ts))
@@ -886,15 +897,22 @@ impl RunRepo for Tx {
     async fn assign_step_session(
         &mut self,
         id: StepId,
-        runtime_id: RuntimeId,
+        paid_by: StepPayer,
         session_id: SessionId,
     ) -> Result<()> {
-        let done = sqlx::query("UPDATE step SET runtime_id = $1, session_id = $2 WHERE id = $3")
-            .bind(runtime_id.to_string())
-            .bind(session_id.to_string())
-            .bind(id.to_string())
-            .execute(self.conn())
-            .await?;
+        let (runtime_id, credential_id) = match paid_by {
+            StepPayer::Login(id) => (Some(id.to_string()), None),
+            StepPayer::Credential(id) => (None, Some(id.to_string())),
+        };
+        let done = sqlx::query(
+            "UPDATE step SET runtime_id = $1, credential_id = $2, session_id = $3 WHERE id = $4",
+        )
+        .bind(runtime_id)
+        .bind(credential_id)
+        .bind(session_id.to_string())
+        .bind(id.to_string())
+        .execute(self.conn())
+        .await?;
         if done.rows_affected() == 0 {
             return Err(StoreError::not_found("step", id));
         }
@@ -1304,6 +1322,7 @@ fn step_from(row: &SqliteRow) -> Result<Step> {
         attempt: u32_at(row, "attempt")?,
         status: parse(row.try_get("status")?)?,
         runtime_id: parse_opt(row.try_get("runtime_id")?)?,
+        credential_id: parse_opt(row.try_get("credential_id")?)?,
         session_id: parse_opt(row.try_get("session_id")?)?,
         started_at: parse_ts_opt(row.try_get("started_at")?)?,
         ended_at: parse_ts_opt(row.try_get("ended_at")?)?,

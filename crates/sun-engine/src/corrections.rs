@@ -21,7 +21,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use sun_core::model::{AuditAction, Correction, CorrectionCause, CorrectionKind, Step};
 use sun_core::{CorrectionId, Error, Result, RunId, StepKey, StepStatus, TaskId};
-use sun_store::{AuditRepo, CorrectionRepo, EventLog, RunRepo, RuntimeRepo, SettingRepo, Tx};
+use sun_store::{AuditRepo, CorrectionRepo, EventLog, RunRepo, SettingRepo, Tx};
 use sun_workflow::{QuestionKind, StepKind};
 use tokio::sync::oneshot;
 
@@ -212,10 +212,12 @@ pub(crate) async fn record(
         .steps_of_run(run_id)
         .await?
         .into_iter()
-        .filter_map(|s| Some((s.started_at, s.runtime_id?)))
-        .max_by_key(|(at, _)| *at);
+        .filter(|s| s.runtime_id.is_some() || s.credential_id.is_some())
+        .max_by_key(|s| s.started_at);
     let runtime = match agent {
-        Some((_, id)) => Some(tx.get_runtime(id).await?.name),
+        Some(step) => crate::executor::ran_on(tx, &step)
+            .await?
+            .map(|(name, _)| name),
         None => None,
     };
     let body: String = body.trim().chars().take(MAX_BODY).collect();

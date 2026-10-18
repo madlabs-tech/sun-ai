@@ -1,4 +1,4 @@
-//! Sun Cloud kernel side: `credits` runtimes get a per-session gateway key
+//! Sun Cloud kernel side: sessions paid by a `credits` credential get a per-session gateway key
 //! from a mocked control plane, injected into the session env, and revoked
 //! when the session exits or fails to start. Other runtimes pass through.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -13,13 +13,16 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use futures_util::StreamExt;
 use sun_cli::cloud::{CreditsLink, SessionKeys};
-use sun_core::model::{Budget, Host, Run, RuntimeSource, Step, Task, Workflow};
+use sun_core::model::{Budget, Credential, Host, Run, RuntimeSource, Step, Task, Workflow};
 use sun_core::{
     BoxStream, Error, HostEvent, HostId, HostLink, Result, RunId, RunStatus, SessionHandle,
     SessionId, SessionSpec, Steer, StepId, StepKey, StepStatus, StopMode, SunEvent, TaskStatus,
     WorkflowId,
 };
-use sun_store::{HostRepo, RunRepo, RuntimeRepo, SessionRepo, Store, TaskRepo, WorkflowRepo};
+use sun_store::{
+    CredentialRepo, HostRepo, RunRepo, RuntimeRepo, SessionRepo, StepPayer, Store, TaskRepo,
+    WorkflowRepo,
+};
 
 type Calls = Arc<Mutex<Vec<(String, String, String)>>>;
 
@@ -166,16 +169,24 @@ async fn assigned(store: &Store, run_id: RunId, attempt: u32, name: &str) -> Ses
         attempt,
         status: StepStatus::Queued,
         runtime_id: None,
+        credential_id: None,
         session_id: None,
         started_at: None,
         ended_at: None,
     };
     let mut tx = store.begin().await.unwrap();
-    let runtime = tx
-        .runtime_by_name(sun_core::WorkspaceId::MAIN, name)
-        .await
-        .unwrap()
-        .unwrap();
+    // What the engine records: a credential, else the tool's login row.
+    let workspace = sun_core::WorkspaceId::MAIN;
+    let paid_by = match tx.credential_by_name(workspace, name).await.unwrap() {
+        Some(credential) => StepPayer::Credential(credential.id),
+        None => StepPayer::Login(
+            tx.runtime_by_name(workspace, name)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+        ),
+    };
     tx.insert_step(&step).await.unwrap();
     let host = Host {
         id: HostId::generate(),
@@ -185,7 +196,7 @@ async fn assigned(store: &Store, run_id: RunId, attempt: u32, name: &str) -> Ses
     };
     tx.insert_host(&host).await.unwrap();
     tx.insert_session(spec.session_id, host.id).await.unwrap();
-    tx.assign_step_session(step.id, runtime.id, spec.session_id)
+    tx.assign_step_session(step.id, paid_by, spec.session_id)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -207,16 +218,30 @@ async fn credits_sessions_get_a_gateway_key_revoked_on_exit() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
     let mut tx = store.begin().await.unwrap();
-    for (name, adapter, source) in [
-        ("claude-credits", "claude-code", RuntimeSource::Credits),
-        ("codex-credits", "codex", RuntimeSource::Credits),
-        ("opencode-credits", "opencode", RuntimeSource::Credits),
-        ("claude-code", "claude-code", RuntimeSource::ByoRuntime),
+    for (name, tool) in [
+        ("claude-credits", "claude-code"),
+        ("codex-credits", "codex"),
+        ("opencode-credits", "opencode"),
     ] {
-        tx.upsert_runtime(sun_core::WorkspaceId::MAIN, name, adapter, source)
-            .await
-            .unwrap();
+        let credits = Credential {
+            id: sun_core::CredentialId::generate(),
+            workspace_id: sun_core::WorkspaceId::MAIN,
+            name: name.into(),
+            source: RuntimeSource::Credits,
+            default_tool: tool.into(),
+            byo_key: None,
+            created_by: None,
+        };
+        assert!(tx.insert_credential(&credits).await.unwrap());
     }
+    tx.upsert_runtime(
+        sun_core::WorkspaceId::MAIN,
+        "claude-code",
+        "claude-code",
+        RuntimeSource::ByoRuntime,
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let calls = Calls::default();
     let cloud = control_plane(calls.clone()).await;

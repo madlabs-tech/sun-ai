@@ -127,6 +127,7 @@ steps:
             attempt,
             status,
             runtime_id: None,
+            credential_id: None,
             session_id: None,
             started_at: None,
             ended_at: None,

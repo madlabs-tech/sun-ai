@@ -24,10 +24,10 @@ use sun_core::host_protocol::{
     EnrolFailure, ExecOutput, ExecRequest, HOST_PROTOCOL_VERSION, HostFrame, KernelFrame,
     ReplyBody, ScreenshotRequest, SessionFile, SessionStats, Worktree,
 };
-use sun_core::model::{Runtime, RuntimeSource};
+use sun_core::model::{Credential, RuntimeSource};
 use sun_core::{
-    BoxStream, ByoKey, Error, HostEvent, HostId, HostLink, MemberId, Readiness, Result, RunId,
-    RuntimeId, SessionHandle, SessionId, SessionSpec, Steer, StepKey, StopMode, TaskId, Timestamp,
+    BoxStream, Error, HostEvent, HostId, HostLink, MemberId, Readiness, Result, RunId,
+    SessionHandle, SessionId, SessionSpec, Steer, StepKey, StopMode, TaskId, Timestamp,
     WorkspaceId,
 };
 use sun_engine::OnWorkspace;
@@ -1132,24 +1132,20 @@ pub(crate) async fn online_adapters(
     Ok(seen)
 }
 
-/// Query of `GET /runtimes`: `?workspace=` and `?model=v1|v2` (the response
-/// shape, default `v2`).
+/// Query of `GET /runtimes`: `?workspace=` and `?model=v2` (the response
+/// shape; the legacy `v1` shape is gone).
 #[derive(serde::Deserialize)]
 pub(crate) struct RuntimesQuery {
     workspace: Option<String>,
     model: Option<String>,
 }
 
-/// `GET /api/v1/runtimes?workspace=[&model=v1]`: one entry per `(host,
-/// tool)` with an honest `state` ([`crate::runtime_list`]). Only a
-/// deployment owner may leave out `?workspace=` (every workspace's rows).
-///
-/// - `sun.yaml` `runtimes.model` = data **source** (`v1` capabilities_json,
-///   `v2` host_runtime) for placement and for the §6 list alike.
-/// - `?model=v1` = **legacy response shape** only, deprecated, removed
-///   together with the deprecated aliases one release later. Default (no
-///   flag) returns the §6 per-`(host, tool)` shape, so the page works out of
-///   the box under either yaml value.
+/// `GET /api/v1/runtimes?workspace=`: one entry per `(host, tool)` with an
+/// honest `state` ([`crate::runtime_list`]). Only a deployment owner may
+/// leave out `?workspace=` (every workspace's rows). Who pays is not a
+/// runtime: see `GET /credentials`. `sun.yaml` `runtimes.model` picks the
+/// data source (`v1` capabilities_json, `v2` host_runtime). `?model=v1`,
+/// the legacy response shape, is `410`.
 pub(crate) async fn list_runtimes(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,
@@ -1158,251 +1154,105 @@ pub(crate) async fn list_runtimes(
     let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
     match query.model.as_deref() {
         None | Some("v2") => Ok(Json(crate::runtime_list::list(&api, workspace).await?)),
-        Some("v1") => legacy_runtimes(&api, workspace).await.map(Json),
-        Some(_) => Err(ApiError::invalid("model: v1 or v2.")),
+        Some("v1") => Err(ApiError::new(
+            StatusCode::GONE,
+            "gone",
+            "The v1 runtime list is gone. Read runtimes per host from this list without \
+             `model`, and keys from GET /credentials.",
+        )),
+        Some(_) => Err(ApiError::invalid("model: v2.")),
     }
 }
 
-/// The `v1` list: one entry per adapter any host reported (`ready` when an
-/// online host has it installed and logged in, `workspace_id` null: every
-/// workspace's chains may name it), then the workspace's stored `byo_key`
-/// runtimes with their `config` and `credits` runtimes with their `model`
-/// (`ready` per [`readiness`]).
-// ponytail: deprecated with `?model=v1`; delete one release after v2.
-async fn legacy_runtimes(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult<Vec<Value>> {
-    let online = online_adapters(api, workspace).await?;
-    let view = |name: &str, adapter: &str, source: &str, ready: bool, config: Option<&ByoKey>| {
-        json!({
-            "model": null, "workspace_id": null,
-            "id": name, "name": name, "adapter": adapter, "source": source,
-            "status": if ready { "ready" } else { "offline" },
-            "cooldown_until": null, "sessions": 0, "max_sessions": 0,
-            // The old shape: always the host's default since item 14.
-            "permission_mode": null,
-            "allow_bypass": api.allow_bypass,
-            "config": config,
-        })
-    };
-    let mut views: Vec<Value> = online
-        .iter()
-        .map(|(adapter, (_, ok))| view(adapter, adapter, "byo_runtime", *ok, None))
-        .collect();
-    for runtime in api.engine.runtimes(workspace).await? {
-        if runtime.source == RuntimeSource::ByoRuntime {
-            continue;
-        }
-        let ready = runtime_readiness(api, &runtime, &online).await?;
-        let ok = ready.installed && ready.logged_in;
-        let source = runtime.source.as_str();
-        let config = runtime.byo_key.as_ref();
-        let mut entry = view(&runtime.name, &runtime.adapter, source, ok, config);
-        entry["workspace_id"] = json!(runtime.workspace_id);
-        if runtime.source == RuntimeSource::Credits {
-            entry["model"] = json!(api.engine.credits_model(runtime.id).await?);
-        }
-        views.push(entry);
-    }
-    Ok(views)
+/// `POST /api/v1/runtimes` and `PUT /api/v1/runtimes/{id}`: `410`. Keys and
+/// credits are credentials now (TRD BLO-117 item 7); a host reports its
+/// runtimes on its own.
+pub(crate) async fn runtime_write_gone() -> ApiResult<()> {
+    Err(ApiError::new(
+        StatusCode::GONE,
+        "gone",
+        "Runtimes can't be added or edited any more: a host reports its CLIs on its own. Add \
+         an API key or credits with POST /credentials.",
+    ))
 }
 
-/// Body of `POST /runtimes` and `PUT /runtimes/{id}`. `config` is
-/// `{endpoint, model, key_secret}` (`byo_key`); a raw key is refused
-/// (unknown field). `model` is the gateway model of a `credits` OpenCode
-/// runtime.
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct RuntimeInput {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    adapter: Option<String>,
-    source: RuntimeSource,
-    #[serde(default)]
-    config: Option<ByoKey>,
-    #[serde(default)]
-    model: Option<String>,
-}
-
-/// The deployment sells Sun credits. Off for the MVP: no new `credits`
-/// runtime is accepted, even with Sun Cloud connected.
-// ponytail: a constant until credits are sold; then the `sun_cloud` gate alone.
-const CREDITS_ON_SALE: bool = false;
-
-/// A configured runtime of `caller`'s for `workspace` from `input`, checked
-/// by [`Runtime::validate`]. The 422 message starts with the field to fix
-/// (`name: `, `endpoint: `, ...).
-fn runtime_of(
-    api: &Api,
-    caller: &auth::Caller,
-    workspace: WorkspaceId,
-    name: String,
-    input: &mut RuntimeInput,
-) -> ApiResult<Runtime> {
-    match input.source {
-        RuntimeSource::ByoKey => {}
-        RuntimeSource::Credits if CREDITS_ON_SALE && api.sun_cloud => {}
-        RuntimeSource::Credits => {
-            return Err(ApiError::invalid(
-                "source: Sun credits are not available on this deployment yet; bring your own \
-                 key or runtime.",
-            ));
-        }
-        RuntimeSource::ByoRuntime => {
-            return Err(ApiError::invalid(
-                "source: BYO runtimes appear when a host reports the CLI.",
-            ));
-        }
-    }
-    let runtime = Runtime {
-        id: RuntimeId::generate(),
-        workspace_id: workspace,
-        name,
-        adapter: input.adapter.take().unwrap_or_else(|| "opencode".into()),
-        source: input.source,
-        byo_key: input.config.take(),
-        created_by: caller.member_id,
-    };
-    match runtime.validate() {
-        Ok(()) => Ok(runtime),
-        Err(sun_core::Error::InvalidInput(why)) => Err(ApiError::invalid(why)),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// `POST /api/v1/runtimes?workspace=` (`manage_runtimes` there): adds a
-/// `byo_key` runtime to the workspace, or with Sun Cloud connected a
-/// `credits` one; `409` when the workspace has the name. Audited.
-pub(crate) async fn create_runtime(
-    State(api): State<Api>,
-    axum::Extension(caller): axum::Extension<auth::Caller>,
-    axum::extract::Query(query): axum::extract::Query<InWorkspace>,
-    crate::routes::Body(mut input): crate::routes::Body<RuntimeInput>,
-) -> ApiResult<Json<Value>> {
-    let workspace = named_workspace(&caller, query.workspace.as_deref())?;
-    let name = std::mem::take(&mut input.name);
-    let runtime = runtime_of(&api, &caller, workspace, name, &mut input)?;
-    let plan = api.entitlements.for_workspace(workspace).await;
-    if !api
-        .engine
-        .save_runtime(
-            &runtime,
-            input.model.as_deref(),
-            false,
-            &caller.actor(),
-            &plan,
-        )
-        .await?
-    {
-        return Err(ApiError::conflict(format!(
-            "name: a runtime named `{}` already exists.",
-            runtime.name
-        )));
-    }
-    Ok(Json(saved_view(&runtime, input.model.as_deref())))
-}
-
-/// What `POST`/`PUT /runtimes` answer: the stored fields of a `GET` entry.
-fn saved_view(r: &Runtime, model: Option<&str>) -> Value {
-    let model = model.map(str::trim).filter(|m| !m.is_empty());
-    json!({
-        "id": r.name, "name": r.name, "workspace_id": r.workspace_id, "adapter": r.adapter,
-        "source": r.source, "config": r.byo_key, "model": model,
-    })
-}
-
-/// `PUT /api/v1/runtimes/{id}?workspace=` (`manage_runtimes` there, `id` =
-/// the runtime's name): replaces its source config. Audited.
-pub(crate) async fn update_runtime(
-    State(api): State<Api>,
-    axum::Extension(caller): axum::Extension<auth::Caller>,
-    axum::extract::Path(name): axum::extract::Path<String>,
-    axum::extract::Query(query): axum::extract::Query<InWorkspace>,
-    crate::routes::Body(mut input): crate::routes::Body<RuntimeInput>,
-) -> ApiResult<Json<Value>> {
-    if !input.name.is_empty() && input.name != name {
-        return Err(ApiError::invalid("name: a runtime can't be renamed."));
-    }
-    let workspace = named_workspace(&caller, query.workspace.as_deref())?;
-    let runtime = runtime_of(&api, &caller, workspace, name, &mut input)?;
-    let plan = api.entitlements.for_workspace(workspace).await;
-    if !api
-        .engine
-        .save_runtime(
-            &runtime,
-            input.model.as_deref(),
-            true,
-            &caller.actor(),
-            &plan,
-        )
-        .await?
-    {
-        return Err(sun_core::Error::NotFound(format!("runtime {}", runtime.name)).into());
-    }
-    Ok(Json(saved_view(&runtime, input.model.as_deref())))
-}
-
-/// `GET /api/v1/runtimes/{id}/readiness?workspace=` (`id` = a runtime's
-/// name in that workspace): see [`runtime_readiness`].
+/// `GET /api/v1/runtimes/{id}/readiness?workspace=` (`id` = a tool, e.g.
+/// `claude-code`): see [`tool_readiness`]. A credential's readiness is in
+/// `GET /credentials`.
 pub(crate) async fn readiness(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,
-    axum::extract::Path(name): axum::extract::Path<String>,
+    axum::extract::Path(tool): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<InWorkspace>,
 ) -> ApiResult<Json<Readiness>> {
     let workspace = named_workspace(&caller, query.workspace.as_deref())?;
     let online = online_adapters(&api, Some(workspace)).await?;
-    Ok(Json(readiness_of(&api, workspace, name, &online).await?))
+    match online.contains_key(&tool) {
+        true => Ok(Json(tool_readiness(&tool, &online))),
+        false => Err(Error::NotFound(format!("runtime {tool}")).into()),
+    }
 }
 
-/// The readiness of `workspace`'s runtime named `name` (see
-/// [`runtime_readiness`]); `NotFound` for a name no row or host knows.
+/// The readiness of chain name `name` in `workspace`: the workspace's
+/// credential of that name ([`credential_readiness`]), else the tool
+/// ([`tool_readiness`]); `NotFound` for a name no credential or online
+/// host knows.
 pub(crate) async fn readiness_of(
     api: &Api,
     workspace: WorkspaceId,
     name: String,
     online: &BTreeMap<String, (bool, bool)>,
 ) -> ApiResult<Readiness> {
-    let runtime = match api.engine.runtime(workspace, &name).await {
-        Ok(runtime) => runtime,
-        // A runtime only known from host capabilities (byo_runtime).
-        Err(sun_core::Error::NotFound(_)) if online.contains_key(&name) => Runtime {
-            id: RuntimeId::generate(),
-            workspace_id: workspace,
-            name: name.clone(),
-            adapter: name,
-            source: RuntimeSource::ByoRuntime,
-            byo_key: None,
-            created_by: None,
-        },
-        Err(e) => return Err(e.into()),
-    };
-    runtime_readiness(api, &runtime, online).await
+    match api.engine.credential(workspace, &name).await {
+        Ok(credential) => credential_readiness(api, &credential, online).await,
+        Err(sun_core::Error::NotFound(_)) if online.contains_key(&name) => {
+            Ok(tool_readiness(&name, online))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
-/// What the kernel can check without starting a session: `installed` = an
-/// online host reports the adapter installed; `logged_in` = the host says it
-/// is logged in (byo_runtime), or the config is valid and its key secret is
-/// stored (byo_key; the endpoint itself is not called). `detail` says what
-/// to fix.
-pub(crate) async fn runtime_readiness(
+/// A tool on the CLI's own login: `installed` = an online host reports it
+/// installed; `logged_in` = such a host says it is logged in. `detail` says
+/// what to fix.
+pub(crate) fn tool_readiness(tool: &str, online: &BTreeMap<String, (bool, bool)>) -> Readiness {
+    let (installed, logged_in) = online.get(tool).copied().unwrap_or_default();
+    let detail = match (installed, logged_in) {
+        (false, _) => Some(format!("no online host has {tool} installed")),
+        (true, false) => Some(format!("log in to {tool} on a host")),
+        (true, true) => None,
+    };
+    Readiness {
+        installed,
+        version: None,
+        logged_in,
+        detail,
+    }
+}
+
+/// What the kernel can check of a credential without starting a session:
+/// `installed` = an online host has its tool installed; `logged_in` = its
+/// settings are valid and its key secret is stored (`byo_key`; the
+/// endpoint itself is not called), or Sun Cloud is connected (`credits`).
+/// `detail` says what to fix.
+pub(crate) async fn credential_readiness(
     api: &Api,
-    runtime: &Runtime,
+    credential: &Credential,
     online: &BTreeMap<String, (bool, bool)>,
 ) -> ApiResult<Readiness> {
-    let (installed, host_logged_in) = online.get(&runtime.adapter).copied().unwrap_or_default();
-    let problem = match runtime.source {
-        RuntimeSource::ByoKey => api.engine.runtime_problem(runtime).await?,
-        // The gateway key replaces the CLI's own login.
-        RuntimeSource::Credits if api.sun_cloud => None,
-        RuntimeSource::Credits => {
+    let tool = &credential.default_tool;
+    let (installed, _) = online.get(tool).copied().unwrap_or_default();
+    let problem = match credential.source {
+        RuntimeSource::Credits if !api.sun_cloud => {
             Some("Sun credits are not available on this deployment yet".into())
         }
-        _ if host_logged_in => None,
-        _ => Some(format!("log in to {} on a host", runtime.adapter)),
+        // The gateway key replaces the CLI's own login.
+        RuntimeSource::Credits => None,
+        _ => api.engine.credential_problem(credential).await?,
     };
     let detail = match (&problem, installed) {
         (Some(why), _) => Some(why.clone()),
-        (None, false) => Some(format!("no online host has {} installed", runtime.adapter)),
+        (None, false) => Some(format!("no online host has {tool} installed")),
         (None, true) => None,
     };
     Ok(Readiness {

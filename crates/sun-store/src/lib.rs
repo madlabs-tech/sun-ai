@@ -102,6 +102,7 @@ mod agent;
 mod artifact;
 mod blob;
 mod correction;
+mod credential;
 mod error;
 mod eval;
 mod event_query;
@@ -139,6 +140,7 @@ pub use agent::AgentRepo;
 pub use artifact::{ArtifactRepo, RepoRepo};
 pub use blob::BlobStore;
 pub use correction::CorrectionRepo;
+pub use credential::CredentialRepo;
 pub use error::{Result, StoreError};
 pub use eval::EvalRepo;
 pub use event_query::{COMPACTED, EventQuery, KEPT_KINDS};
@@ -161,7 +163,8 @@ pub use pull_request::PullRequestRepo;
 pub use quality::QualityRepo;
 use repo::Channels;
 pub use repo::{
-    ContextRepo, EventLog, NewEvent, OutboxRepo, RunRepo, TaskRepo, Tx, Usage, WorkflowRepo,
+    ContextRepo, EventLog, NewEvent, OutboxRepo, RunRepo, StepPayer, TaskRepo, Tx, Usage,
+    WorkflowRepo,
 };
 pub use secret::{MASTER_KEY_ENV, MASTER_KEY_FILE, MAX_SECRET_BYTES, MasterKey, SecretRepo};
 pub use session::{RuntimeRepo, SessionRepo};

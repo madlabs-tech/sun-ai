@@ -191,7 +191,7 @@ async fn roles_each_write_in_a_workspace_needs_its_role_there() {
                 Some(json!({ "role": "viewer" })),
                 ADMIN,
             ),
-            // Agents, runtimes, hosts.
+            // Agents, credentials, hosts.
             (
                 "POST",
                 format!("/api/v1/agents?workspace={w}"),
@@ -206,10 +206,10 @@ async fn roles_each_write_in_a_workspace_needs_its_role_there() {
             ),
             (
                 "POST",
-                format!("/api/v1/runtimes?workspace={w}"),
+                format!("/api/v1/credentials?workspace={w}"),
                 Some(json!({ "name": name,
-                "source": "byo_key", "config": { "endpoint": "http://localhost:11434/v1",
-                "model": "qwen" } })),
+                "source": "byo_key", "endpoint": "http://localhost:11434/v1",
+                "default_model": "qwen" })),
                 ADMIN,
             ),
             ("POST", format!("{ws}/hosts/tokens"), None, ADMIN),

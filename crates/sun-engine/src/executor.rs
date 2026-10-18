@@ -54,9 +54,9 @@ use sun_core::{
     StepBrief, StepId, StepKey, StepStatus, StopMode, SunEvent, TaskId, WorkflowId,
 };
 use sun_store::{
-    AgentRepo, ArtifactRepo, AuditRepo, ContextRepo, EventLog, HostRepo, NewEvent, NoteRepo,
-    OutboxRepo, RepoRepo, RunRepo, RuntimeRepo, SecretRepo, SessionRepo, SettingRepo, Store,
-    TaskRepo, Tx, WorkflowRepo, WorkspaceRepo,
+    AgentRepo, ArtifactRepo, AuditRepo, ContextRepo, CredentialRepo, EventLog, HostRepo, NewEvent,
+    NoteRepo, OutboxRepo, RepoRepo, RunRepo, RuntimeRepo, SecretRepo, SessionRepo, SettingRepo,
+    StepPayer, Store, TaskRepo, Tx, WorkflowRepo, WorkspaceRepo,
 };
 use sun_workflow::{Step as StepDef, StepKind, Workflow};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -212,6 +212,22 @@ pub(crate) async fn runtime_rows(tx: &mut Tx) -> Result<Option<Vec<HostRuntime>>
         Some(model) if model == "v2" => Some(tx.host_runtimes(None).await?),
         _ => None,
     })
+}
+
+/// The chain name and tool of what `step`'s latest session ran on: its
+/// credential, else the tool row of the CLI login; `None` before one.
+pub(crate) async fn ran_on(tx: &mut Tx, step: &Step) -> Result<Option<(String, String)>> {
+    if let Some(id) = step.credential_id {
+        let credential = tx.get_credential(id).await?;
+        return Ok(Some((credential.name, credential.default_tool)));
+    }
+    match step.runtime_id {
+        Some(id) => {
+            let runtime = tx.get_runtime(id).await?;
+            Ok(Some((runtime.name, runtime.adapter)))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Setting: worktree removals still to do ([`Removal`]), so a restart
@@ -510,7 +526,7 @@ struct Start {
     resume: Option<dispatch::Resume>,
     /// Where the session runs: the task's override, else the workflow's.
     exec_env: ExecEnvSpec,
-    /// The runtime row's `byo_key` source (`None` for other sources).
+    /// The credential's key settings (`None` unless it is `byo_key`).
     byo_key: Option<sun_core::ByoKey>,
     /// The chain entry's model, if it sets one.
     model: Option<String>,
@@ -1707,6 +1723,7 @@ impl Executor {
                 attempt: 1,
                 status: StepStatus::Queued,
                 runtime_id: None,
+                credential_id: None,
                 session_id: None,
                 started_at: None,
                 ended_at: None,
@@ -2162,8 +2179,9 @@ impl Executor {
 
     /// Picks a new session id of runtime `adapter` for a `dispatched` step,
     /// journals it, and schedules the host call for after commit.
-    /// `runtime` is a chain name; its `runtime` row (created with
-    /// `adapter = name` when missing) says which adapter the host runs.
+    /// `runtime` is a chain name: the workspace's credential of that name
+    /// (it runs on the credential's tool), else a tool on the CLI's own login
+    /// (its `runtime` row is created with `adapter = name` when missing).
     async fn assign_session(
         &mut self,
         tx: &mut Tx,
@@ -2192,15 +2210,27 @@ impl Executor {
         let session_id = SessionId::generate();
         // A chain name means the task's workspace's runtime of that name.
         let workspace = tx.workspace_of_run(step.run_id).await?;
-        let row = tx
-            .upsert_runtime(workspace, runtime, runtime, RuntimeSource::ByoRuntime)
-            .await?;
+        let paid = match tx.credential_by_name(workspace, runtime).await? {
+            Some(c) => (
+                StepPayer::Credential(c.id),
+                c.default_tool,
+                c.source,
+                c.byo_key,
+            ),
+            None => {
+                let row = tx
+                    .upsert_runtime(workspace, runtime, runtime, RuntimeSource::ByoRuntime)
+                    .await?;
+                (StepPayer::Login(row.id), row.adapter, row.source, None)
+            }
+        };
+        let (paid_by, adapter, source, byo_key) = paid;
         tx.insert_session(session_id, self.host(step.run_id))
             .await?;
-        tx.assign_step_session(step.id, row.id, session_id).await?;
+        tx.assign_step_session(step.id, paid_by, session_id).await?;
         let exec_env = self.exec_env(tx, step.run_id).await?;
         let (model, effort, effort_ignored) =
-            self.entry_settings(tx, step, runtime, &row.adapter).await?;
+            self.entry_settings(tx, step, runtime, &adapter).await?;
         let run = tx.get_run(step.run_id).await?;
         let workflow = self.workflow(tx, &run).await?;
         let allow = self.config.allow_bypass;
@@ -2220,9 +2250,9 @@ impl Executor {
                 "session_id": session_id,
                 "adapter": runtime,
                 // Who pays for this session.
-                "source": row.source,
+                "source": source,
                 "exec_env": exec_env,
-                "context_window": self.context_window(&row.adapter),
+                "context_window": self.context_window(&adapter),
                 "rotate_at_percent": self.config.watchdog.rotate_at_percent,
                 "model": model,
                 "effort": effort,
@@ -2241,12 +2271,12 @@ impl Executor {
         effects.push(Effect::Start(Start {
             step: step.clone(),
             session_id,
-            adapter: row.adapter,
+            adapter,
             prompt,
             handoff: handoff.map(Box::new),
             resume,
             exec_env,
-            byo_key: row.byo_key,
+            byo_key,
             model,
             effort,
             permission_mode,

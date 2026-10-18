@@ -708,6 +708,7 @@ mod tests {
             attempt: 1,
             status: StepStatus::Running,
             runtime_id: None,
+            credential_id: None,
             session_id: None,
             started_at: None,
             ended_at: None,

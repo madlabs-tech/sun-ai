@@ -140,11 +140,16 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/agents", get(crate::agents::list))
         .route("/runtimes", get(crate::hosts::list_runtimes))
         .route("/runtimes/{id}/readiness", get(crate::hosts::readiness))
+        .route("/credentials", get(crate::credentials::list))
+        .route("/credentials/{name}", get(crate::credentials::get))
         // Gone for every caller: no owner-only `403` in front of the `410`.
         .route(
             "/runtimes/{id}/policy",
             put(crate::hosts::runtime_policy_gone),
         )
+        // Keys and credits are credentials now (TRD BLO-117 item 7).
+        .route("/runtimes", post(crate::hosts::runtime_write_gone))
+        .route("/runtimes/{id}", put(crate::hosts::runtime_write_gone))
         .route("/memory", get(crate::memory::list))
         .route("/memory/metrics", get(crate::memory::metrics))
         // Its hosts, catalog installs and MCP servers.
@@ -169,8 +174,11 @@ pub(crate) fn router(api: Api) -> Router {
             "/agents/{id}",
             patch(crate::agents::update).delete(crate::agents::archive),
         )
-        .route("/runtimes", post(crate::hosts::create_runtime))
-        .route("/runtimes/{id}", put(crate::hosts::update_runtime))
+        .route("/credentials", post(crate::credentials::create))
+        .route(
+            "/credentials/{name}",
+            put(crate::credentials::update).delete(crate::credentials::remove),
+        )
         .route(
             "/workspaces/{id}/hosts/tokens",
             post(crate::hosts::create_token),
@@ -1631,16 +1639,17 @@ async fn usage_by_runtime(api: &Api) -> ApiResult<Vec<Value>> {
     let since = chrono::Utc::now() - chrono::Duration::hours(QUOTA_WINDOW_HOURS);
     let window = api.engine.usage_by_runtime(Some(since)).await?;
     // ponytail: deployment-wide usage names a runtime by name; a name two
-    // workspaces share shows the first one's source.
-    let runtimes = api.engine.runtimes(None).await?;
+    // workspaces share shows the first one's source. A credential keeps the
+    // name (and id) its runtime row had, so its rows read the same.
+    let credentials = api.engine.credentials(None).await?;
     let rows = api.engine.usage_by_runtime(None).await?;
     Ok(rows
         .into_iter()
         .map(|(runtime, total)| {
-            let source = runtimes
+            let source = credentials
                 .iter()
-                .find(|r| r.name == runtime)
-                .map_or(RuntimeSource::ByoRuntime, |r| r.source);
+                .find(|c| c.name == runtime)
+                .map_or(RuntimeSource::ByoRuntime, |c| c.source);
             let in_window = (source == RuntimeSource::ByoRuntime).then(|| {
                 let used = window
                     .iter()

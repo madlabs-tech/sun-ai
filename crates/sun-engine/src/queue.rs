@@ -68,8 +68,8 @@ use sun_core::{
     TaskId, TaskStatus, Timestamp, WorkspaceId,
 };
 use sun_store::{
-    EventLog, HostRepo, NewEvent, RunRepo, RuntimeRepo, SettingRepo, Store, TaskRepo, Tx,
-    WorkflowRepo,
+    CredentialRepo, EventLog, HostRepo, NewEvent, RunRepo, RuntimeRepo, SettingRepo, Store,
+    TaskRepo, Tx, WorkflowRepo,
 };
 use tokio::sync::Notify;
 use tokio::sync::broadcast::Receiver;
@@ -731,12 +731,12 @@ impl Scheduler {
                 // A `market:` runtime spends the seller's account, not ours.
                 let local = !name.starts_with(crate::market::MARKET_PREFIX);
                 let row = match local {
-                    true => tx.runtime_by_name(w.workspace, name).await?,
+                    true => tx.credential_by_name(w.workspace, name).await?,
                     false => None,
                 };
                 let adapter = row
                     .as_ref()
-                    .map_or(name.as_str(), |row| row.adapter.as_str());
+                    .map_or(name.as_str(), |row| row.default_tool.as_str());
                 // `host:` pins the entry to that host; an `effort:` goes only
                 // to hosts whose catalog lists it for the tool and model.
                 let mut only = failover::entry(&entries, name).and_then(|entry| {
@@ -835,7 +835,7 @@ impl Scheduler {
                 }
                 // Every entry is cooling: count it as the first.
                 (None, None) => {
-                    let row = tx.runtime_by_name(w.workspace, &chain[0]).await?;
+                    let row = tx.credential_by_name(w.workspace, &chain[0]).await?;
                     (&chain[0], Account::of(row.as_ref(), &chain[0]))
                 }
             };

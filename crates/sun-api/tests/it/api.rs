@@ -2873,32 +2873,18 @@ async fn runtimes_list_each_host_and_tool_with_an_honest_state() {
     until_state(app, "claude-code", k.host, "offline").await;
 }
 
-/// `?model=v1` is the old per-adapter list, unchanged: one entry per
-/// adapter across hosts, `status` ready/offline.
+/// The legacy `?model=v1` list is gone with the old runtime writes (TRD
+/// BLO-117 item 7): `410`; the default and `v2` list per `(host, tool)`.
 #[tokio::test]
-async fn runtimes_v1_keeps_the_old_per_adapter_list() {
+async fn runtimes_v1_is_gone_and_v2_lists_per_host() {
     let k = kernel().await;
     let app = &k.app;
     let mut hello = kernel_host_hello(&k);
     hello["capabilities"]["runtimes"] = claude_code(true);
     let _laptop = connect_host(app, k.host, hello).await;
     let (_vps, _socket) = enrol_host(app, "vps-sg-1", claude_code(false)).await;
-    let (status, v1) = call(app, "GET", "/api/v1/runtimes?model=v1", None).await;
-    assert_eq!(status, StatusCode::OK, "{v1}");
-    let allow_bypass = v1[0]["allow_bypass"].clone();
-    assert_eq!(
-        v1,
-        json!([
-            { "model": null, "workspace_id": null, "id": "claude-code", "name": "claude-code",
-              "adapter": "claude-code", "source": "byo_runtime", "status": "ready",
-              "cooldown_until": null, "sessions": 0, "max_sessions": 0, "permission_mode": null,
-              "allow_bypass": allow_bypass, "config": null },
-            { "model": null, "workspace_id": null, "id": "codex", "name": "codex",
-              "adapter": "codex", "source": "byo_runtime", "status": "offline",
-              "cooldown_until": null, "sessions": 0, "max_sessions": 0, "permission_mode": null,
-              "allow_bypass": allow_bypass, "config": null },
-        ])
-    );
+    let (status, body) = call(app, "GET", "/api/v1/runtimes?model=v1", None).await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
     let (status, v2) = call(app, "GET", "/api/v1/runtimes?model=v2", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(v2.as_array().unwrap().len(), 2, "one per host: {v2}");
@@ -2907,8 +2893,8 @@ async fn runtimes_v1_keeps_the_old_per_adapter_list() {
 }
 
 /// `runtimes.model: v2` reads the list from `host_runtime`: each entry's
-/// `id` is its row id and `probed_at` is set; everything else, and the
-/// legacy `?model=v1` shape, is what the raw report (`v1`) gives.
+/// `id` is its row id and `probed_at` is set; everything else is what the
+/// raw report (`v1`) gives.
 #[tokio::test]
 async fn runtimes_model_v2_reads_host_runtime_rows() {
     use sun_store::HostRepo;
@@ -2951,7 +2937,4 @@ async fn runtimes_model_v2_reads_host_runtime_rows() {
         }
         assert_eq!(entry, raw, "same facts from either source");
     }
-    let (_, legacy_rows) = call(&v2, "GET", "/api/v1/runtimes?model=v1", None).await;
-    let (_, legacy_report) = call(app, "GET", "/api/v1/runtimes?model=v1", None).await;
-    assert_eq!(legacy_rows, legacy_report);
 }

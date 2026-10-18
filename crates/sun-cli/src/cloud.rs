@@ -1,6 +1,6 @@
 //! Sun Cloud, kernel side of credits. A kernel run by
 //! the Sun Cloud control plane gets [`CLOUD_URL_ENV`] and [`CLOUD_TOKEN_ENV`];
-//! with both, every session of a runtime whose source is `credits` gets a
+//! with both, every session paid by a `credits` credential gets a
 //! short-lived gateway key from `POST /session-keys`, injected through
 //! [`sun_runtime::credits::session_env`] and revoked when the session exits.
 
@@ -15,12 +15,12 @@ use sun_core::host_protocol::{
     DeviceFlowRequest, DeviceInput, DeviceRequest, DeviceResult, DeviceScreen, ExecOutput,
     ExecRequest, SessionFile, SessionStats, Worktree,
 };
-use sun_core::model::{Runtime, RuntimeSource};
+use sun_core::model::{Credential, RuntimeSource};
 use sun_core::{
-    BoxStream, Error, HostEvent, HostId, HostLink, Result, SessionHandle, SessionId, SessionSpec,
-    Steer, StopMode, SunEvent,
+    BoxStream, CredentialId, Error, HostEvent, HostId, HostLink, Result, SessionHandle, SessionId,
+    SessionSpec, Steer, StopMode, SunEvent,
 };
-use sun_store::{RunRepo, RuntimeRepo, SettingRepo, Store};
+use sun_store::{CredentialRepo, RunRepo, SettingRepo, Store};
 
 /// The control plane's base URL (also the gateway's).
 pub const CLOUD_URL_ENV: &str = "SUN_CLOUD_URL";
@@ -176,9 +176,9 @@ impl SessionKeys {
     }
 }
 
-/// **Decorator** over the engine's [`HostLink`]: sessions of a runtime whose
-/// source is `credits` start with a fresh gateway key in their env (and on
-/// the runtime's adapter); the key is revoked when the session exits or fails
+/// **Decorator** over the engine's [`HostLink`]: sessions paid by a
+/// `credits` credential start with a fresh gateway key in their env (and on
+/// the credential's tool); the key is revoked when the session exits or fails
 /// to start. Everything else passes through unchanged.
 // ponytail: live keys are kept in memory; after a kernel restart the keys of
 // sessions still running are left to expire (SESSION_KEY_TTL on the cloud).
@@ -190,7 +190,7 @@ pub struct CreditsLink {
 }
 
 impl CreditsLink {
-    /// Wraps `inner`; runtime sources are looked up in `store`.
+    /// Wraps `inner`; credentials are looked up in `store`.
     pub fn new(inner: Arc<dyn HostLink>, store: Store, keys: SessionKeys) -> Self {
         Self {
             inner,
@@ -201,26 +201,32 @@ impl CreditsLink {
     }
 }
 
-/// Creates a `credits` runtime row for each `sun.yaml` `runtimes.credits`
+/// Creates a `credits` credential for each `sun.yaml` `runtimes.credits`
 /// entry, so a workflow chain naming it resolves to Sun credits, and stores
-/// its gateway model (OpenCode needs one) where runtimes added from the UI
-/// keep theirs. An existing row keeps its source (rows are never rewritten
-/// here).
-// ponytail: sun.yaml is the deployment's, so its credits runtimes are
-// Main's; other workspaces add their own (`POST /runtimes`).
+/// its gateway model (OpenCode needs one) where credentials added from the
+/// UI keep theirs. An existing credential keeps its settings (rows are never
+/// rewritten here).
+// ponytail: sun.yaml is the deployment's, so its credits credentials are
+// Main's; other workspaces add their own (`POST /credentials`).
 pub async fn seed_credits_runtimes(store: &Store, config: &crate::config::Config) -> Result<()> {
     let mut tx = store.begin().await?;
     for (name, credits) in &config.runtimes.credits {
-        let runtime = tx
-            .upsert_runtime(
-                sun_core::WorkspaceId::MAIN,
-                name,
-                &credits.adapter,
-                RuntimeSource::Credits,
-            )
-            .await?;
+        let seeded = Credential {
+            id: CredentialId::generate(),
+            workspace_id: sun_core::WorkspaceId::MAIN,
+            name: name.clone(),
+            source: RuntimeSource::Credits,
+            default_tool: credits.adapter.clone(),
+            byo_key: None,
+            created_by: None,
+        };
+        tx.insert_credential(&seeded).await?;
+        let stored = tx
+            .credential_by_name(sun_core::WorkspaceId::MAIN, name)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("credential {name}")))?;
         if let Some(model) = &credits.model {
-            tx.put_setting(&sun_engine::credits_model_key(runtime.id), &json!(model))
+            tx.put_setting(&sun_engine::credits_model_key(stored.id), &json!(model))
                 .await?;
         }
     }
@@ -237,18 +243,18 @@ fn revoke_later(keys: Arc<SessionKeys>, key: String) {
     });
 }
 
-/// The runtime row the engine assigned this session to (by name, e.g.
-/// `claude-credits`), through the step that holds it. `start_session` only
-/// gets the adapter id, which several runtimes can share.
-async fn session_runtime(store: &Store, spec: &SessionSpec) -> Result<Option<Runtime>> {
+/// The credential the engine assigned this session to pay with (by name,
+/// e.g. `claude-credits`), through the step that holds it. `start_session`
+/// only gets the adapter id, which several credentials can share.
+async fn session_credential(store: &Store, spec: &SessionSpec) -> Result<Option<Credential>> {
     let mut tx = store.read().await?;
     let step = tx
         .steps_of_run(spec.run_id)
         .await?
         .into_iter()
         .find(|s| s.session_id == Some(spec.session_id));
-    match step.and_then(|s| s.runtime_id) {
-        Some(id) => Ok(Some(tx.get_runtime(id).await?)),
+    match step.and_then(|s| s.credential_id) {
+        Some(id) => Ok(Some(tx.get_credential(id).await?)),
         None => Ok(None),
     }
 }
@@ -261,19 +267,24 @@ impl HostLink for CreditsLink {
         adapter: &str,
         mut spec: SessionSpec,
     ) -> Result<SessionHandle> {
-        let runtime = session_runtime(&self.store, &spec).await?;
-        let Some(runtime) = runtime.filter(|r| r.source == RuntimeSource::Credits) else {
+        let credential = session_credential(&self.store, &spec).await?;
+        let Some(credential) = credential.filter(|c| c.source == RuntimeSource::Credits) else {
             return self.inner.start_session(host, adapter, spec).await;
         };
         let model = self
             .store
             .read()
             .await?
-            .setting(&sun_engine::credits_model_key(runtime.id))
+            .setting(&sun_engine::credits_model_key(credential.id))
             .await?;
         let model = model.as_ref().and_then(Value::as_str);
         let env = |key: &str| {
-            sun_runtime::credits::session_env(&runtime.adapter, self.keys.gateway_url(), key, model)
+            sun_runtime::credits::session_env(
+                &credential.default_tool,
+                self.keys.gateway_url(),
+                key,
+                model,
+            )
         };
         env("")?; // Refuse an unsupported adapter before minting a key.
         let key = self.keys.issue().await?;
@@ -283,7 +294,10 @@ impl HostLink for CreditsLink {
             .lock()
             .map_err(|_| Error::Unavailable("session keys lock poisoned".into()))?
             .insert(session, key.clone());
-        let started = self.inner.start_session(host, &runtime.adapter, spec).await;
+        let started = self
+            .inner
+            .start_session(host, &credential.default_tool, spec)
+            .await;
         if started.is_err() {
             if let Ok(mut live) = self.live.lock() {
                 live.remove(&session);

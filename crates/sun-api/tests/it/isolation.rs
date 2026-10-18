@@ -114,14 +114,14 @@ async fn beta(k: &common::Kernel, bob: &str) -> Beta {
         Some(json!({ "value": "sk-beta-0123456789" })),
     )
     .await;
-    let runtime = json!({ "name": "beta-llm", "source": "byo_key", "config":
-        { "endpoint": "http://localhost:11434/v1", "model": "qwen", "key_secret": "B_KEY" } });
+    let credential = json!({ "name": "beta-llm", "source": "byo_key",
+        "endpoint": "http://localhost:11434/v1", "default_model": "qwen", "key_secret": "B_KEY" });
     ok(
         app,
         bob,
         "POST",
-        &format!("/api/v1/runtimes?workspace={w}"),
-        Some(runtime),
+        &format!("/api/v1/credentials?workspace={w}"),
+        Some(credential),
     )
     .await;
     ok(
@@ -325,16 +325,17 @@ async fn isolation_beta_is_404_to_alphas_owner_by_path_query_and_body() {
         ),
         ("PUT", format!("/workspaces/{a}/hosts/{}", k.host), None),
         ("DELETE", format!("/workspaces/{a}/hosts/{}", k.host), None),
-        (
-            "GET",
-            format!("/runtimes/beta-llm/readiness?workspace={a}"),
-            None,
-        ),
+        ("GET", format!("/credentials/beta-llm?workspace={a}"), None),
         (
             "PUT",
-            format!("/runtimes/beta-llm?workspace={a}"),
+            format!("/credentials/beta-llm?workspace={a}"),
             Some(json!({ "name": "beta-llm",
-            "source": "byo_key", "config": { "endpoint": "http://x/v1", "model": "m" } })),
+            "source": "byo_key", "endpoint": "http://x/v1", "default_model": "m" })),
+        ),
+        (
+            "DELETE",
+            format!("/credentials/beta-llm?workspace={a}"),
+            None,
         ),
         ("DELETE", format!("/catalog/tdd?workspace={a}"), None),
         ("DELETE", format!("/secrets/workspace/{a}/B_KEY"), None),
@@ -354,6 +355,7 @@ async fn isolation_beta_is_404_to_alphas_owner_by_path_query_and_body() {
         ("GET", format!("/knowledge/search?q=beta&workspace={w}")),
         ("GET", format!("/agents?workspace={w}")),
         ("GET", format!("/runtimes?workspace={w}")),
+        ("GET", format!("/credentials?workspace={w}")),
         ("GET", format!("/secrets?workspace={w}")),
         ("GET", format!("/memory?workspace={w}")),
         ("GET", format!("/memory/metrics?workspace={w}")),
@@ -467,16 +469,12 @@ async fn isolation_beta_is_404_to_alphas_owner_by_path_query_and_body() {
         Some(json!({ "name": "Ana", "runtime_chain": ["beta-llm"] })),
     )
     .await;
-    let runtimes = ok(
-        app,
-        &ada,
-        "GET",
-        &format!("/api/v1/runtimes?workspace={a}"),
-        None,
-    )
-    .await;
-    assert!(!runtimes.to_string().contains("B_KEY"), "{runtimes}");
-    assert!(!runtimes.to_string().contains("11434"), "{runtimes}");
+    for list in ["runtimes", "credentials"] {
+        let path = format!("/api/v1/{list}?workspace={a}");
+        let listed = ok(app, &ada, "GET", &path, None).await;
+        assert!(!listed.to_string().contains("B_KEY"), "{listed}");
+        assert!(!listed.to_string().contains("11434"), "{listed}");
+    }
 
     // The lists that name no workspace show nothing of Beta's.
     let beta_ids = [

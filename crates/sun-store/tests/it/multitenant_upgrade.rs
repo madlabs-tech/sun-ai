@@ -13,8 +13,8 @@ use sqlx::{Connection, SqliteConnection};
 use sun_core::model::{Role, SecretScope};
 use sun_core::{AgentId, HostId, MemberId, WorkspaceId};
 use sun_store::{
-    AgentRepo, ArchiveSecrets, HostRepo, MasterKey, MembershipRepo, MemoryRepo, RuntimeRepo,
-    SecretRepo, Store, TaskRepo, WorkspaceRepo,
+    AgentRepo, ArchiveSecrets, CredentialRepo, HostRepo, MasterKey, MembershipRepo, MemoryRepo,
+    RuntimeRepo, SecretRepo, Store, TaskRepo, WorkspaceRepo,
 };
 
 /// The first multi-tenant migration (groups → workspace roles).
@@ -252,10 +252,11 @@ async fn check(store: &Store) {
     let t_ops = tx.get_task(T_OPS.parse().unwrap()).await.unwrap();
     assert_eq!(t_ops.assignee_agent_id, Some(copy.id));
 
-    // The BYO key runtime is Main's, its key a Main secret, still readable.
-    let runtime = tx.runtime_by_name(main, "or").await.unwrap().unwrap();
-    assert_eq!(runtime.id, BYO.parse().unwrap());
-    let key = runtime.byo_key.unwrap().key_secret.unwrap();
+    // The BYO key runtime is Main's credential now (same id), its key a
+    // Main secret, still readable.
+    let credential = tx.credential_by_name(main, "or").await.unwrap().unwrap();
+    assert_eq!(credential.id, BYO.parse().unwrap());
+    let key = credential.byo_key.unwrap().key_secret.unwrap();
     assert_eq!(key, "OR_KEY");
     let in_main = SecretScope::Workspace(main);
     assert_eq!(

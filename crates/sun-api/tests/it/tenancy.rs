@@ -940,7 +940,7 @@ async fn tenancy_deployment_routes_are_for_deployment_owners_only() {
     assert_eq!(status, StatusCode::OK);
 }
 
-/// Agents, runtimes, secrets and memory are each workspace's own: members
+/// Agents, credentials, secrets and memory are each workspace's own: members
 /// read them there (`?workspace=`, required for anyone but a deployment
 /// owner), another workspace's answer 404, and writes need the role there.
 #[tokio::test]
@@ -999,15 +999,18 @@ async fn tenancy_agents_runtimes_secrets_and_memory_are_per_workspace() {
     let (status, _) = call(app, Some(&ada), "POST", "/api/v1/tasks", Some(task)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Runtimes: a BYO key runtime is Alpha's; its key is Alpha's secret.
+    // Credentials: a BYO key is Alpha's; its key is Alpha's secret, whose
+    // name is never read back.
     let runtime = json!({
         "name": "ollama", "source": "byo_key",
-        "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen", "key_secret": "OR_KEY" },
+        "endpoint": "http://localhost:11434/v1", "default_model": "qwen", "key_secret": "OR_KEY",
     });
-    let path = |w: &str| format!("/api/v1/runtimes?workspace={w}");
+    let path = |w: &str| format!("/api/v1/credentials?workspace={w}");
     let (status, saved) = call(app, Some(&ada), "POST", &path(&a), Some(runtime.clone())).await;
     ok(status, &saved);
     assert_eq!(saved["workspace_id"], json!(a));
+    assert_eq!(saved["key_secret_set"], true, "{saved}");
+    assert!(saved.get("key_secret").is_none(), "{saved}");
     let (status, _) = call(app, Some(&vic), "POST", &path(&a), Some(runtime.clone())).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let stored = |list: &Value| -> Vec<String> {
@@ -1022,12 +1025,26 @@ async fn tenancy_agents_runtimes_secrets_and_memory_are_per_workspace() {
     assert!(stored(&listed).is_empty(), "{listed}");
     let (status, _) = call(app, Some(&bob), "GET", &path(&a), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let in_b = format!("/api/v1/runtimes/ollama?workspace={b}");
+    let in_b = format!("/api/v1/credentials/ollama?workspace={b}");
     let (status, _) = call(app, Some(&bob), "PUT", &in_b, Some(runtime.clone())).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "Beta has no `ollama`");
-    let readiness = format!("/api/v1/runtimes/ollama/readiness?workspace={a}");
+    let (status, _) = call(app, Some(&bob), "DELETE", &in_b, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "nor deletes Alpha's");
+    let readiness = format!("/api/v1/credentials/ollama?workspace={a}");
+    let (status, _) = call(app, Some(&bob), "GET", &readiness, None).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "Alpha's is not Bob's to read"
+    );
+    // Its key secret is missing until one is set in Alpha.
+    let missing_key = |ready: &Value| {
+        ready["detail"]
+            .as_str()
+            .is_some_and(|d| d.starts_with("key_secret:"))
+    };
     let (_, ready) = call(app, Some(&vic), "GET", &readiness, None).await;
-    assert_eq!(ready["logged_in"], false, "{ready}");
+    assert!(missing_key(&ready), "{ready}");
 
     // Secrets: Alpha's, by `manage_secrets` there.
     let secret = |w: &str, name: &str| format!("/api/v1/secrets/workspace/{w}/{name}");
@@ -1035,11 +1052,11 @@ async fn tenancy_agents_runtimes_secrets_and_memory_are_per_workspace() {
     let (status, set) = call(app, Some(&bob), "PUT", &secret(&b, "OR_KEY"), value.clone()).await;
     ok(status, &set);
     let (_, ready) = call(app, Some(&vic), "GET", &readiness, None).await;
-    assert_eq!(ready["logged_in"], false, "Beta's key is not Alpha's");
+    assert!(missing_key(&ready), "Beta's key is not Alpha's: {ready}");
     let (status, set) = call(app, Some(&ada), "PUT", &secret(&a, "OR_KEY"), value.clone()).await;
     ok(status, &set);
     let (_, ready) = call(app, Some(&vic), "GET", &readiness, None).await;
-    assert_eq!(ready["logged_in"], true, "{ready}");
+    assert!(!missing_key(&ready), "{ready}");
     let listing = format!("/api/v1/secrets?workspace={a}");
     let (status, names) = call(app, Some(&ada), "GET", &listing, None).await;
     ok(status, &names);

@@ -126,9 +126,12 @@ enum Command {
         #[command(flatten)]
         remote: Remote,
     },
-    /// BYO key runtimes (through the running kernel).
+    /// A workspace's runtimes and the on-limit policy (through the running kernel).
     #[command(subcommand)]
     Runtime(RuntimeCommand),
+    /// A workspace's API keys that pay for sessions (through the running kernel).
+    #[command(subcommand)]
+    Credential(CredentialCommand),
     /// Check this box: data dir, agent CLIs, git, disk, port, sandbox, service.
     Doctor,
     /// Upgrade: wait for a checkpoint, back up, swap binaries, migrate, restart.
@@ -750,23 +753,20 @@ enum SecretCommand {
 }
 
 #[derive(Subcommand)]
-enum RuntimeCommand {
-    /// Add a BYO key runtime to a workspace: your own provider key on
+enum CredentialCommand {
+    /// Add an API key credential to a workspace: your own provider key on
     /// OpenCode (any kind), Claude Code (anthropic) or Codex
     /// (openai_compatible). Set its key in the same workspace with
     /// `sun secret set <NAME> [--workspace W]`.
     Add {
-        /// Name used in workflow `runtime.chain`, e.g. ollama-qwen.
+        /// Name chain entries use (`credential: ollama-qwen`), e.g. ollama-qwen.
         name: String,
-        /// Your own API key / endpoint (the only source added here).
-        #[arg(long)]
-        byo_key: bool,
         /// Provider API: anthropic, google or openai_compatible.
         #[arg(long, default_value = "openai_compatible")]
-        kind: String,
-        /// The CLI that runs it: opencode, claude-code or codex.
+        family: String,
+        /// The CLI a bare-name chain entry runs it on: opencode, claude-code or codex.
         #[arg(long, default_value = "opencode")]
-        adapter: String,
+        tool: String,
         /// Base URL, e.g. http://localhost:11434/v1; optional for anthropic
         /// and google (the provider's own).
         #[arg(long, default_value = "")]
@@ -783,9 +783,34 @@ enum RuntimeCommand {
         #[command(flatten)]
         remote: Remote,
     },
-    /// Show whether a workspace's runtime can take work, and what to fix.
+    /// Show whether a workspace's credential can pay for a session, and what to fix.
     Check {
-        /// The runtime's name.
+        /// The credential's name.
+        name: String,
+        /// The workspace (id, slug or name). Default: Main.
+        #[arg(long)]
+        workspace: Option<String>,
+        #[command(flatten)]
+        remote: Remote,
+    },
+    /// Delete a credential no agent's chain names.
+    Rm {
+        /// The credential's name.
+        name: String,
+        /// The workspace (id, slug or name). Default: Main.
+        #[arg(long)]
+        workspace: Option<String>,
+        #[command(flatten)]
+        remote: Remote,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommand {
+    /// Show whether a workspace's runtime (a tool, e.g. claude-code) can
+    /// take work, and what to fix.
+    Check {
+        /// The tool, e.g. claude-code.
         name: String,
         /// The workspace (id, slug or name). Default: Main.
         #[arg(long)]
@@ -885,6 +910,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Market(command) => runtime()?.block_on(market(&data_dir, command)),
         Command::Secret(command) => runtime()?.block_on(secret(&data_dir, command)),
         Command::Runtime(command) => runtime_command(&data_dir, command),
+        Command::Credential(command) => credential_command(&data_dir, command),
         Command::Doctor => ops::doctor(&data_dir),
         Command::Upgrade {
             check_local: true, ..
@@ -1815,33 +1841,61 @@ async fn mod_command(data_dir: &Path, command: ModCommand, kind: sun_mod::ModKin
     }
 }
 
-fn runtime_command(data_dir: &Path, command: RuntimeCommand) -> Result<()> {
+fn credential_command(data_dir: &Path, command: CredentialCommand) -> Result<()> {
     match command {
-        RuntimeCommand::Add {
+        CredentialCommand::Add {
             name,
-            byo_key,
-            kind,
-            adapter,
+            family,
+            tool,
             endpoint,
             model,
             key_secret,
             workspace,
             remote,
         } => {
-            if !byo_key {
-                bail!(
-                    "pass --byo-key: BYO runtimes appear on their own when a host reports the CLI"
-                );
-            }
-            let body = json!({ "name": name, "adapter": adapter, "source": "byo_key",
-                "config": { "kind": kind, "endpoint": endpoint, "model": model,
-                    "key_secret": key_secret } });
+            let body = json!({ "name": name, "source": "byo_key", "default_tool": tool,
+                "family": family, "endpoint": endpoint, "default_model": model,
+                "key_secret": key_secret });
             let client = client(data_dir, remote)?;
             let workspace = workspace_or_main(&client, workspace.as_deref())?;
-            client.post(&format!("/runtimes?workspace={workspace}"), &body)?;
-            println!("added {name}; check it with `sun runtime check {name}`");
+            client.post(&format!("/credentials?workspace={workspace}"), &body)?;
+            println!("added {name}; check it with `sun credential check {name}`");
             Ok(())
         }
+        CredentialCommand::Check {
+            name,
+            workspace,
+            remote,
+        } => {
+            let client = client(data_dir, remote)?;
+            let workspace = workspace_or_main(&client, workspace.as_deref())?;
+            let credential = client.get(&format!("/credentials/{name}?workspace={workspace}"))?;
+            let ok = credential["state"] == "idle";
+            println!("{name}: {}", if ok { "ready" } else { "not ready" });
+            if let Some(detail) = credential["detail"].as_str() {
+                println!("{detail}");
+            }
+            if !ok {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        CredentialCommand::Rm {
+            name,
+            workspace,
+            remote,
+        } => {
+            let client = client(data_dir, remote)?;
+            let workspace = workspace_or_main(&client, workspace.as_deref())?;
+            client.delete(&format!("/credentials/{name}?workspace={workspace}"))?;
+            println!("deleted {name}");
+            Ok(())
+        }
+    }
+}
+
+fn runtime_command(data_dir: &Path, command: RuntimeCommand) -> Result<()> {
+    match command {
         RuntimeCommand::Check {
             name,
             workspace,

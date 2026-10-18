@@ -585,8 +585,9 @@ async fn filters_and_bodies_never_reach_into_a_hidden_workspace() {
 
 /// The deployment-wide reads, until they are per workspace: 403 for every
 /// member who isn't a deployment owner (even naming their own workspace),
-/// and open to a deployment owner. Agents, runtimes, memory, hosts, catalog
-/// installs and MCP servers are per workspace: open to every member naming it.
+/// and open to a deployment owner. Agents, runtimes, credentials, memory,
+/// hosts, catalog installs and MCP servers are per workspace: open to every
+/// member naming it.
 #[tokio::test(flavor = "multi_thread")]
 async fn deployment_wide_reads_are_for_deployment_owners_only() {
     let k = kernel().await;
@@ -642,6 +643,7 @@ async fn deployment_wide_reads_are_for_deployment_owners_only() {
     }
     for path in [
         "/runtimes",
+        "/credentials",
         "/agents",
         "/memory",
         "/memory/metrics",

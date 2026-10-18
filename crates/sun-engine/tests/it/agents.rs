@@ -29,7 +29,8 @@ use sun_engine::{
     WatchdogConfig, WorkflowPick,
 };
 use sun_store::{
-    HostRepo, RunRepo, RuntimeRepo, Store, TaskRepo, WorkflowRepo, WorkspaceItem, WorkspaceRepo,
+    CredentialRepo, HostRepo, RunRepo, RuntimeRepo, Store, TaskRepo, WorkflowRepo, WorkspaceItem,
+    WorkspaceRepo,
 };
 use tokio::sync::mpsc;
 
@@ -2464,13 +2465,18 @@ async fn structured_chain_entries_resolve_on_save_and_reach_the_session() {
         .await
         .unwrap();
     let mut tx = k.store.begin().await.unwrap();
-    let key = sun_core::model::RuntimeSource::ByoKey;
-    tx.upsert_runtime(WorkspaceId::MAIN, "other-key", "other", key)
-        .await
-        .unwrap();
-    tx.upsert_runtime(WorkspaceId::MAIN, "fake-key", "fake", key)
-        .await
-        .unwrap();
+    for (name, tool) in [("other-key", "other"), ("fake-key", "fake")] {
+        let key = sun_core::model::Credential {
+            id: sun_core::CredentialId::generate(),
+            workspace_id: WorkspaceId::MAIN,
+            name: name.into(),
+            source: sun_core::model::RuntimeSource::ByoKey,
+            default_tool: tool.into(),
+            byo_key: None,
+            created_by: None,
+        };
+        assert!(tx.insert_credential(&key).await.unwrap());
+    }
     tx.commit().await.unwrap();
     let saved = std::sync::atomic::AtomicUsize::new(0);
     let save = |chain: Value| {

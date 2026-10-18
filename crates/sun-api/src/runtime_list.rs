@@ -1,42 +1,38 @@
 //! `GET /api/v1/runtimes` (v2, TRD BLO-117 §6): one entry per `(host, tool)`
 //! with `presence`, `availability`, `load` and the derived `state`
-//! ([`RuntimeState`]), then the workspace's key-backed runtimes in the same
-//! shape. Two hosts with the same CLI are two entries.
+//! ([`RuntimeState`]). Two hosts with the same CLI are two entries. The
+//! workspace's credentials get the same `state` in `GET /credentials`
+//! ([`credential_state`]).
 //!
 //! Each host's CLIs come from the source `sun.yaml` `runtimes.model` picks
 //! ([`RuntimesModel`]): `v2` reads the `host_runtime` rows (row `id`,
 //! `probed_at`), `v1` the raw capabilities report (`id` `<host>:<tool>`, no
 //! `probed_at`). Presence and load come from the live hub. A `(host, tool)`
 //! is `limited` while an account it would spend cools down: the host's own
-//! login of the tool, or a key on that tool of a workspace the host serves.
-//! Each `(host, tool)` entry carries the effort levels and models the host
-//! reported for the tool (`effort_options`, `models`; empty for key-backed
-//! entries) and the permission modes the CLI there can enforce
-//! (`permission_modes`; `null` for key-backed entries, which run on any
-//! host with the tool), which the agent form offers.
+//! login of the tool, or a credential on that tool of a workspace the host
+//! serves. Each `(host, tool)` entry carries the effort levels and models the
+//! host reported for the tool (`effort_options`, `models`) and the permission
+//! modes the CLI there can enforce (`permission_modes`), which the agent form
+//! offers.
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
-use sun_core::model::{Account, Host, HostRuntime, Runtime, RuntimeSource};
+use sun_core::model::{Account, Credential, Host, HostRuntime, RuntimeSource};
 use sun_core::{
     Availability, HostId, HostLink, Presence, Readiness, RuntimeState, Timestamp, WorkspaceId,
 };
 
 use crate::error::ApiResult;
-use crate::hosts::{online_adapters, runtime_readiness};
+use crate::hosts::credential_readiness;
 use crate::{Api, RuntimesModel, wire};
 
 /// Every entry of `workspace` (`None`: every workspace's).
 pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult<Vec<Value>> {
     let cooling = api.engine.cooldowns().await?;
     let active = api.hosts.active_sessions();
-    let runtimes = api.engine.runtimes(workspace).await?;
-    let keys: Vec<&Runtime> = runtimes
-        .iter()
-        .filter(|r| r.source != RuntimeSource::ByoRuntime)
-        .collect();
+    let keys = api.engine.credentials(workspace).await?;
     // The hosts serving each workspace with a key.
     let mut serving: HashMap<WorkspaceId, HashSet<HostId>> = HashMap::new();
     for key in &keys {
@@ -76,7 +72,7 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
         } in reported
         {
             let spends = keys.iter().filter(|key| {
-                key.adapter == tool
+                key.default_tool == tool
                     && serving
                         .get(&key.workspace_id)
                         .is_some_and(|hosts| hosts.contains(&host.id))
@@ -122,11 +118,6 @@ pub(crate) async fn list(api: &Api, workspace: Option<WorkspaceId>) -> ApiResult
         (a["tool"].as_str(), a["host"]["name"].as_str())
             .cmp(&(b["tool"].as_str(), b["host"]["name"].as_str()))
     });
-    let online = online_adapters(api, workspace).await?;
-    for runtime in keys {
-        let entry = keyed(api, runtime, &online, &cooling).await?;
-        entries.push(entry);
-    }
     Ok(entries)
 }
 
@@ -152,7 +143,6 @@ impl Observed {
             "load": null, "state": self.state(), "detail": detail,
             "cooldown_until": self.cooldown_until,
             "probed_at": null, "last_seen_at": null,
-            "config": null, "model": null,
             "effort_options": [], "models": [], "permission_modes": null,
         })
     }
@@ -233,24 +223,27 @@ fn login_command(detail: &str) -> Option<&str> {
     (!command.is_empty()).then_some(command)
 }
 
-/// A `byo_key` or `credits` runtime: it runs on any online host with its
-/// CLI, so `host` is `null`, `presence` is whether one is online, and
-/// `load` is `null` (sessions are counted per CLI, not per key).
-// ponytail: these become credentials (TRD item 7) and leave this list.
-async fn keyed(
+/// A credential's `state`, `detail` and `cooldown_until` (`GET
+/// /credentials`): it pays on any online host with its tool, so it is
+/// `offline` while none has it, `needs_login` while its settings or key
+/// secret are missing, `unsupported` for credits this deployment doesn't
+/// sell, and `limited` while its key cools down.
+pub(crate) async fn credential_state(
     api: &Api,
-    runtime: &Runtime,
+    credential: &Credential,
     online: &BTreeMap<String, (bool, bool)>,
     cooling: &BTreeMap<String, Timestamp>,
 ) -> ApiResult<Value> {
-    let ready = runtime_readiness(api, runtime, online).await?;
-    let cooldown_until = cooling.get(&Account::credential_key(runtime.id)).copied();
+    let ready = credential_readiness(api, credential, online).await?;
+    let cooldown_until = cooling
+        .get(&Account::credential_key(credential.id))
+        .copied();
     let presence = if ready.installed {
         Presence::Online
     } else {
         Presence::Offline
     };
-    let availability = match runtime.source {
+    let availability = match credential.source {
         RuntimeSource::Credits if !ready.logged_in => Availability::Unsupported,
         _ if !ready.logged_in => Availability::NeedsLogin,
         _ if cooldown_until.is_some() => Availability::Limited,
@@ -265,19 +258,11 @@ async fn keyed(
     let detail = match observed.state() {
         RuntimeState::Limited => cooldown_until
             .map(|until| format!("Usage limit reached; back at {}", until.to_rfc3339())),
-        _ => ready.detail.clone(),
+        _ => ready.detail,
     };
-    let mut entry = observed.view(&runtime.adapter, None, detail);
-    entry["id"] = json!(runtime.name);
-    entry["name"] = json!(runtime.name);
-    entry["source"] = json!(runtime.source);
-    entry["workspace_id"] = json!(runtime.workspace_id);
-    entry["allow_bypass"] = json!(api.allow_bypass);
-    entry["config"] = json!(runtime.byo_key);
-    if runtime.source == RuntimeSource::Credits {
-        entry["model"] = json!(api.engine.credits_model(runtime.id).await?);
-    }
-    Ok(entry)
+    Ok(json!({
+        "state": observed.state(), "detail": detail, "cooldown_until": cooldown_until,
+    }))
 }
 
 #[cfg(test)]
