@@ -1372,6 +1372,50 @@ async fn queue_a_steps_permission_mode_wins_at_placement() {
     );
 }
 
+/// BLO-164 gate order: the triggering member's cap (3) comes before the
+/// container/VM rule (4). A member the policy doesn't allow is capped to
+/// `accept_edits`, so their bypass run on a bare host is placed, not
+/// refused; the owner's same run is still refused there.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_places_a_capped_members_bypass_run_on_a_bare_host() {
+    use sun_store::MemberRepo;
+    const BYPASS: &str = "name: bypass\nruntime: {chain: [plain]}\nsteps:\n  \
+                          - {id: implement, type: agent, prompt: do it, permission_mode: bypass_permissions}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let mut tasks = tasks_of(&store, BYPASS, 2).await;
+    let (member_task, owner_task) = (tasks.remove(0), tasks.remove(0));
+    let mut tx = store.begin().await.unwrap();
+    let ana = tx
+        .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let host = add_host(&store, "bare", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![host])));
+    let (_engine, queue) = kernel_on(&store, link, host, Caps::default()).await;
+
+    let by = sun_engine::Actor {
+        member_id: Some(ana.id),
+        name: "user:ana".into(),
+    };
+    queue.enqueue_by(member_task.id, Some(&by)).await.unwrap();
+    queue.enqueue(owner_task.id).await.unwrap();
+    eventually("the member's capped run placed", || async {
+        placed_on(&store, member_task.id).await.is_some()
+    })
+    .await;
+    let failed = || async {
+        let mut read = store.read().await.unwrap();
+        let run = read.runs_of_task(owner_task.id).await.unwrap().pop();
+        run.filter(|r| r.status == RunStatus::Failed)
+    };
+    eventually("the owner's bypass run refused on bare", || async {
+        failed().await.is_some()
+    })
+    .await;
+}
+
 /// FR7: a run whose step is in `bypass_permissions` goes only to a host
 /// with its container ready; a bare run of it is refused, journalled, and
 /// fails without being placed, even with a container host online.

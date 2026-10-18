@@ -2305,6 +2305,52 @@ pub struct SecurityPolicy {
     pub two_step_for_password_change: bool,
 }
 
+/// Who besides the deployment owners may run `bypass_permissions` sessions:
+/// the `bypass_policy` kernel setting, saved by an owner in Settings →
+/// Security. It sits under sun.yaml `runtimes.allow_bypass` (off: nobody, the
+/// owners included) and above the container/VM rule at placement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BypassPolicy {
+    /// Who may.
+    #[serde(default)]
+    pub mode: BypassMode,
+    /// The members who may under [`BypassMode::Members`].
+    #[serde(default)]
+    pub member_ids: Vec<MemberId>,
+}
+
+/// [`BypassPolicy::mode`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BypassMode {
+    /// The owners alone (fresh installs and every deployment until an owner
+    /// saves the policy).
+    #[default]
+    Off,
+    /// The owners and [`BypassPolicy::member_ids`].
+    Members,
+    /// Every member.
+    Everyone,
+}
+
+impl BypassPolicy {
+    /// Most members [`BypassPolicy::member_ids`] may name.
+    pub const MAX_MEMBERS: usize = 1000;
+
+    /// The one rule: may a person (`is_owner`, `member`) run a bypass
+    /// session? An owner always may; the token holder has no member row and
+    /// is an owner.
+    pub fn allows(&self, is_owner: bool, member: Option<MemberId>) -> bool {
+        is_owner
+            || member.is_some_and(|m| match self.mode {
+                BypassMode::Off => false,
+                BypassMode::Members => self.member_ids.contains(&m),
+                BypassMode::Everyone => true,
+            })
+    }
+}
+
 /// One plain-text mail.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mail {
@@ -2417,6 +2463,28 @@ pub struct AuditEntry {
 #[cfg(test)]
 mod member_tests {
     use super::*;
+
+    #[test]
+    fn the_bypass_policy_always_lets_owners_and_caps_members_by_mode() {
+        let (ana, bob) = (MemberId::generate(), MemberId::generate());
+        let of = |mode| BypassPolicy {
+            mode,
+            member_ids: vec![ana],
+        };
+        for mode in [BypassMode::Off, BypassMode::Members, BypassMode::Everyone] {
+            assert!(of(mode).allows(true, None), "the token holder, {mode:?}");
+            assert!(
+                of(mode).allows(true, Some(bob)),
+                "an owner member, {mode:?}"
+            );
+        }
+        assert!(!of(BypassMode::Off).allows(false, Some(ana)));
+        assert!(of(BypassMode::Members).allows(false, Some(ana)));
+        assert!(!of(BypassMode::Members).allows(false, Some(bob)));
+        assert!(of(BypassMode::Everyone).allows(false, Some(bob)));
+        assert!(!of(BypassMode::Everyone).allows(false, None), "no person");
+        assert_eq!(BypassPolicy::default().mode, BypassMode::Off);
+    }
 
     #[test]
     fn workspace_names_are_trimmed_and_1_to_64_chars() {

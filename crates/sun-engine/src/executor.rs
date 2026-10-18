@@ -408,7 +408,7 @@ enum Command {
     RetryStep {
         run_id: RunId,
         step_key: StepKey,
-        by: String,
+        by: tasks::Actor,
         reply: retry::Reply,
     },
     /// A human decides an `unknown` outbox row (`resolve`).
@@ -2156,8 +2156,12 @@ impl Executor {
             self.entry_settings(tx, step, runtime, &row.adapter).await?;
         let run = tx.get_run(step.run_id).await?;
         let workflow = self.workflow(tx, &run).await?;
-        let step_mode =
-            crate::agents::step_mode(tx, run.workflow_id, &workflow, &step.step_key).await?;
+        let allow = self.config.allow_bypass;
+        let (step_mode, capped) =
+            crate::bypass::session_mode(tx, &run, &workflow, &step.step_key, allow).await?;
+        if let Some(member) = capped {
+            crate::bypass::capped(tx, step, &member).await?;
+        }
         let permission_mode = step_mode.map(|m| m.as_str().to_owned());
         append(
             tx,
@@ -3220,7 +3224,9 @@ mod byo_key_tests {
             .await
             .unwrap();
         tx.insert_task(&task).await.unwrap();
-        let run = queue::queue_run(&mut tx, task.id, "created").await.unwrap();
+        let run = queue::queue_run(&mut tx, task.id, "created", None)
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
         (task.id, run)
     }

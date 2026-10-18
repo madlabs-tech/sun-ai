@@ -30,6 +30,9 @@
 //!   ([`Engine::catch_up_cron`], sun.yaml `cron_catch_up`, default on).
 //! - **Webhook** ([`Engine::trigger_webhook`], `POST /workflows/{id}/trigger`):
 //!   a workflow with `webhook` in `on:` gets a task per call, once per `key`.
+//!   The run acts for the caller, so their bypass policy caps it
+//!   ([`crate::bypass`]); cron and mod-event runs have no person and act for
+//!   the deployment.
 //! - **Failures** ([`Engine::trigger_failed`]): a trigger that fails
 //!   is journalled in the audit log as `trigger_failed` and announced to the
 //!   `notify_to` channels through the outbox (run-less rows committed with
@@ -100,7 +103,7 @@ fn last_missed(cron: &Cron, since: DateTime<Utc>, now: DateTime<Utc>) -> Option<
 use crate::executor::tasks;
 use crate::outbox::notify_item;
 use crate::queue::queue_run;
-use crate::{Attention, Engine, Principal};
+use crate::{Actor, Attention, Engine, Principal};
 
 /// The trigger mod-otel emits to have the kernel notify someone.
 pub const ALERT_TRIGGER: &str = "alert";
@@ -469,7 +472,7 @@ impl Engine {
                 };
                 let key = format!("trigger:{}:cron:{expr}:{at}", workflow.id);
                 let (task, new) =
-                    create_once(&mut tx, workflow.id, title, body, &key, None).await?;
+                    create_once(&mut tx, workflow.id, title, body, &key, None, None).await?;
                 if new {
                     created.push(task);
                 }
@@ -483,11 +486,13 @@ impl Engine {
     /// Creates and queues a task on `workflow_id` for a webhook call
     /// when the workflow's `on:` has `webhook`. `payload` is
     /// `{title?, text?, url?, repo?, key?, ..}`; a repeated `key` returns the
-    /// task it made the first time (`false`).
+    /// task it made the first time (`false`). `by` is the caller, whom the
+    /// run acts for ([`crate::bypass`]).
     pub async fn trigger_webhook(
         &self,
         workflow_id: WorkflowId,
         payload: &Value,
+        by: Option<&Actor>,
     ) -> Result<(TaskId, bool)> {
         let mut tx = self.store.begin().await?;
         let version = tx
@@ -518,7 +523,7 @@ impl Engine {
         };
         let (title, body) = task_text(&event);
         let key = format!("trigger:{workflow_id}:webhook:{key}");
-        let made = create_once(&mut tx, workflow_id, title, body, &key, Some(payload)).await?;
+        let made = create_once(&mut tx, workflow_id, title, body, &key, Some(payload), by).await?;
         tx.commit().await?;
         Ok(made)
     }
@@ -578,6 +583,7 @@ impl Engine {
                 body.clone(),
                 &key,
                 Some(&event.payload),
+                None,
             )
             .await?;
             if new {
@@ -981,6 +987,7 @@ async fn create_once(
     body: String,
     key: &str,
     trigger: Option<&Value>,
+    by: Option<&Actor>,
 ) -> Result<(TaskId, bool)> {
     if let Some(made) = tx.setting(key).await? {
         let task = serde_json::from_value(made)
@@ -996,13 +1003,13 @@ async fn create_once(
     };
     tx.insert_task(&task).await?;
     let created = json!({ "status": task.status });
-    crate::executor::tasks::log(tx, task.id, ActivityKind::Created, None, created).await?;
+    crate::executor::tasks::log(tx, task.id, ActivityKind::Created, by, created).await?;
     tx.put_setting(key, &json!(task.id)).await?;
     if let Some(payload) = trigger {
         tx.put_setting(&format!("{TRIGGER_OF}{}", task.id), payload)
             .await?;
     }
-    queue_run(tx, task.id, "trigger").await?;
+    queue_run(tx, task.id, "trigger", by).await?;
     Ok((task.id, true))
 }
 
@@ -1448,28 +1455,37 @@ mod tests {
             .await
             .unwrap();
         let hook = json!({"title": "Deploy failed", "key": "build-77"});
-        let err = engine.trigger_webhook(manual.id, &hook).await.unwrap_err();
+        let err = engine
+            .trigger_webhook(manual.id, &hook, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("no webhook trigger"), "{err}");
 
         let yaml = sun_workflow::DEFAULT_WORKFLOW
             .replace("name: default", "name: hooked")
             .replace("on: [manual]", "on: [webhook]");
         let (hooked, _) = engine.save_workflow(None, &yaml).await.unwrap();
-        let (task, new) = engine.trigger_webhook(hooked.id, &hook).await.unwrap();
+        let (task, new) = engine
+            .trigger_webhook(hooked.id, &hook, None)
+            .await
+            .unwrap();
         assert!(new);
         assert_eq!(engine.task(task).await.unwrap().title, "Deploy failed");
         assert_eq!(
-            engine.trigger_webhook(hooked.id, &hook).await.unwrap(),
+            engine
+                .trigger_webhook(hooked.id, &hook, None)
+                .await
+                .unwrap(),
             (task, false)
         );
         let (other, new) = engine
-            .trigger_webhook(hooked.id, &json!({"title": "x"}))
+            .trigger_webhook(hooked.id, &json!({"title": "x"}), None)
             .await
             .unwrap();
         assert!(new && other != task);
         assert!(
             engine
-                .trigger_webhook(hooked.id, &json!({"key": 7}))
+                .trigger_webhook(hooked.id, &json!({"key": 7}), None)
                 .await
                 .is_err()
         );

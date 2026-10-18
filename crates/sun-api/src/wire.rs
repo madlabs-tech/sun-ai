@@ -453,6 +453,7 @@ fn summary(kind: &str, p: &serde_json::Map<String, Value>) -> String {
             line.trim_start_matches(' ').replace("  ", " ")
         }
         "intervention" => format!("You: {}", s("text")),
+        "bypass_capped" => sun_engine::capped_line(s("member")),
         // The step view shows where the agent ran.
         "session_assigned" => {
             let env = p.get("exec_env");

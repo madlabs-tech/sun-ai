@@ -239,8 +239,13 @@ impl Queue {
     /// version's budget (a retry: the run's trigger is `retry`). The task
     /// moves to `todo`; a `done` task can't.
     pub async fn enqueue(&self, task_id: TaskId) -> Result<RunId> {
+        self.enqueue_by(task_id, None).await
+    }
+
+    /// [`Self::enqueue`] by a person, whom its bypass sessions act for.
+    pub async fn enqueue_by(&self, task_id: TaskId, by: Option<&crate::Actor>) -> Result<RunId> {
         let mut tx = self.store.begin().await?;
-        let run_id = queue_run(&mut tx, task_id, "retry").await?;
+        let run_id = queue_run(&mut tx, task_id, "retry", by).await?;
         tx.commit().await?;
         self.wake.notify_one();
         Ok(run_id)
@@ -263,8 +268,14 @@ impl Queue {
 /// [`Queue::enqueue`] in the caller's transaction, so a task can be created
 /// and queued atomically. The committed `run_status` event wakes the pump.
 /// `trigger` (`created`, `trigger`, `retry`, `moved`) is the reason of the
-/// run's first `run_status` event: why it runs.
-pub(crate) async fn queue_run(tx: &mut Tx, task_id: TaskId, trigger: &str) -> Result<RunId> {
+/// run's first `run_status` event: why it runs; `by` (its `by`) the person
+/// who made it go, whom its bypass sessions act for ([`crate::bypass`]).
+pub(crate) async fn queue_run(
+    tx: &mut Tx,
+    task_id: TaskId,
+    trigger: &str,
+    by: Option<&crate::Actor>,
+) -> Result<RunId> {
     let task = tx.get_task(task_id).await?;
     let workflow_id = task.workflow_id.ok_or_else(|| {
         Error::InvalidInput(format!("task {task_id} has no workflow, so it never runs"))
@@ -301,13 +312,12 @@ pub(crate) async fn queue_run(tx: &mut Tx, task_id: TaskId, trigger: &str) -> Re
         repo_ids,
     };
     tx.insert_run(&run).await?;
-    tx.append_event(NewEvent::new(
-        run.id,
-        None,
-        "run_status",
-        json!({ "from": null, "to": RunStatus::Queued.as_str(), "reason": trigger }),
-    ))
-    .await?;
+    let mut queued = json!({ "from": null, "to": RunStatus::Queued.as_str(), "reason": trigger });
+    if let Some(by) = crate::bypass::by_of(by) {
+        queued["by"] = by;
+    }
+    tx.append_event(NewEvent::new(run.id, None, "run_status", queued))
+        .await?;
     let queued = json!({ "run_id": run.id, "trigger": trigger });
     tasks::log(tx, task_id, ActivityKind::Run, None, queued).await?;
     tasks::set_status(tx, task_id, TaskStatus::Todo, None, Some(run.id)).await?;
@@ -677,10 +687,11 @@ impl Scheduler {
                 Some(parsed) => {
                     for s in &parsed.steps {
                         if matches!(s.kind, sun_workflow::StepKind::Agent { .. }) {
-                            step_modes.push(
-                                crate::agents::step_mode(&mut tx, w.run.workflow_id, parsed, &s.id)
-                                    .await?,
-                            );
+                            let allow = self.engine.allow_bypass;
+                            let (mode, _) =
+                                crate::bypass::session_mode(&mut tx, &w.run, parsed, &s.id, allow)
+                                    .await?;
+                            step_modes.push(mode);
                         }
                     }
                 }
@@ -1302,7 +1313,9 @@ mod tests {
         tx.insert_task(&unnamed).await.unwrap();
         tx.insert_task(&named).await.unwrap();
         // No repos at all: a coding workflow still runs, in a folder.
-        let run = queue_run(&mut tx, unnamed.id, "created").await.unwrap();
+        let run = queue_run(&mut tx, unnamed.id, "created", None)
+            .await
+            .unwrap();
         assert!(tx.get_run(run).await.unwrap().repo_ids.is_empty());
         tx.commit().await.unwrap();
 
@@ -1313,7 +1326,7 @@ mod tests {
         tx.insert_repo(&infra).await.unwrap();
         // The workflow's description names infra; the title names web too:
         // both, in the workspace's list order.
-        let run = queue_run(&mut tx, named.id, "created").await.unwrap();
+        let run = queue_run(&mut tx, named.id, "created", None).await.unwrap();
         let listed: Vec<sun_core::RepoId> = tx
             .repos(sun_core::WorkspaceId::MAIN)
             .await
@@ -1358,13 +1371,17 @@ mod tests {
         };
         tx.insert_task(&coding).await.unwrap();
         tx.insert_task(&writing).await.unwrap();
-        let err = queue_run(&mut tx, coding.id, "created").await.unwrap_err();
+        let err = queue_run(&mut tx, coding.id, "created", None)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("No repository mentioned; add one to the task or workflow"),
             "{err}"
         );
-        let run = queue_run(&mut tx, writing.id, "created").await.unwrap();
+        let run = queue_run(&mut tx, writing.id, "created", None)
+            .await
+            .unwrap();
         assert!(tx.get_run(run).await.unwrap().repo_ids.is_empty());
         let forced = Task {
             workflow_id: Some(review),
@@ -1372,7 +1389,9 @@ mod tests {
             ..Task::new(sun_core::WorkspaceId::MAIN, "Rotate keys")
         };
         tx.insert_task(&forced).await.unwrap();
-        let err = queue_run(&mut tx, forced.id, "created").await.unwrap_err();
+        let err = queue_run(&mut tx, forced.id, "created", None)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("No repository mentioned"),
             "needs_repo: {err}"
@@ -1383,7 +1402,7 @@ mod tests {
             ..Task::new(sun_core::WorkspaceId::MAIN, "Review the web header")
         };
         tx.insert_task(&named).await.unwrap();
-        let run = queue_run(&mut tx, named.id, "created").await.unwrap();
+        let run = queue_run(&mut tx, named.id, "created", None).await.unwrap();
         assert_eq!(tx.get_run(run).await.unwrap().repo_ids, vec![web.id]);
     }
 

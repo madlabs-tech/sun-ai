@@ -2,8 +2,8 @@
      (failover order) with its skills; each runtime of the chain may pin a host and set a model and an
      effort level, from what that host's CLI reports. Ready = some runtime of the chain is logged in on an online host;
      not ready says why per runtime. Its permission mode applies to every runtime of the chain; unset, each
-     host's sun.yaml default. "Anything" (bypass) needs the deployment's allow_bypass and a container or
-     VM host to run on. Creating, editing and archiving need manage_runtimes; an edit gives running tasks
+     host's sun.yaml default. "Anything" (bypass) needs the deployment's allow_bypass, the owner's bypass
+     policy to allow you (`can_bypass`; others' runs of it go as Edit files) and a container or VM host. Creating, editing and archiving need manage_runtimes; an edit gives running tasks
      nothing new (they keep their version). -->
 <script lang="ts">
   import { Badge, Button, Dialog, Icon, Input, Select, Tag } from '@hryer/madlabs-design-system/svelte';

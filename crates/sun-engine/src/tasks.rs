@@ -354,7 +354,7 @@ impl Executor {
                 } else {
                     "moved"
                 };
-                let run = queue::queue_run(&mut tx, task_id, trigger).await?;
+                let run = queue::queue_run(&mut tx, task_id, trigger, actor.as_ref()).await?;
                 if let Some(text) = &message {
                     queued::leave(&mut tx, run, text).await?;
                 }
@@ -450,7 +450,7 @@ impl Executor {
                 | TaskStatus::NeedsYou
         );
         if task.workflow_id.is_some() && working {
-            queue::queue_run(&mut tx, task_id, "assigned").await?;
+            queue::queue_run(&mut tx, task_id, "assigned", actor.as_ref()).await?;
         }
         tx.commit().await?;
         self.apply(effects).await
@@ -715,7 +715,7 @@ impl Engine {
             tx.put_setting(&key, &json!(env)).await?;
         }
         if queue {
-            queue::queue_run(&mut tx, task.id, "created").await?;
+            queue::queue_run(&mut tx, task.id, "created", new.actor.as_ref()).await?;
         }
         let task = tx.get_task(task.id).await?;
         tx.commit().await?;
