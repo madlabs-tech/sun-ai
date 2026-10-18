@@ -2023,7 +2023,10 @@ steps:
         assert_eq!(run.status, RunStatus::Failed);
         let (thread, _) = thread_and_audit(&h.store, h.run_id).await;
         let refused = thread.last().unwrap();
-        assert!(refused.starts_with("The capped session for ana was refused"));
+        assert!(
+            refused.starts_with("bypass permissions is not enabled for ana"),
+            "{refused}"
+        );
         let sessions = events(&h.store, h.run_id, SESSION_ASSIGNED).await;
         let mut secrets = vec![
             h._dir.path().display().to_string(),
@@ -2047,8 +2050,8 @@ steps:
     /// Case 7: the refusal line blames the cap only when the host refused
     /// the capped mode. A capped session refused for another reason (here a
     /// secret withheld from a marketplace runtime, `with_byo_key`) is told
-    /// to the owner as "enable bypass permissions for ana", which would not
-    /// help.
+    /// to the owner as "bypass permissions is not enabled for ana", which
+    /// would not help.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "BLO-178: bypass::refused blames the cap for any Forbidden start of a capped step"]
     async fn qa_a_capped_session_refused_for_another_reason_does_not_blame_the_cap() {
@@ -2066,7 +2069,7 @@ steps:
         assert!(
             thread
                 .iter()
-                .all(|t| !t.contains("enable bypass permissions")),
+                .all(|t| !t.starts_with("bypass permissions is not enabled for")),
             "{thread:?}"
         );
     }
