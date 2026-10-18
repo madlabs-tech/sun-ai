@@ -2,9 +2,11 @@
 //! that runs `exec` with `sh` in a temp git worktree, and a scripted agent.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Command as Process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -39,6 +41,11 @@ pub(crate) struct LocalHost {
     pub(crate) modes: Mutex<Vec<Option<String>>>,
     /// Tasks whose worktrees were removed (recorded only).
     pub(crate) removed: Mutex<Vec<TaskId>>,
+    /// While set, a started session says one line and waits before claiming
+    /// done (to steer, pause or switch it); a session stopped meanwhile
+    /// says nothing more.
+    pub(crate) hold: Arc<AtomicBool>,
+    stopped: Arc<Mutex<HashSet<SessionId>>>,
     sink: Arc<Mutex<Option<mpsc::UnboundedSender<HostEvent>>>>,
 }
 
@@ -53,6 +60,8 @@ impl LocalHost {
             envelopes: Mutex::default(),
             modes: Mutex::default(),
             removed: Mutex::default(),
+            hold: Arc::default(),
+            stopped: Arc::default(),
             sink: Arc::default(),
         })
     }
@@ -104,6 +113,7 @@ impl HostLink for LocalHost {
         self.envelopes.lock().unwrap().push(spec.envelope);
         self.modes.lock().unwrap().push(spec.permission_mode);
         let (id, sink) = (spec.session_id, self.sink.clone());
+        let (hold, stopped) = (self.hold.clone(), self.stopped.clone());
         tokio::spawn(async move {
             // Real output first: the watchdog fails an empty done claim.
             let script = [
@@ -118,6 +128,14 @@ impl HostLink for LocalHost {
             ];
             for (seq, event) in (1..).zip(script) {
                 tokio::time::sleep(Duration::from_millis(5)).await;
+                if seq > 1 && hold.load(Ordering::SeqCst) {
+                    while hold.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    if stopped.lock().unwrap().contains(&id) {
+                        return;
+                    }
+                }
                 if let Some(sink) = sink.lock().unwrap().as_ref() {
                     let _ = sink.send(HostEvent {
                         session_id: id,
@@ -138,7 +156,8 @@ impl HostLink for LocalHost {
         Ok(())
     }
 
-    async fn stop_session(&self, _: &SessionHandle, _: StopMode) -> Result<()> {
+    async fn stop_session(&self, handle: &SessionHandle, _: StopMode) -> Result<()> {
+        self.stopped.lock().unwrap().insert(handle.session_id);
         Ok(())
     }
 

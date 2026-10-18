@@ -87,6 +87,7 @@ use super::dispatch::Resume;
 use super::{
     Effect, Executor, Hook, Settled, append, decision, move_run, move_step, notes_of, step_brief,
 };
+use crate::executor::Actor;
 use crate::market::{MARKET_PREFIX, TaskLease};
 use crate::push::{SECRET_FOUND, SecretScan};
 
@@ -97,7 +98,7 @@ pub(super) const DEFAULT_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 /// An account cools down until `until` (timeline + restart-safe record).
 const RUNTIME_COOLING: &str = "runtime_cooling";
 /// A hand-off was decided; the payload is a [`Handoff`].
-pub(super) const HANDOFF_STARTED: &str = "handoff_started";
+pub(crate) const HANDOFF_STARTED: &str = "handoff_started";
 /// A hand-off finished: `{from, to, reason, checkpoint, pack}`.
 pub(crate) const HANDOFF: &str = "handoff";
 /// A runtime of the chain was passed over: `{runtime, reason}`.
@@ -689,7 +690,10 @@ impl Executor {
             other => other,
         };
         match target {
-            Some(to) => self.begin_handoff(tx, step, handoff(to), effects).await,
+            Some(to) => {
+                self.begin_handoff(tx, step, handoff(to), None, effects)
+                    .await
+            }
             // Everything is cooling: wake at the first reset and decide again.
             None => {
                 let until = match on_limit {
@@ -767,6 +771,7 @@ impl Executor {
         tx: &mut Tx,
         step: &mut Step,
         handoff: Handoff,
+        by: Option<&Actor>,
         effects: &mut Vec<Effect>,
     ) -> Result<()> {
         let why = format!("hand-off from `{}` to `{}`", handoff.from, handoff.to);
@@ -782,18 +787,21 @@ impl Executor {
             }
         }
         self.stop_step_sessions(step.id, effects);
-        append(tx, step, HANDOFF_STARTED, json!(handoff)).await?;
+        let mut payload = json!(handoff);
+        crate::bypass::stamp(&mut payload, by);
+        append(tx, step, HANDOFF_STARTED, payload).await?;
         effects.push(Effect::Handoff(handoff));
         Ok(())
     }
 
-    /// Manual switch: the same hand-off as automatic failover.
+    /// Manual switch: the same hand-off as automatic failover, by `by`.
     /// `to` must be in the run's chain; a paused run resumes.
     pub(super) async fn switch(
         &mut self,
         run_id: RunId,
         step_key: StepKey,
         to: String,
+        by: Actor,
     ) -> Result<()> {
         let mut tx = self.store.begin().await?;
         let run = tx.get_run(run_id).await?;
@@ -829,7 +837,7 @@ impl Executor {
             reason: HandoffReason::ManualSwitch,
         };
         let mut effects = Vec::new();
-        self.begin_handoff(&mut tx, &mut step, handoff, &mut effects)
+        self.begin_handoff(&mut tx, &mut step, handoff, Some(&by), &mut effects)
             .await?;
         tx.commit().await?;
         self.apply(effects).await
@@ -885,7 +893,7 @@ impl Executor {
             reason: HandoffReason::SwitchBack,
             reset_at: None,
         };
-        self.begin_handoff(tx, step, handoff, effects).await
+        self.begin_handoff(tx, step, handoff, None, effects).await
     }
 
     /// Hook: an agent step's done claim held (`verifying`). With

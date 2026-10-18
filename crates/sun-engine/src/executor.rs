@@ -303,6 +303,7 @@ enum Command {
     Steer {
         run_id: RunId,
         text: String,
+        by: tasks::Actor,
         reply: oneshot::Sender<Result<EventRecord>>,
     },
     /// A `wait` step's timer or an approval timeout fired.
@@ -357,6 +358,7 @@ enum Command {
         run_id: RunId,
         step_key: StepKey,
         to: String,
+        by: tasks::Actor,
         reply: oneshot::Sender<Result<()>>,
     },
     /// An agent asks a human (`sun.ask`); the reply yields the answer later.
@@ -396,12 +398,10 @@ enum Command {
         reply: oneshot::Sender<Result<()>>,
     },
     /// A human pauses or resumes a run (`pause`).
-    Pause {
-        run_id: RunId,
-        reply: pause::Reply,
-    },
+    Pause { run_id: RunId, reply: pause::Reply },
     Resume {
         run_id: RunId,
+        by: tasks::Actor,
         reply: pause::Reply,
     },
     /// A human retries a step (`retry`).
@@ -731,13 +731,21 @@ impl Engine {
     }
 
     /// Moves a `running` or `limit_hit` agent step to runtime `to` (one of
-    /// the run's chain) with a hand-off pack, in the same worktree.
-    /// A run paused by `on_limit: pause_and_notify` resumes.
-    pub async fn switch_runtime(&self, run_id: RunId, step_key: StepKey, to: String) -> Result<()> {
+    /// the run's chain) with a hand-off pack, in the same worktree, as `by`.
+    /// A run paused by `on_limit: pause_and_notify` resumes. From here the
+    /// run acts for `by` (its bypass cap, [`crate::bypass`]).
+    pub async fn switch_runtime(
+        &self,
+        run_id: RunId,
+        step_key: StepKey,
+        to: String,
+        by: Actor,
+    ) -> Result<()> {
         self.request(|reply| Command::Switch {
             run_id,
             step_key,
             to,
+            by,
             reply,
         })
         .await
@@ -776,13 +784,15 @@ impl Engine {
             .await
     }
 
-    /// Sends a message to the run's running agent session and
+    /// Sends `by`'s message to the run's running agent session and
     /// journals it as an `intervention` event. `InvalidInput` when no agent
-    /// session of the run is live.
-    pub async fn steer(&self, run_id: RunId, text: String) -> Result<EventRecord> {
+    /// session of the run is live. From the next session on the run acts
+    /// for `by` (its bypass cap, [`crate::bypass`]).
+    pub async fn steer(&self, run_id: RunId, text: String, by: Actor) -> Result<EventRecord> {
         self.request(|reply| Command::Steer {
             run_id,
             text,
+            by,
             reply,
         })
         .await
@@ -946,8 +956,8 @@ impl Executor {
             } => {
                 let _ = reply.send(self.on_comment(task_id, text, actor).await);
             }
-            Command::Resume { run_id, reply } => {
-                let _ = reply.send(self.resume_run(run_id).await);
+            Command::Resume { run_id, by, reply } => {
+                let _ = reply.send(self.resume_run(run_id, &by).await);
             }
             Command::Kill {
                 session_id,
@@ -979,9 +989,10 @@ impl Executor {
             Command::Steer {
                 run_id,
                 text,
+                by,
                 reply,
             } => {
-                let _ = reply.send(self.steer(run_id, text).await);
+                let _ = reply.send(self.steer(run_id, text, Some(&by)).await);
             }
             Command::Wake(step_id) => self.on_wake(step_id).await?,
             Command::Recheck(run_id) => self.recheck(run_id).await?,
@@ -1006,9 +1017,10 @@ impl Executor {
                 run_id,
                 step_key,
                 to,
+                by,
                 reply,
             } => {
-                let _ = reply.send(self.switch(run_id, step_key, to).await);
+                let _ = reply.send(self.switch(run_id, step_key, to, by).await);
             }
             Command::Ask {
                 run_id,
@@ -1177,9 +1189,14 @@ impl Executor {
     }
 
     /// Sends `text` to the run's live agent session and journals it as an
-    /// `intervention`. `InvalidInput` when no agent is running.
+    /// `intervention` by `by`. `InvalidInput` when no agent is running.
     // ponytail: the engine task waits for the host's reply, like start_session.
-    async fn steer(&mut self, run_id: RunId, text: String) -> Result<EventRecord> {
+    async fn steer(
+        &mut self,
+        run_id: RunId,
+        text: String,
+        by: Option<&Actor>,
+    ) -> Result<EventRecord> {
         let mut tx = self.store.read().await?;
         let running: HashSet<StepId> = tx
             .steps_of_run(run_id)
@@ -1200,12 +1217,14 @@ impl Executor {
             .await?;
         let mut tx = self.store.begin().await?;
         let step = tx.get_step(step_id).await?;
+        let mut payload = json!({ "text": text, "session_id": handle.session_id });
+        crate::bypass::stamp(&mut payload, by);
         let event = tx
             .append_event(NewEvent::new(
                 run_id,
                 Some(step.step_key.clone()),
                 kind::INTERVENTION,
-                json!({ "text": text, "session_id": handle.session_id }),
+                payload,
             ))
             .await?;
         corrections::on_steer(&mut tx, &step, &text).await?;
@@ -2957,14 +2976,22 @@ pub(crate) fn status_payload(step: &Step, from: Option<StepStatus>, reason: Opti
 
 /// Moves a run and journals the move, in the caller's transaction.
 async fn move_run(tx: &mut Tx, run_id: RunId, to: RunStatus, reason: Option<&str>) -> Result<()> {
+    move_run_by(tx, run_id, to, reason, None).await
+}
+
+/// [`move_run`] by `by`: from here the run acts for them ([`crate::bypass`]).
+async fn move_run_by(
+    tx: &mut Tx,
+    run_id: RunId,
+    to: RunStatus,
+    reason: Option<&str>,
+    by: Option<&Actor>,
+) -> Result<()> {
     let from = tx.set_run_status(run_id, to, reason).await?;
-    tx.append_event(NewEvent::new(
-        run_id,
-        None,
-        kind::RUN_STATUS,
-        json!({ "from": from.as_str(), "to": to.as_str(), "reason": reason }),
-    ))
-    .await?;
+    let mut payload = json!({ "from": from.as_str(), "to": to.as_str(), "reason": reason });
+    crate::bypass::stamp(&mut payload, by);
+    tx.append_event(NewEvent::new(run_id, None, kind::RUN_STATUS, payload))
+        .await?;
     tasks::follow_run(tx, run_id).await
 }
 

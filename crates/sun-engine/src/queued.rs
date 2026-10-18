@@ -12,7 +12,7 @@ use sun_core::model::{EventRecord, Step};
 use sun_core::{Error, Result, RunId, StateMachine};
 use sun_store::{EventLog, NewEvent, RunRepo, Tx};
 
-use crate::Engine;
+use crate::{Actor, Engine};
 
 /// A message waiting for the next step.
 pub(crate) const QUEUED: &str = "message_queued";
@@ -20,24 +20,37 @@ pub(crate) const QUEUED: &str = "message_queued";
 const DELIVERED: &str = "messages_delivered";
 
 impl Engine {
-    /// Queues `text` for the next agent session of the run (not a steer of
-    /// the current one). The run must not have ended.
-    pub async fn queue_message(&self, run_id: RunId, text: String) -> Result<EventRecord> {
+    /// Queues `by`'s `text` for the next agent session of the run (not a
+    /// steer of the current one); from there the run acts for `by` (its
+    /// bypass cap, [`crate::bypass`]). The run must not have ended.
+    pub async fn queue_message(
+        &self,
+        run_id: RunId,
+        text: String,
+        by: Actor,
+    ) -> Result<EventRecord> {
         let mut tx = self.store.begin().await?;
         if tx.get_run(run_id).await?.status.is_terminal() {
             return Err(Error::InvalidInput(
                 "this run has ended; there is no next step".into(),
             ));
         }
-        let event = leave(&mut tx, run_id, &text).await?;
+        let event = leave(&mut tx, run_id, &text, Some(&by)).await?;
         tx.commit().await?;
         Ok(event)
     }
 }
 
-/// Journals `text` for the run's next agent session, in the caller's transaction.
-pub(crate) async fn leave(tx: &mut Tx, run_id: RunId, text: &str) -> Result<EventRecord> {
-    let message = json!({ "text": text });
+/// Journals `by`'s `text` for the run's next agent session, in the caller's
+/// transaction.
+pub(crate) async fn leave(
+    tx: &mut Tx,
+    run_id: RunId,
+    text: &str,
+    by: Option<&Actor>,
+) -> Result<EventRecord> {
+    let mut message = json!({ "text": text });
+    crate::bypass::stamp(&mut message, by);
     Ok(tx
         .append_event(NewEvent::new(run_id, None, QUEUED, message))
         .await?)
@@ -119,7 +132,7 @@ mod tests {
         let flow = "name: two\nsteps:\n  - id: a\n    type: agent\n    prompt: first\n  - id: b\n    type: agent\n    prompt: second\n    needs: [a]\n";
         let run = seed(&store, flow).await;
         engine
-            .queue_message(run, "use the v2 API".into())
+            .queue_message(run, "use the v2 API".into(), ana())
             .await
             .unwrap();
         engine.start_run(run).await.unwrap();
@@ -130,7 +143,16 @@ mod tests {
         assert!(seen[0].contains("use the v2 API"), "{}", seen[0]);
         assert!(!seen[1].contains("use the v2 API"), "delivered once");
         assert_eq!(events(&store, run, DELIVERED).await.len(), 1);
-        let err = engine.queue_message(run, "late".into()).await.unwrap_err();
+        let err = engine.queue_message(run, "late".into(), ana()).await;
+        let err = err.unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    /// The token holder, as a person acting on the run.
+    fn ana() -> crate::Actor {
+        crate::Actor {
+            member_id: None,
+            name: "user:ana".into(),
+        }
     }
 }

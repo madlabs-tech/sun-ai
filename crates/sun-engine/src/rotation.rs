@@ -134,7 +134,7 @@ impl Executor {
                     reason: HandoffReason::ContextRotation,
                     reset_at: None,
                 };
-                self.begin_handoff(tx, step, handoff, effects).await
+                self.begin_handoff(tx, step, handoff, None, effects).await
             }
             _ => Ok(()),
         }
