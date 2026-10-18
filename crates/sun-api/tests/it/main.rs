@@ -8,6 +8,7 @@ mod auth;
 mod billing;
 mod bypass_acts_for;
 mod bypass_gate;
+mod bypass_live;
 mod bypass_paths;
 mod chats;
 mod common;

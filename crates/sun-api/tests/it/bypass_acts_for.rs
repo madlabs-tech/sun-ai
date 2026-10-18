@@ -19,16 +19,16 @@ use crate::workspaces::{call, call_as, member_token};
 
 /// The owner's agent task with a live session on a scripted host, and
 /// member `bob`.
-struct Live {
-    k: Kernel,
-    host: Socket,
-    task: String,
-    run: RunId,
-    bob: String,
-    bob_id: Value,
+pub(crate) struct Live {
+    pub(crate) k: Kernel,
+    pub(crate) host: Socket,
+    pub(crate) task: String,
+    pub(crate) run: RunId,
+    pub(crate) bob: String,
+    pub(crate) bob_id: Value,
 }
 
-async fn live() -> Live {
+pub(crate) async fn live() -> Live {
     let k = kernel().await;
     let mut host = scripted_host(&k, json!({})).await;
     let task = new_task(&k.app, AGENT).await;
@@ -77,7 +77,7 @@ impl Live {
 
 /// Runs `request` while playing the host's side of whatever it asks for;
 /// the request's `(status, body)`.
-async fn with_host<F>(host: &mut Socket, request: F) -> (StatusCode, Value)
+pub(crate) async fn with_host<F>(host: &mut Socket, request: F) -> (StatusCode, Value)
 where
     F: Future<Output = (StatusCode, Value)>,
 {
