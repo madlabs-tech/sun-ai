@@ -488,9 +488,30 @@ pub struct Probe<'a> {
 // ponytail: checks the local machine; the host matters once sun-host runs
 // adapters on remote hosts and forwards the check.
 pub async fn readiness(probe: &Probe<'_>) -> Readiness {
+    readiness_within(probe, PROBE_CAP).await
+}
+
+/// [`readiness`] with each command capped at `cap`.
+async fn readiness_within(probe: &Probe<'_>, cap: Duration) -> Readiness {
     let name = probe.name;
-    let version = match run(probe.binary, &["--version"]).await {
+    let version = match run_within(probe.binary, &["--version"], cap).await {
         Ok(out) => parse_version(&String::from_utf8_lossy(&out.stdout)),
+        // It started but didn't answer in time (a loaded host, a slow npm
+        // shim): installed, not ready yet. Not logged in keeps it off the
+        // scheduler and listed as `needs_login` with "Check again"; the next
+        // re-probe settles it.
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            return Readiness {
+                installed: true,
+                version: None,
+                logged_in: false,
+                detail: Some(format!(
+                    "{name} did not answer `--version` within {} s; the host may be busy. \
+                     Sun checks again in a few minutes",
+                    cap.as_secs()
+                )),
+            };
+        }
         Err(e) => {
             return Readiness {
                 installed: false,
@@ -504,7 +525,7 @@ pub async fn readiness(probe: &Probe<'_>) -> Readiness {
         }
     };
     let logged_in = probe.login_args.is_empty()
-        || run(probe.binary, probe.login_args)
+        || run_within(probe.binary, probe.login_args, cap)
             .await
             .is_ok_and(|out| (probe.logged_in)(&out));
     let detail = if !logged_in {
@@ -569,14 +590,23 @@ pub fn parse_version(out: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Runs `binary args` to completion (15 s cap): readiness and effort probes.
+/// How long a readiness or effort probe command may take.
+const PROBE_CAP: Duration = Duration::from_secs(15);
+
+/// Runs `binary args` to completion ([`PROBE_CAP`]): readiness and effort probes.
 pub(crate) async fn run(binary: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        Command::new(binary).args(args).output(),
-    )
-    .await
-    .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
+    run_within(binary, args, PROBE_CAP).await
+}
+
+/// [`run`] capped at `cap`; running past it is `ErrorKind::TimedOut`.
+async fn run_within(
+    binary: &Path,
+    args: &[&str],
+    cap: Duration,
+) -> std::io::Result<std::process::Output> {
+    tokio::time::timeout(cap, Command::new(binary).args(args).output())
+        .await
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
 }
 
 /// An mpsc receiver as a `Stream` (saves a tokio-stream dependency).
@@ -629,6 +659,47 @@ mod tests {
         ] {
             assert_eq!(parse_version(out).as_deref(), want, "{out}");
         }
+    }
+
+    /// BLO-170: a CLI that doesn't answer `--version` in time stays listed
+    /// as not ready (`needs_login` with the reason), not dropped as missing.
+    #[tokio::test]
+    async fn a_probe_timeout_is_not_ready_not_uninstalled() {
+        use std::os::unix::fs::PermissionsExt;
+        use sun_core::{Availability, Presence, RuntimeState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let slow = dir.path().join("slow-cli");
+        std::fs::write(&slow, "#!/bin/sh\nsleep 5\n").unwrap();
+        std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let probe = Probe {
+            name: "Slow",
+            binary: &slow,
+            cli: "slow",
+            install: "npm install -g slow",
+            login_args: &[],
+            logged_in: |_| true,
+            login: "slow login",
+        };
+        let ready = readiness_within(&probe, Duration::from_millis(200)).await;
+        assert!(ready.installed && !ready.logged_in, "{ready:?}");
+        assert_eq!(ready.version, None);
+        let detail = ready.detail.as_deref().unwrap();
+        assert!(detail.contains("did not answer `--version`"), "{detail}");
+        assert!(!detail.contains("not found"), "{detail}");
+        let availability = Availability::of(&ready, false);
+        assert_eq!(availability, Availability::NeedsLogin);
+        assert_eq!(
+            RuntimeState::derive(Presence::Online, availability, 0),
+            RuntimeState::NeedsLogin
+        );
+
+        let missing = Probe {
+            binary: &dir.path().join("not-there"),
+            ..probe
+        };
+        let gone = readiness_within(&missing, Duration::from_millis(200)).await;
+        assert!(!gone.installed, "{gone:?}");
     }
 
     #[test]
