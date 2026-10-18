@@ -13,8 +13,8 @@ use sun_core::model::{
     Artifact, Assignee, ModKind, OutboxStatus, Permission, Priority, Run, RuntimeSource, Task,
 };
 use sun_core::{
-    NoteId, OutboxId, ProjectId, RunId, RunStatus, StateMachine, StepKey, StepStatus, TaskId,
-    TaskStatus, WorkflowId, WorkspaceId,
+    Error, NoteId, OutboxId, ProjectId, RunId, RunStatus, StateMachine, StepKey, StepStatus,
+    TaskId, TaskStatus, WorkflowId, WorkspaceId,
 };
 use sun_engine::{NewTask, OnWorkspace, Resolution, TaskChange, WorkflowPick};
 
@@ -1323,9 +1323,11 @@ struct AnswerInput {
     answer: String,
 }
 
-/// Answers an agent's `sun.ask` question; its step runs again.
+/// Answers an agent's `sun.ask` question as the caller; its step runs
+/// again. `409` when the caller is capped and the session runs in bypass.
 async fn answer_question(
     State(api): State<Api>,
+    Extension(caller): Extension<Caller>,
     Path((run, question)): Path<(String, String)>,
     Body(input): Body<AnswerInput>,
 ) -> ApiResult<Json<TaskView>> {
@@ -1339,8 +1341,12 @@ async fn answer_question(
     }
     let run = api.engine.run(run_id).await?;
     api.engine
-        .answer(run_id, question_id, answer.to_owned())
-        .await?;
+        .answer(run_id, question_id, answer.to_owned(), caller.task_actor())
+        .await
+        .map_err(|e| match e {
+            Error::Forbidden(why) => ApiError::conflict(why),
+            e => e.into(),
+        })?;
     summary(&api, run.task_id).await
 }
 

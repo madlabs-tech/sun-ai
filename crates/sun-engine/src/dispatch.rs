@@ -247,6 +247,7 @@ impl Executor {
         }
         // A host rule refused it (bypass on a bare host): no retry helps.
         if let Error::Forbidden(why) = error {
+            crate::bypass::refused(tx, step, why).await?;
             return self.give_up(tx, step, why, true, effects).await;
         }
         // The host answered, so the CLI refused the resume: start fresh.

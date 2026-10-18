@@ -805,15 +805,18 @@ async fn agent_get_resolves_run_pointers_and_ask_waits_for_a_human() {
         h.moves("implement").await.last().unwrap(),
         "waiting_approval"
     );
-    let err = h.engine.answer(h.run_id, qid, "mysql".into()).await;
+    let err = h
+        .engine
+        .answer(h.run_id, qid, "mysql".into(), holder())
+        .await;
     assert!(matches!(err, Err(Error::InvalidInput(_))), "{err:?}");
     h.engine
-        .answer(h.run_id, qid, "sqlite".into())
+        .answer(h.run_id, qid, "sqlite".into(), holder())
         .await
         .unwrap();
     assert_eq!(answer.await.unwrap().unwrap(), "sqlite");
     assert_eq!(h.moves("implement").await.last().unwrap(), "running");
-    let err = h.engine.answer(h.run_id, qid, "pg".into()).await;
+    let err = h.engine.answer(h.run_id, qid, "pg".into(), holder()).await;
     assert!(
         matches!(err, Err(Error::InvalidInput(_))),
         "closed: {err:?}"

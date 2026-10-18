@@ -18,6 +18,7 @@ use sun_store::{ArtifactRepo, EventLog, NoteRepo, PointerRepo, RunRepo, SecretRe
 use tokio::sync::oneshot;
 
 use super::{Executor, append, move_step};
+use crate::Actor;
 use crate::state;
 
 /// A question was asked: `{question_id, step_id, question, options}`.
@@ -117,9 +118,16 @@ impl Executor {
         Ok(receiver)
     }
 
-    /// A human answers question `id` of `run_id`. `options`, when the agent
-    /// gave some, are the only valid answers. The step runs again.
-    pub(super) async fn answer(&mut self, run_id: RunId, id: NoteId, answer: String) -> Result<()> {
+    /// `by` answers question `id` of `run_id`. `options`, when the agent
+    /// gave some, are the only valid answers. A capped `by` may not answer a
+    /// bypass session (BLO-172). The step runs again.
+    pub(super) async fn answer(
+        &mut self,
+        run_id: RunId,
+        id: NoteId,
+        answer: String,
+        by: &Actor,
+    ) -> Result<()> {
         let mut tx = self.store.begin().await?;
         let question = question_of(&mut tx, run_id, id).await?;
         if !question.options.is_empty() && !question.options.contains(&answer) {
@@ -136,6 +144,11 @@ impl Executor {
                 "question {id} is closed (step `{}` is {})",
                 step.step_key, step.status
             )));
+        }
+        if let Some(session) = step.session_id
+            && crate::bypass::live_bypass(&mut tx, run_id, session, Some(by)).await?
+        {
+            return Err(Error::Forbidden(crate::bypass::ANSWER_REFUSED.into()));
         }
         move_step(
             &mut tx,
