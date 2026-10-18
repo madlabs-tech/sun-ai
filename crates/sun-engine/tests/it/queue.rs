@@ -1945,3 +1945,245 @@ async fn queue_places_a_steps_mode_only_on_hosts_that_report_it() {
         "never placed"
     );
 }
+
+/// The latest run of `task` once it failed, if it did.
+async fn failed_run(store: &Store, task: TaskId) -> Option<sun_core::model::Run> {
+    let mut read = store.read().await.unwrap();
+    let run = read.runs_of_task(task).await.unwrap().pop();
+    run.filter(|r| r.status == RunStatus::Failed)
+}
+
+/// A mixed fleet, one run per host at a time: host `legacy` (the four
+/// modes before `auto`, and the fallback) and `current`, whose `fake`
+/// reports `auto`, with `count` backlog tasks of an `auto` step. Returns
+/// `current`; the dir holds the store.
+async fn auto_fleet(count: usize) -> (tempfile::TempDir, Store, Engine, Queue, Vec<Task>, HostId) {
+    const AUTO: &str = "name: auto\nsteps:\n  \
+                        - {id: implement, type: agent, prompt: do it, permission_mode: auto}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let tasks = tasks_of(&store, AUTO, count).await;
+    let legacy = add_host(&store, "legacy", true).await;
+    let current = add_host(&store, "current", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![legacy, current])));
+    let one = HostCap {
+        runs: Some(1),
+        ..HostCap::default()
+    };
+    let caps = Caps {
+        per_host: BTreeMap::from([("*".to_owned(), one)]),
+        ..Caps::default()
+    };
+    let (engine, queue) = kernel_on(&store, link, legacy, caps).await;
+    let with_auto = serde_json::json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4,
+        "runtimes": [{"adapter": "fake", "readiness":
+            {"installed": true, "version": "1", "logged_in": true, "detail": null},
+            "permission_modes": ["default", "accept_edits", "plan", "auto", "bypass_permissions"]}],
+    });
+    engine
+        .set_host_capabilities(current, &with_auto)
+        .await
+        .unwrap();
+    (dir, store, engine, queue, tasks, current)
+}
+
+/// BLO-168 case 2, mixed fleet under load: a legacy host (the four modes
+/// before `auto`) and one that reports `auto`, one run each at a time.
+/// `auto` runs wait for the second host while the legacy one sits idle.
+/// Once the second host is detached from the workspace, the waiting runs
+/// are refused (journalled), not left queued; reattached, new runs place.
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_a_mixed_fleet_refuses_auto_once_its_only_host_detaches() {
+    let (_dir, store, engine, queue, tasks, current) = auto_fleet(4).await;
+    for task in &tasks[..3] {
+        queue.enqueue(task.id).await.unwrap();
+    }
+    let first = tasks[0].id;
+    eventually("the first auto run placed", || async {
+        placed_on(&store, first).await.is_some()
+    })
+    .await;
+    assert_eq!(placed_on(&store, first).await, Some(current));
+    // The legacy host is free the whole time; the other two still wait.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for task in &tasks[1..3] {
+        assert_eq!(placed_on(&store, task.id).await, None, "never on legacy");
+        assert_eq!(task_status(&store, task.id).await, TaskStatus::Todo);
+    }
+
+    let host = sun_engine::WorkspaceItem::Host(current);
+    engine
+        .detach_from_workspace(sun_core::WorkspaceId::MAIN, host, "owner")
+        .await
+        .unwrap();
+    // Detaching doesn't start a placement pass (BLO-174, pinned by
+    // `queue_detaching_the_only_auto_host_refuses_its_waiting_runs`); the
+    // next queue event does: here an unrelated plain task.
+    let plain = tasks_of(&store, WORKFLOW, 1).await.remove(0);
+    queue.enqueue(plain.id).await.unwrap();
+    for task in &tasks[1..3] {
+        eventually("the waiting auto run refused", || async {
+            failed_run(&store, task.id).await.is_some()
+        })
+        .await;
+        let run = failed_run(&store, task.id).await.unwrap();
+        let reason = run.end_reason.clone().unwrap_or_default();
+        assert_eq!(
+            reason,
+            "fake doesn't offer permission mode `auto`; \
+             it offers default, accept_edits, plan, bypass_permissions"
+        );
+        let events = store
+            .read()
+            .await
+            .unwrap()
+            .events_after(Some(run.id), 0, 64)
+            .await
+            .unwrap();
+        let refused = events
+            .iter()
+            .find(|e| e.kind == "placement_refused_mode_unoffered")
+            .expect("journalled");
+        assert_eq!(refused.payload["runtime"], "fake");
+        assert_eq!(refused.payload["exec_env"], "bare");
+        assert!(!events.iter().any(|e| e.kind == "run_placed"));
+    }
+
+    // Reattached: a new auto run places on it again (the first run left).
+    let (running, _) = run_of(&store, first).await.unwrap();
+    engine.cancel(running).await.unwrap();
+    {
+        use sun_store::WorkspaceRepo;
+        let mut tx = store.begin().await.unwrap();
+        tx.link(sun_core::WorkspaceId::MAIN, host).await.unwrap();
+        tx.commit().await.unwrap();
+    }
+    let again = tasks[3].id;
+    queue.enqueue(again).await.unwrap();
+    eventually("the new auto run placed", || async {
+        placed_on(&store, again).await.is_some()
+    })
+    .await;
+    assert_eq!(placed_on(&store, again).await, Some(current));
+}
+
+/// A member the policy doesn't allow to bypass runs a Codex bypass step on
+/// a host whose Codex reports what `Codex::permission_modes` does without
+/// `--approve-for-me`. Waits until the run failed; the dir holds the store.
+async fn capped_codex_refusal() -> (tempfile::TempDir, Store, Engine, TaskId) {
+    use sun_store::MemberRepo;
+    const BYPASS: &str = "name: bypass\nruntime: {chain: [codex]}\nsteps:\n  \
+                          - {id: implement, type: agent, prompt: do it, permission_mode: bypass_permissions}\n";
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).await.unwrap();
+    let task = tasks_of(&store, BYPASS, 1).await.remove(0);
+    let mut tx = store.begin().await.unwrap();
+    let ana = tx
+        .upsert_member("local", "ana@sun.test", "ana", Some("ana@sun.test"), false)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let host = add_host(&store, "bare", true).await;
+    let link = std::sync::Arc::new(Online(std::sync::Mutex::new(vec![host])));
+    let (engine, queue) = kernel_on(&store, link, host, Caps::default()).await;
+    let codex = serde_json::json!({
+        "os": "linux", "arch": "x86_64", "cpus": 4,
+        "runtimes": [{"adapter": "codex", "readiness":
+            {"installed": true, "version": "1", "logged_in": true, "detail": null},
+            "permission_modes": ["default", "plan", "bypass_permissions"]}],
+    });
+    engine.set_host_capabilities(host, &codex).await.unwrap();
+    let by = sun_engine::Actor {
+        member_id: Some(ana.id),
+        name: "user:ana".into(),
+    };
+    queue.enqueue_by(task.id, Some(&by)).await.unwrap();
+    eventually("the capped codex run refused", || async {
+        failed_run(&store, task.id).await.is_some()
+    })
+    .await;
+    (dir, store, engine, task.id)
+}
+
+/// BLO-168 case 4 (Rimuru's decision): capped to `accept_edits`, which
+/// Codex has no exact equivalent for, the member's bypass run is refused at
+/// placement, never swapped to `plan` or `workspace-write`. Its thread
+/// saying why is [`queue_a_refused_capped_codex_run_says_why_on_its_thread`]
+/// (BLO-175).
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_refuses_a_capped_members_codex_bypass_run() {
+    let (_dir, store, _engine, task) = capped_codex_refusal().await;
+    let run = failed_run(&store, task).await.unwrap();
+    let why = "codex doesn't offer permission mode `accept_edits`; \
+               it offers default, plan, bypass_permissions";
+    assert_eq!(run.end_reason.as_deref(), Some(why));
+    let events = store
+        .read()
+        .await
+        .unwrap()
+        .events_after(Some(run.id), 0, 64)
+        .await
+        .unwrap();
+    let refused = events
+        .iter()
+        .find(|e| e.kind == "placement_refused_mode_unoffered")
+        .unwrap_or_else(|| panic!("not journalled: {events:?}"));
+    assert_eq!(refused.payload["runtime"], "codex");
+    assert_eq!(refused.payload["reason"], why);
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(!kinds.contains(&"run_placed"), "never placed: {kinds:?}");
+    assert!(!kinds.contains(&"step_status"), "no step ran: {kinds:?}");
+}
+
+/// BLO-168 case 4, the visible half: the task's thread says why the run
+/// failed, and that the member's bypass was capped. RED (BLO-175): the
+/// refusal only logs `todo -> failed`; the cap line is written at session
+/// start, which a refused run never reaches.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "BLO-175: a placement refusal says nothing on the task thread"]
+async fn queue_a_refused_capped_codex_run_says_why_on_its_thread() {
+    let (_dir, _store, engine, task) = capped_codex_refusal().await;
+    let activity = engine.activity(task, 0).await.unwrap();
+    let thread: Vec<String> = activity.iter().map(|a| a.body.to_string()).collect();
+    let why = "codex doesn't offer permission mode `accept_edits`";
+    assert!(
+        thread.iter().any(|line| line.contains(why)),
+        "thread doesn't say why: {thread:#?}"
+    );
+    assert!(
+        thread
+            .iter()
+            .any(|line| line.contains("bypass permissions is not enabled for ana")),
+        "thread doesn't say the bypass was capped: {thread:#?}"
+    );
+}
+
+/// BLO-168 case 2, as specified: detaching the only host that reports
+/// `auto` refuses the runs waiting for it, with no other queue event.
+/// RED (BLO-174): `Engine::detach_from_workspace` starts no placement
+/// pass, so the runs stay queued until something else wakes the queue.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "BLO-174: detaching a host starts no placement pass"]
+async fn queue_detaching_the_only_auto_host_refuses_its_waiting_runs() {
+    let (_dir, store, engine, queue, tasks, current) = auto_fleet(2).await;
+    for task in &tasks {
+        queue.enqueue(task.id).await.unwrap();
+    }
+    eventually("the first auto run placed", || async {
+        placed_on(&store, tasks[0].id).await.is_some()
+    })
+    .await;
+    // Let the passes the placement itself causes finish first.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(task_status(&store, tasks[1].id).await, TaskStatus::Todo);
+    let host = sun_engine::WorkspaceItem::Host(current);
+    engine
+        .detach_from_workspace(sun_core::WorkspaceId::MAIN, host, "owner")
+        .await
+        .unwrap();
+    eventually("the waiting auto run refused", || async {
+        failed_run(&store, tasks[1].id).await.is_some()
+    })
+    .await;
+}
