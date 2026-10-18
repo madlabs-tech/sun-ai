@@ -204,10 +204,14 @@ pub(crate) async fn queue_steer(
     Ok(event)
 }
 
-/// A capped session of `step` the host refused, said on the task's thread:
-/// the run fails and never runs in another mode (BLO-168: Codex offers no
-/// `accept_edits`). Nothing for a session that wasn't capped.
+/// A capped session of `step` the host refused for its mode, said on the
+/// task's thread: the run fails and never runs in another mode (BLO-168:
+/// Codex offers no `accept_edits`). Nothing for a session that wasn't
+/// capped, or that was refused for another reason (BLO-178).
 pub(crate) async fn refused(tx: &mut Tx, step: &sun_core::model::Step, why: &str) -> Result<()> {
+    if !sun_core::refuses_mode(why, CAPPED_TO) {
+        return Ok(());
+    }
     let capped = tx
         .search_events(step.run_id, Some(BYPASS_CAPPED), None, 0, u32::MAX)
         .await?;
@@ -2049,11 +2053,10 @@ steps:
 
     /// Case 7: the refusal line blames the cap only when the host refused
     /// the capped mode. A capped session refused for another reason (here a
-    /// secret withheld from a marketplace runtime, `with_byo_key`) is told
-    /// to the owner as "bypass permissions is not enabled for ana", which
-    /// would not help.
+    /// secret withheld from a marketplace runtime, `with_byo_key`) fails
+    /// with that reason, never "bypass permissions is not enabled for ana",
+    /// which would not help (BLO-178).
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "BLO-178: bypass::refused blames the cap for any Forbidden start of a capped step"]
     async fn qa_a_capped_session_refused_for_another_reason_does_not_blame_the_cap() {
         let h = owners_run_held(BYPASS).await;
         *h.local.refusal.lock().unwrap() = Some(
@@ -2065,12 +2068,9 @@ steps:
         h.release();
         let run = until_run_ends(&h.store, h.run_id).await;
         assert_eq!(run.status, RunStatus::Failed);
+        let reason = format!("{:?}", run.end_reason);
+        assert!(reason.contains("`OR_KEY` is withheld"), "{reason}");
         let (thread, _) = thread_and_audit(&h.store, h.run_id).await;
-        assert!(
-            thread
-                .iter()
-                .all(|t| !t.starts_with("bypass permissions is not enabled for")),
-            "{thread:?}"
-        );
+        assert_eq!(thread, [STEER_QUEUED.to_owned(), capped_line("ana")]);
     }
 }
