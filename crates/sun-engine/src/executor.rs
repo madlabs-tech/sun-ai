@@ -2229,8 +2229,9 @@ impl Executor {
         )
         .await?;
         let mut prompt = gates::with_feedback(tx, step, prompt).await?;
-        // A fresh step (not a hand-off or resume) takes the queued messages.
-        if handoff.is_none() && resume.is_none() {
+        // Every new session (fresh or hand-off) takes the queued messages; a
+        // resume took them already (`follow_up`).
+        if resume.is_none() {
             prompt = crate::queued::take_queued(tx, step, prompt).await?;
         }
         effects.push(Effect::Start(Start {
