@@ -333,10 +333,23 @@ pub fn unoffered_mode(
     (!offered.contains(&mode)).then(|| {
         let offered: Vec<&str> = offered.iter().map(|m| m.as_str()).collect();
         format!(
-            "{tool} doesn't offer permission mode `{mode}`; it offers {}",
+            "{tool} {}; it offers {}",
+            unoffered(mode),
             offered.join(", ")
         )
     })
+}
+
+/// Whether a host's refusal `why` is [`unoffered_mode`]'s for `mode`
+/// (BLO-178): the mode itself was refused, not the session for another
+/// reason.
+pub fn refuses_mode(why: &str, mode: PermissionMode) -> bool {
+    why.contains(&unoffered(mode))
+}
+
+/// The words of [`unoffered_mode`] that name `mode`.
+fn unoffered(mode: PermissionMode) -> String {
+    format!("doesn't offer permission mode `{mode}`")
 }
 
 /// The env var that carries a `byo_key` runtime's key value into the session
