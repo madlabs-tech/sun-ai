@@ -1200,3 +1200,147 @@ async fn a_bare_host_refuses_bypass_under_any_spelling_or_in_an_extension_env() 
     );
     assert!(fake.specs.lock().unwrap().is_empty(), "no session started");
 }
+
+/// One session start on a fresh host whose only adapter is `adapter` and
+/// whose `runtimes.permission_mode` is `default`; the spec asks for `asked`.
+async fn start_in_mode(
+    adapter: Arc<dyn RuntimeAdapter>,
+    default: sun_core::PermissionMode,
+    asked: Option<sun_core::PermissionMode>,
+) -> ReplyBody {
+    let (listener, url) = listen().await;
+    let mut config = HostConfig::new(temp_dir("mode-offered"));
+    config.permission_mode = Some(default);
+    let tool = adapter.id().to_owned();
+    let host = Host::open(config, vec![adapter]).unwrap();
+    let credentials = Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    };
+    let running = tokio::spawn(Arc::clone(&host).run(credentials));
+    let mut kernel = Kernel::accept(&listener).await;
+    let HostFrame::Hello { capabilities, .. } = kernel.recv(false).await else {
+        panic!("expected hello")
+    };
+    assert_eq!(capabilities.runtimes[0].adapter, tool);
+    let worktree = Worktree::Folder {
+        task_id: TaskId::generate(),
+    };
+    let ReplyBody::Worktree { path } = kernel
+        .request(|id| KernelFrame::WorktreePrepare { id, worktree })
+        .await
+    else {
+        panic!()
+    };
+    let spec = SessionSpec {
+        skills: None,
+        session_id: SessionId::generate(),
+        run_id: RunId::generate(),
+        step_key: StepKey::new("implement").unwrap(),
+        worktree: path,
+        envelope: "do it".into(),
+        envelope_parts: None,
+        model: None,
+        effort: None,
+        mcp_config: None,
+        env: BTreeMap::new(),
+        exec_env: ExecEnvSpec::Bare,
+        resume: None,
+        permission_mode: asked.map(|m| m.as_str().to_owned()),
+        byo_key: None,
+    };
+    let body = kernel
+        .request(|id| KernelFrame::SessionStart {
+            id,
+            adapter: tool,
+            spec: Box::new(spec),
+        })
+        .await;
+    running.abort();
+    body
+}
+
+/// BLO-168 contract, per real adapter on a fake CLI: a mode the adapter
+/// doesn't report is refused before the CLI starts, as this host's default
+/// (the agent says "host default") or asked for, with an error naming the
+/// tool, the mode and the fix; it never runs as another mode. A mode it
+/// reports starts, defaulted or asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_refuses_a_mode_its_adapter_does_not_report() {
+    use sun_core::PermissionMode::{AcceptEdits, Auto, Plan};
+    let bin = temp_dir("mode-clis");
+    // Each fake answers its probes at once and plays a session only for
+    // the start command. Claude Code before `auto`: `--permission-mode`
+    // lists no `auto`.
+    let claude = bin.join("claude");
+    script(
+        &claude,
+        "#!/bin/sh\n[ \"$1\" = --help ] && echo '  --permission-mode <mode>  (choices: \"plan\")'\n[ \"$1\" = -p ] || exit 0\nexec sleep 5\n",
+    );
+    // Codex: no exact `accept_edits` ever; `exec --help` without
+    // `--approve-for-me` also means no `auto`.
+    let codex = bin.join("codex");
+    script(
+        &codex,
+        "#!/bin/sh\ncase \"$1 $2\" in 'exec --help') exit 0 ;; exec*) ;; *) exit 0 ;; esac\necho '{\"type\":\"thread.started\",\"thread_id\":\"t-1\"}'\nexec sleep 5\n",
+    );
+    // OpenCode reports the four legacy modes (no `auto`); the handshake is
+    // the recorded fixture's first two lines.
+    let fixture = format!(
+        "{}/../sun-runtime/fixtures/opencode/{}/normal.jsonl",
+        env!("CARGO_MANIFEST_DIR"),
+        sun_runtime::process::tested_versions("opencode")[0]
+    );
+    let opencode = bin.join("opencode");
+    script(
+        &opencode,
+        &format!(
+            "#!/bin/sh\n[ \"$1\" = acp ] || exit 0\nread -r l; sed -n 1p '{fixture}'\nread -r l; sed -n 2p '{fixture}'\nexec sleep 5\n"
+        ),
+    );
+    type Make = Box<dyn Fn() -> Arc<dyn RuntimeAdapter>>;
+    let cases: [(Make, sun_core::PermissionMode, sun_core::PermissionMode); 3] = [
+        (
+            Box::new(move || Arc::new(sun_runtime::claude::ClaudeCode::new(&claude))),
+            Auto,
+            AcceptEdits,
+        ),
+        (
+            Box::new(move || Arc::new(sun_runtime::codex::Codex::new(&codex))),
+            AcceptEdits,
+            Plan,
+        ),
+        (
+            Box::new(move || Arc::new(sun_runtime::opencode::OpenCode::new(&opencode))),
+            Auto,
+            AcceptEdits,
+        ),
+    ];
+    for (make, unreported, reported) in cases {
+        let tool = make().id().to_owned();
+        let refusals = [
+            (None, "this host's default"),
+            (Some(unreported), "pick one of those on the agent"),
+        ];
+        for (asked, fix) in refusals {
+            let body = start_in_mode(make(), unreported, asked).await;
+            let ReplyBody::Error { code, message } = body else {
+                panic!("{tool} {asked:?}: {body:?}")
+            };
+            assert_eq!(code, "forbidden", "{tool}: {message}");
+            let mode = format!("permission mode `{unreported}`");
+            assert!(message.contains(&tool), "{message}");
+            assert!(message.contains(&mode), "{message}");
+            assert!(message.contains(fix), "{message}");
+        }
+        // Reported: starts as the host's default, and asked for.
+        for (default, asked) in [(reported, None), (unreported, Some(reported))] {
+            let body = start_in_mode(make(), default, asked).await;
+            assert!(
+                matches!(body, ReplyBody::Session { .. }),
+                "{tool} {asked:?}: {body:?}"
+            );
+        }
+    }
+}

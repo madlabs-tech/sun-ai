@@ -320,6 +320,25 @@ pub fn mode_refusal(mode: Option<&str>, env: &ExecEnvSpec) -> Option<String> {
     }
 }
 
+/// Why `tool`, which reports it can enforce `offered`, may not run a
+/// session in `mode`, if it may not (BLO-168): a mode the CLI has no exact
+/// equivalent for is refused, never run as another. The one owner of the
+/// rule, checked at placement, at dispatch and by the host before it starts
+/// the CLI.
+pub fn unoffered_mode(
+    tool: &str,
+    mode: PermissionMode,
+    offered: &[PermissionMode],
+) -> Option<String> {
+    (!offered.contains(&mode)).then(|| {
+        let offered: Vec<&str> = offered.iter().map(|m| m.as_str()).collect();
+        format!(
+            "{tool} doesn't offer permission mode `{mode}`; it offers {}",
+            offered.join(", ")
+        )
+    })
+}
+
 /// The env var that carries a `byo_key` runtime's key value into the session
 /// (`SessionSpec::env`, so it is redacted from every event).
 pub const BYO_KEY_ENV: &str = "SUN_BYO_KEY";

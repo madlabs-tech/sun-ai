@@ -22,12 +22,11 @@
 //! | `bypass_permissions` | `--dangerously-bypass-approvals-and-sandbox` | everything, no sandbox (container or vm only) |
 //!
 //! `accept_edits` is not reported: Codex's sandbox bounds edits and
-//! commands alike, so it can't allow one without the other. A session can
-//! still get it from a host's own `runtimes.permission_mode` default (or an
-//! agent saved before the save-time check); it then runs workspace-write
-//! with `approval_policy="never"`, as every Codex session did before
-//! BLO-163. `auto` is reported only when the installed `codex exec --help`
-//! lists `--approve-for-me`.
+//! commands alike, so it can't allow one without the other. The host
+//! refuses a session in a mode its adapter doesn't report, whether asked for
+//! or its own `runtimes.permission_mode` default (BLO-168), so `sun-host`
+//! never starts Codex in it. `auto` is reported only when the installed
+//! `codex exec --help` lists `--approve-for-me`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -148,7 +147,8 @@ pub fn mode_args(mode: PermissionMode) -> &'static [&'static str] {
         PermissionMode::Plan | PermissionMode::Default => {
             &["-c", "sandbox_mode=\"read-only\"", "-c", NEVER]
         }
-        // Not reported (module doc): only a host default reaches it.
+        // Not reported (module doc): the host refuses it; only a direct
+        // caller of the adapter gets workspace-write here.
         PermissionMode::AcceptEdits => &["-c", "sandbox_mode=\"workspace-write\"", "-c", NEVER],
         PermissionMode::Auto => &["--approve-for-me"],
         PermissionMode::BypassPermissions => &["--dangerously-bypass-approvals-and-sandbox"],

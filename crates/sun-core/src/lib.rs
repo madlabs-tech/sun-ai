@@ -104,7 +104,7 @@ pub use runtime::{
     EffortLevel, Envelope, ExecEnvSpec, ExtensionEnvSpec, HostCtx, ModelEffort, PERMISSION_MODES,
     PermissionMode, Readiness, RuntimeAdapter, SKILL_RUNTIMES_FILE, SessionHandle, SessionSpec,
     Steer, StopMode, Transcript, VmSpec, bypass_refusal, mode_refusal, repo_skill_dirs,
-    skill_folders,
+    skill_folders, unoffered_mode,
 };
 pub use runtime_state::{Availability, Presence, RuntimeState};
 pub use status::{RunStatus, StateMachine, StepStatus, TaskStatus};

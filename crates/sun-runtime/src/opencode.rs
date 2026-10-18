@@ -21,9 +21,9 @@
 //! | `bypass_permissions` | every kind | everything |
 //!
 //! `auto` is not reported (the four [`PermissionMode::LEGACY`] modes are):
-//! OpenCode has no reviewer to approve "safe" commands. A session can still
-//! get it from a host's own `runtimes.permission_mode` default; it then
-//! answers as `accept_edits`, never more.
+//! OpenCode has no reviewer to approve "safe" commands. The host refuses a
+//! session in it, asked for or its own default (BLO-168); a direct caller of
+//! the adapter gets `accept_edits` answers, never more.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
