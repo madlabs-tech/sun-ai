@@ -157,8 +157,23 @@ async fn build(
     market: Option<Arc<dyn Marketplace>>,
     caps: Caps,
 ) -> Kernel {
+    build_in(tempfile::tempdir().unwrap(), presets, mods, market, caps).await
+}
+
+/// A kernel on the data dir `dir` as it is (e.g. a store left at an older
+/// migration, which opening it upgrades).
+pub async fn kernel_in(dir: tempfile::TempDir) -> Kernel {
+    build_in(dir, None, Arc::new(NoMods), None, Caps::default()).await
+}
+
+async fn build_in(
+    dir: tempfile::TempDir,
+    presets: Option<PresetUrls>,
+    mods: Arc<dyn ModLink>,
+    market: Option<Arc<dyn Marketplace>>,
+    caps: Caps,
+) -> Kernel {
     let hang = hang_guard();
-    let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).await.unwrap();
     // The engine places every session on this host; enrol it up front.
     let host = HostId::generate();

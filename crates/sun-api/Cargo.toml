@@ -39,6 +39,8 @@ p256 = { version = "0.13.2", features = ["ecdsa"] }
 sun-host.workspace = true
 sun-runtime.workspace = true
 sun-store.workspace = true
+# A store left at an older migration, for the upgrade tests (sun-store's version).
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 # Loopback GitHub and GitLab mocks for the git connection tests.
 sun-mod-sdk = { workspace = true, features = ["http"] }
 tempfile = "3.23.0"
