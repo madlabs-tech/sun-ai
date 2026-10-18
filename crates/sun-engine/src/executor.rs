@@ -169,6 +169,9 @@ pub struct Engine {
     pub(crate) knowledge_wake: Arc<Notify>,
     /// Wakes the outbox worker after a row enqueued outside the executor (`memory`).
     pub(crate) outbox_wake: Arc<Notify>,
+    /// Wakes the queue's scheduler after a host is attached or detached
+    /// (`workspaces`); [`crate::Queue`] waits on it.
+    pub(crate) queue_wake: Arc<Notify>,
     /// The decision backend (`triggers` triage, `corrections` causes).
     pub(crate) decisions: decision::Backend,
     /// Git connection tokens (`vcs`).
@@ -606,6 +609,7 @@ impl Engine {
                 allow_bypass,
                 knowledge_wake: Arc::default(),
                 outbox_wake: wake,
+                queue_wake: Arc::default(),
                 decisions,
                 vcs,
             },

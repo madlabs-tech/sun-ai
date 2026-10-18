@@ -525,7 +525,9 @@ impl Engine {
             &format!("imported {what}"),
         )
         .await?;
-        Ok(tx.commit().await?)
+        tx.commit().await?;
+        wake_queue_for(self, item);
+        Ok(())
     }
 
     /// Removes an item from `workspace` (`NotFound` when it isn't there);
@@ -561,7 +563,17 @@ impl Engine {
         )
         .await?;
         tx.commit().await?;
+        wake_queue_for(self, item);
         Ok(orphan)
+    }
+}
+
+/// A host joining or leaving a workspace changes where its waiting runs may
+/// go: re-place them now (a run only it could take is refused), not on the
+/// next unrelated queue event.
+fn wake_queue_for(engine: &Engine, item: WorkspaceItem<'_>) {
+    if let WorkspaceItem::Host(_) = item {
+        engine.queue_wake.notify_one();
     }
 }
 

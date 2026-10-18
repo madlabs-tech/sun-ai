@@ -821,7 +821,6 @@ pub(crate) async fn attach_host(
     api.engine
         .import_to_workspace(workspace, item, &caller.actor(), &plan)
         .await?;
-    api.queue.wake();
     Ok(StatusCode::NO_CONTENT)
 }
 
