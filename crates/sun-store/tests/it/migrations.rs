@@ -98,6 +98,141 @@ async fn sqlite_migrates_an_empty_database_to_head() {
     assert_eq!(applied, head);
 }
 
+/// BLO-166 (BLO-162 PR 2): `20261110090000_activity_settings` rebuilds
+/// `task_activity` for the `settings` kind. Replayed on a database from
+/// before it with one row of every older kind on two tasks: every row comes
+/// through unchanged, the append-only trigger is still there (an UPDATE
+/// aborts), `settings` is now accepted, a kind outside the list still isn't,
+/// and a second open applies nothing.
+#[tokio::test]
+async fn activity_settings_migration_keeps_every_row_and_the_append_only_trigger() {
+    use sqlx::migrate::Migrate;
+
+    const ACTIVITY_SETTINGS: i64 = 20261110090000;
+    const OLDER_KINDS: [&str; 10] = [
+        "comment",
+        "status",
+        "priority",
+        "assignee",
+        "project",
+        "title",
+        "description",
+        "created",
+        "run",
+        "pull_request",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    conn.ensure_migrations_table().await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    assert!(
+        migrator.iter().any(|m| m.version == ACTIVITY_SETTINGS),
+        "the migration under test exists"
+    );
+    for migration in migrator.iter().filter(|m| m.version < ACTIVITY_SETTINGS) {
+        conn.apply(migration).await.unwrap();
+    }
+    let workspace = "00000000000000000000000001";
+    let tasks = [
+        (sun_core::TaskId::generate(), Some(1), "task"),
+        (sun_core::TaskId::generate(), None, "chat"),
+    ];
+    for (task, number, kind) in &tasks {
+        sqlx::query(
+            "INSERT INTO task (id, workspace_id, number, title, body, status, kind,
+                               created_at, updated_at)
+             VALUES ($1, $2, $3, 'x', '', 'todo', $4,
+                     '2026-10-17T10:00:00+00:00', '2026-10-17T10:00:00+00:00')",
+        )
+        .bind(task.to_string())
+        .bind(workspace)
+        .bind(number)
+        .bind(kind)
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        for (seq, activity) in OLDER_KINDS.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO task_activity (id, task_id, seq, kind, actor_member_id, body_json,
+                                            created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, '2026-10-17T10:00:00+00:00')",
+            )
+            .bind(format!("{task}-{seq:02}"))
+            .bind(task.to_string())
+            .bind(i64::try_from(seq).unwrap() + 1)
+            .bind(activity)
+            .bind((seq % 2 == 0).then_some("m1"))
+            .bind(format!(r#"{{"n":{seq},"text":"ünïcode ✓"}}"#))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        }
+    }
+    type Row = (String, String, i64, String, Option<String>, String, String);
+    async fn rows_of(conn: &mut sqlx::SqliteConnection) -> Vec<Row> {
+        sqlx::query_as(
+            "SELECT id, task_id, seq, kind, actor_member_id, body_json, created_at
+             FROM task_activity ORDER BY id",
+        )
+        .fetch_all(conn)
+        .await
+        .unwrap()
+    }
+    async fn applied(conn: &mut sqlx::SqliteConnection) -> Vec<i64> {
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(conn)
+            .await
+            .unwrap()
+    }
+    let before = rows_of(&mut conn).await;
+    assert_eq!(before.len(), 20);
+    conn.close().await.unwrap();
+
+    drop(Store::open(dir.path()).await.unwrap());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    assert_eq!(rows_of(&mut conn).await, before, "no row lost or changed");
+    let triggers: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'task_activity'",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(triggers, ["task_activity_is_append_only"]);
+    let edit = sqlx::query("UPDATE task_activity SET body_json = '{}'")
+        .execute(&mut conn)
+        .await
+        .unwrap_err();
+    assert!(edit.to_string().contains("append-only"), "{edit}");
+    let insert = |kind: &'static str, seq: i64| {
+        sqlx::query(
+            "INSERT INTO task_activity (id, task_id, seq, kind, body_json, created_at)
+             VALUES ($1, $2, $3, $4, '{}', '2026-10-17T11:00:00+00:00')",
+        )
+        .bind(format!("new-{seq}"))
+        .bind(tasks[1].0.to_string())
+        .bind(seq)
+        .bind(kind)
+    };
+    insert("settings", 11).execute(&mut conn).await.unwrap();
+    let unknown = insert("sneaky", 12).execute(&mut conn).await.unwrap_err();
+    assert!(unknown.to_string().contains("CHECK"), "{unknown}");
+    let once = applied(&mut conn).await;
+    assert_eq!(
+        once.iter().filter(|v| **v == ACTIVITY_SETTINGS).count(),
+        1,
+        "{once:?}"
+    );
+    let rows = rows_of(&mut conn).await;
+    conn.close().await.unwrap();
+
+    // A second open runs nothing again and changes no row.
+    drop(Store::open(dir.path()).await.unwrap());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    assert_eq!(applied(&mut conn).await, once);
+    assert_eq!(rows_of(&mut conn).await, rows);
+}
+
 /// Passkeys two members added with one credential before 20261024100000
 /// (the race its unique index closes): the oldest stays, the later is gone.
 #[tokio::test]

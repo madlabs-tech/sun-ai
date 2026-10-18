@@ -10,6 +10,7 @@ mod bypass_gate;
 mod chats;
 mod common;
 mod device;
+mod direct_chats;
 mod entitlement;
 mod features;
 mod isolation;
