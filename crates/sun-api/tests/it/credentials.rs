@@ -393,6 +393,62 @@ async fn a_set_key_never_shows_in_any_response() {
     }
 }
 
+/// BLO-136 case 4, abuse: a user pastes the key itself where the secret's
+/// *name* goes. Keys made only of letters, digits and `_` (Groq `gsk_…`,
+/// many self-hosted gateways) pass the name check, and the `detail` line
+/// ("`<name>` is not set") then repeats the key in every credential
+/// response. The key must never come back, refused or not.
+#[tokio::test]
+async fn a_raw_key_pasted_as_the_secret_name_is_never_echoed() {
+    const KEY: &str = "gsk_QA136dummy0123456789abcdefABCDEF0123456789abcd";
+    let k = common::kernel().await;
+    let app = &k.app;
+    let list = format!("/api/v1/credentials?workspace={MAIN}");
+    let mut body = ollama("pasted");
+    body["key_secret"] = json!(KEY);
+    let (status, created) = call(app, "POST", &list, Some(body)).await;
+    assert!(
+        !created.to_string().contains(KEY),
+        "POST {status}: {created}"
+    );
+    let (_, listed) = call(app, "GET", &list, None).await;
+    assert!(
+        !listed.to_string().contains(KEY),
+        "GET /credentials: {listed}"
+    );
+}
+
+/// BLO-136 case 4, abuse: a key in the endpoint's query string (Gemini's
+/// `?key=`, some gateways' `?api_key=`) is key material in `endpoint`,
+/// which every credential response returns. `@` userinfo is refused for
+/// the same reason; a key in the query must be too.
+#[tokio::test]
+async fn an_endpoint_carrying_a_key_in_its_query_is_refused() {
+    const KEY: &str = "AIzaSyQA136dummy0123456789abcdefABCD";
+    let k = common::kernel().await;
+    let app = &k.app;
+    let list = format!("/api/v1/credentials?workspace={MAIN}");
+    for endpoint in [
+        format!("https://generativelanguage.googleapis.com/v1beta/openai?key={KEY}"),
+        format!("https://gw.example/v1?api_key={KEY}"),
+    ] {
+        let mut body = ollama("in-query");
+        body["endpoint"] = json!(endpoint);
+        let (status, value) = call(app, "POST", &list, Some(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{endpoint}: {value}"
+        );
+        assert!(!value.to_string().contains(KEY), "{value}");
+    }
+    let (_, listed) = call(app, "GET", &list, None).await;
+    assert!(
+        !listed.to_string().contains(KEY),
+        "GET /credentials: {listed}"
+    );
+}
+
 /// BLO-136 case 1 through the API: a v0.1.4 store (every migration before
 /// `20261111090000`) with `byo_key`, `credits` and CLI-login runtimes and
 /// their sessions' usage boots on this kernel, and `GET /usage?by=runtime`
