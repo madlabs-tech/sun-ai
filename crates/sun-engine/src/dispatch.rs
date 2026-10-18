@@ -13,7 +13,11 @@
 //!   a run a comment queued ([`Executor::follow_up`]) resumes the CLI
 //!   session of the task's previous run when that one ran the same runtime
 //!   on the same host (the CLI keeps its sessions on the host). Its fresh
-//!   fallback reads the thread (`conversation::thread`).
+//!   fallback reads the thread (`conversation::thread`). The queue places
+//!   such a run on the previous run's host while that one may take it; when
+//!   it lands elsewhere (offline, not logged in, limited, full) the thread
+//!   gets a `run` activity `{run_id, moved_to}` ("Moved to {host}, started a
+//!   fresh session"), which wakes nobody.
 //! - **Retry while the host is unreachable.** A failed
 //!   `prepare_worktree`/`start_session` leaves the step `dispatched`; a
 //!   session whose host didn't answer the probe after a restart stays
@@ -31,8 +35,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::json;
-use sun_core::model::{Run, Step};
-use sun_core::{Error, Result, RunStatus, SessionHandle, SessionId, StepId, StepStatus, SunEvent};
+use sun_core::model::{ActivityKind, Run, Step};
+use sun_core::{
+    Error, HostId, Result, RunStatus, SessionHandle, SessionId, StepId, StepStatus, SunEvent,
+};
 use sun_store::{HostRepo, RunRepo, RuntimeRepo, SessionRepo, TaskRepo, Tx};
 
 use super::{Command, Effect, Executor, Start, append, kind, move_step};
@@ -185,13 +191,23 @@ impl Executor {
             "" => prompt,
             thread => format!("{prompt}\n\n{thread}"),
         };
-        let native_id = match conversation::previous_run(tx, &run).await? {
-            Some(previous) => self.last_session(tx, &previous, &run, runtime).await?,
+        let last = match conversation::previous_run(tx, &run).await? {
+            Some(previous) => self.last_session(tx, &previous, runtime).await?,
             None => None,
         };
-        let Some(native_id) = native_id else {
+        let Some((on_host, native_id)) = last else {
             return Ok((fresh, None));
         };
+        let host = self.host(run.id);
+        if on_host != host {
+            let name = match tx.get_host(host).await {
+                Ok(host) => host.name,
+                Err(_) => host.to_string(),
+            };
+            let body = json!({ "run_id": run.id, "moved_to": name });
+            super::tasks::log(tx, on, ActivityKind::Run, None, body).await?;
+            return Ok((fresh, None));
+        }
         let messages = queued::take(tx, step).await?;
         let first = format!("Sun resumed this session for new messages on your task.{messages}");
         let resume = Resume {
@@ -202,19 +218,14 @@ impl Executor {
         Ok((first, Some(resume)))
     }
 
-    /// The CLI's own id of `previous`'s last agent session, when it ran
-    /// `runtime` on the host `run` is on.
+    /// The host `previous` ran on and the CLI's own id of its last agent
+    /// session, when that one ran `runtime`.
     async fn last_session(
         &self,
         tx: &mut Tx,
         previous: &Run,
-        run: &Run,
         runtime: &str,
-    ) -> Result<Option<String>> {
-        let host = queue::placed_host(tx, previous.id).await?;
-        if host.unwrap_or(self.config.host) != self.host(run.id) {
-            return Ok(None);
-        }
+    ) -> Result<Option<(HostId, String)>> {
         let last = tx
             .steps_of_run(previous.id)
             .await?
@@ -228,7 +239,11 @@ impl Executor {
         if tx.get_runtime(runtime_id).await?.name != runtime {
             return Ok(None);
         }
-        Ok(tx.get_session(session).await?.native_id)
+        let Some(native_id) = tx.get_session(session).await?.native_id else {
+            return Ok(None);
+        };
+        let host = queue::placed_host(tx, previous.id).await?;
+        Ok(Some((host.unwrap_or(self.config.host), native_id)))
     }
 
     /// `start_session` failed (the step is still `dispatched`, `tx` open).

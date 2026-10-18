@@ -406,6 +406,16 @@ impl Kernel {
             .map(|a| a.body)
             .collect()
     }
+
+    /// The hosts the task's "moved, started fresh" lines name, oldest first.
+    async fn moves(&self, task: TaskId) -> Vec<String> {
+        let activity = self.engine.activity(task, 0).await.unwrap();
+        activity
+            .into_iter()
+            .filter(|a| a.kind == sun_core::model::ActivityKind::Run)
+            .filter_map(|a| a.body["moved_to"].as_str().map(str::to_owned))
+            .collect()
+    }
 }
 
 fn ana() -> Option<Actor> {
@@ -1798,7 +1808,7 @@ async fn resume_is_refused_when_the_watchdog_stopped_the_previous_run() {
 /// 3 and 5. Two hosts: a comment-woken run goes to the previous run's host
 /// while it has room, even when that one is busier, and resumes there;
 /// when that host is full it runs elsewhere, fresh; when it is offline,
-/// the same.
+/// the same. Each move puts a "moved" line on the thread (BLO-165).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_comment_run_prefers_its_last_host_and_resumes_only_there() {
     let caps = sun_engine::Caps {
@@ -1868,6 +1878,7 @@ async fn a_comment_run_prefers_its_last_host_and_resumes_only_there() {
     assert_eq!(k.session(1), (None, b));
     let fresh = k.host.envelopes()[1].clone();
     assert_eq!(thread_lines(&fresh), ["- Ada (you): done", "- ana: One"]);
+    assert_eq!(k.moves(task).await, ["b"], "the thread says it moved");
     k.until(task, TaskStatus::NeedsYou).await;
 
     // a is empty, b is busier: the next comment still goes to b and resumes.
@@ -1883,6 +1894,7 @@ async fn a_comment_run_prefers_its_last_host_and_resumes_only_there() {
     let on_b = k.host.natives.lock().unwrap()[1].1.clone();
     assert!(on_b.is_some());
     assert_eq!(k.session(2), (on_b, b), "prefers b and resumes there");
+    assert_eq!(k.moves(task).await, ["b"], "no line for a resume");
     k.until(task, TaskStatus::NeedsYou).await;
 
     // b is offline now: a, fresh.
@@ -1896,6 +1908,7 @@ async fn a_comment_run_prefers_its_last_host_and_resumes_only_there() {
     assert_eq!(k.session(3), (None, a));
     let fresh = k.host.envelopes()[3].clone();
     assert!(fresh.contains("Your task: MAIN-1"), "{fresh}");
+    assert_eq!(k.moves(task).await, ["b", "a"]);
 }
 
 /// 5. A container run that a comment woke goes only to a host with
@@ -2699,6 +2712,72 @@ async fn a_direct_chat_talks_to_the_bare_tool_and_the_tool_replies() {
             "- ana: Last one",
         ]
     );
+}
+
+/// BLO-165: a direct chat on "any" host answers its next message on the
+/// previous run's host and resumes there, even with an idle host listed
+/// first; with that host offline it answers elsewhere, fresh with the
+/// thread, and the thread says it moved (a line that wakes nobody).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_direct_chat_resumes_on_its_last_host_and_moves_fresh_when_it_is_offline() {
+    let hosts: &[(&str, Option<&[&str]>)] = &[("a", Some(&[])), ("b", Some(&[]))];
+    let k = kernel_on(hosts, sun_engine::Caps::default()).await;
+    let (a, b) = (k.hosts[0], k.hosts[1]);
+    k.host.native.store(true, Ordering::SeqCst);
+    k.host.finish.store(true, Ordering::SeqCst);
+    let runtime = sun_core::ChainSpec {
+        tool: "fake".into(),
+        credential: None,
+        host: None,
+        model: None,
+        effort: None,
+    };
+    let chat = k
+        .engine
+        .create_direct_chat(WorkspaceId::MAIN, runtime, None, None)
+        .await
+        .unwrap()
+        .task;
+    // The first message lands on b (a is offline then).
+    k.set_online(a, false);
+    k.say(chat.id, "ana", "Hi").await;
+    k.answered(chat.id, 1).await;
+    k.set_online(a, true);
+    assert_eq!(k.session(0), (None, b));
+
+    // Both online and idle: the second stays on b and resumes its session.
+    k.say(chat.id, "ana", "And then?").await;
+    k.answered(chat.id, 2).await;
+    let on_b = k.host.natives.lock().unwrap()[0].1.clone();
+    assert!(on_b.is_some());
+    assert_eq!(k.session(1), (on_b, b), "sticks to b");
+    assert!(k.moves(chat.id).await.is_empty());
+
+    // b is offline: a, fresh with the thread, and one "moved" line.
+    k.set_online(b, false);
+    k.say(chat.id, "ana", "Still there?").await;
+    k.answered(chat.id, 3).await;
+    assert_eq!(k.session(2), (None, a));
+    assert_eq!(
+        thread_lines(&k.host.envelopes()[2]),
+        [
+            "- ana: Hi",
+            "- fake (you): done",
+            "- ana: And then?",
+            "- fake (you): done",
+            "- ana: Still there?",
+        ]
+    );
+    assert_eq!(k.moves(chat.id).await, ["a"]);
+    let activity = k.engine.activity(chat.id, 0).await.unwrap();
+    let line = activity.iter().rfind(|a| a.body.get("moved_to").is_some());
+    let third = k.runs(chat.id).await[2].id;
+    assert_eq!(
+        line.map(|a| &a.body),
+        Some(&json!({ "run_id": third, "moved_to": "a" }))
+    );
+    settle().await;
+    assert_eq!(k.runs(chat.id).await.len(), 3, "the line wakes nobody");
 }
 
 /// BLO-162 §3: a session resumes only on the version it started with, so an
