@@ -10,13 +10,13 @@ use serde_json::json;
 use sqlx::migrate::Migrate;
 use sqlx::{Connection, SqliteConnection};
 use sun_core::model::{
-    Agent, GitSettings, MemoryItem, MemoryScope, MemoryStatus, Runtime, RuntimeSource, SecretScope,
-    Workspace,
+    Agent, Credential, GitSettings, MemoryItem, MemoryScope, MemoryStatus, RuntimeSource,
+    SecretScope, Workspace,
 };
-use sun_core::{AgentId, MemoryItemId, RuntimeId, WorkspaceId};
+use sun_core::{AgentId, CredentialId, MemoryItemId, WorkspaceId};
 use sun_store::{
-    AgentRepo, MasterKey, MemoryRepo, RuntimeRepo, SecretRepo, SecretToReenter, SettingRepo, Store,
-    TaskRepo, WorkspaceRepo,
+    AgentRepo, CredentialRepo, MasterKey, MemoryRepo, RuntimeRepo, SecretRepo, SecretToReenter,
+    SettingRepo, Store, TaskRepo, WorkspaceRepo,
 };
 
 /// The first migration that puts things on workspaces.
@@ -255,10 +255,11 @@ async fn agents_runtimes_secrets_and_memory_move_into_workspaces_on_an_old_datab
     );
     assert_eq!(tx.system_workflow(ada, ops).await.unwrap(), None);
 
-    // Runtimes: in Main, ids kept; the gateway model is keyed by id.
-    let cred = tx.runtime_by_name(main, "cred").await.unwrap().unwrap();
+    // Runtimes: in Main, ids kept (a credits one is a credential now, same
+    // id); the gateway model is keyed by id.
+    let cred = tx.credential_by_name(main, "cred").await.unwrap().unwrap();
     assert_eq!((cred.id, cred.created_by), (CRED.parse().unwrap(), None));
-    assert!(tx.runtime_by_name(ops, "cred").await.unwrap().is_none());
+    assert!(tx.credential_by_name(ops, "cred").await.unwrap().is_none());
     assert_eq!(
         tx.setting(&format!("credits_model:{CRED}")).await.unwrap(),
         Some(json!("m"))
@@ -425,33 +426,46 @@ async fn each_workspace_keeps_its_own_agents_runtimes_and_memory() {
             .adapter,
         "codex"
     );
-    let added = Runtime {
-        id: RuntimeId::generate(),
+    let added = Credential {
+        id: CredentialId::generate(),
         workspace_id: ops,
-        name: "claude".into(),
-        adapter: "opencode".into(),
+        name: "credits".into(),
         source: RuntimeSource::Credits,
+        default_tool: "opencode".into(),
         byo_key: None,
         created_by: None,
     };
-    assert!(!tx.insert_runtime(&added).await.unwrap(), "taken in Ops");
+    assert!(tx.insert_credential(&added).await.unwrap());
+    let elsewhere = Credential {
+        id: CredentialId::generate(),
+        workspace_id: main,
+        ..added.clone()
+    };
     assert!(
-        tx.insert_runtime(&Runtime {
-            name: "credits".into(),
+        tx.insert_credential(&elsewhere).await.unwrap(),
+        "Main's own"
+    );
+    assert!(
+        !tx.insert_credential(&Credential {
+            id: CredentialId::generate(),
             ..added.clone()
         })
         .await
-        .unwrap()
+        .unwrap(),
+        "taken in Ops"
     );
     let in_ops: Vec<_> = tx
-        .runtimes(Some(ops))
+        .credentials(Some(ops))
         .await
         .unwrap()
         .into_iter()
-        .map(|r| r.name)
+        .map(|c| c.name)
         .collect();
-    assert_eq!(in_ops, ["claude", "credits"]);
-    let cooled = format!("cred:{}", other.id);
+    assert_eq!(in_ops, ["credits"]);
+    let cooled = format!("cred:{}", added.id);
+    tx.put_setting(&format!("credits_model:{}", added.id), &json!("m"))
+        .await
+        .unwrap();
     tx.set_cooldown(&cooled, Some(chrono::Utc::now()))
         .await
         .unwrap();
@@ -465,14 +479,18 @@ async fn each_workspace_keeps_its_own_agents_runtimes_and_memory() {
     // Deleting the workspace takes them along; Main keeps its own.
     tx.delete_workspace(ops).await.unwrap();
     assert!(tx.agents(Some(ops)).await.unwrap().is_empty());
-    assert!(tx.runtimes(Some(ops)).await.unwrap().is_empty());
+    assert!(tx.runtime_by_name(ops, "claude").await.unwrap().is_none());
+    assert!(tx.credentials(Some(ops)).await.unwrap().is_empty());
     assert!(
         tx.cooldowns().await.unwrap().is_empty(),
         "its keys' cooldowns"
     );
+    let model = format!("credits_model:{}", added.id);
+    assert_eq!(tx.setting(&model).await.unwrap(), None, "its gateway model");
     assert!(tx.active_memory(ops).await.unwrap().is_empty());
     assert_eq!(tx.agents(None).await.unwrap(), [ada]);
-    assert_eq!(tx.runtimes(None).await.unwrap(), [byo]);
+    assert_eq!(tx.runtime_by_name(main, "claude").await.unwrap(), Some(byo));
+    assert_eq!(tx.credentials(None).await.unwrap(), [elsewhere]);
     assert_eq!(tx.active_memory(main).await.unwrap().len(), 1);
     tx.commit().await.unwrap();
 }

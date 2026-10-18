@@ -1,5 +1,5 @@
 // Display rules shared by every screen: task columns, status labels, money, time.
-import type { Agent, ChainEntry, ChainSpec, DirectSettings, OnLimit, PermissionMode, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
+import type { Agent, ChainEntry, ChainSpec, Credential, DirectSettings, OnLimit, PermissionMode, Priority, RunEvent, Runtime, RuntimeSource, StepStatus, TaskStatus, TaskSummary, WorkflowTemplate } from './api/types';
 import { PERMISSION_MODES } from './api/types';
 
 /** `list` with `item` added (`on`) or removed, once. */
@@ -139,22 +139,23 @@ export const PERMISSION_MODE_COPY: Record<PermissionMode, [string, string]> = {
 const TOOL_LABEL: Record<string, string> = { 'claude-code': 'Claude Code', codex: 'Codex', opencode: 'OpenCode' };
 export const tool_label = (tool: string) => TOOL_LABEL[tool] ?? tool;
 
-/** What a chain entry (`claude-code`, `ollama-qwen`) is called: a host CLI by its product name, a key-backed runtime by its own. */
+/** What a chain entry (`claude-code`, `ollama-qwen`) is called: a host CLI by its product name, a credential by its own. */
 export const runtime_name = (runtimes: Runtime[], name: string | null) => {
   if (name === null) return '—';
   const r = runtimes.find((x) => x.name === name);
-  return r?.host ? tool_label(r.tool) : (r?.name ?? tool_label(name));
+  return r ? tool_label(r.tool) : tool_label(name);
 };
 
 /** A chain entry's runtime name (the kernel's `ChainEntry::name`): the credential's, else the tool's. */
 export const entry_name = (e: ChainEntry) => (typeof e === 'string' ? e : (e.credential ?? e.tool));
 
-/** The modes every tool of `chain` can enforce on some host (the pinned one when pinned), as the kernel checks on save; a tool no host reported doesn't narrow it. */
-export function chain_modes(runtimes: Runtime[], chain: ChainEntry[]): PermissionMode[] {
+/** The modes every tool of `chain` can enforce on some host (the pinned one when pinned), as the kernel checks on save; a tool no host reported doesn't narrow it.
+ *  A bare credential name runs its `default_tool`. */
+export function chain_modes(runtimes: Runtime[], chain: ChainEntry[], credentials: Pick<Credential, 'name' | 'default_tool'>[] = []): PermissionMode[] {
   const reports = chain.map((e) => {
-    const tool = typeof e === 'string' ? (runtimes.find((r) => r.name === e)?.tool ?? e) : e.tool;
+    const tool = typeof e === 'string' ? (credentials.find((c) => c.name === e)?.default_tool ?? e) : e.tool;
     const pin = typeof e === 'string' ? undefined : e.host;
-    return runtimes.filter((r) => r.host && r.tool === tool && (!pin || r.host.id === pin)).flatMap((r) => (r.permission_modes ? [r.permission_modes] : []));
+    return runtimes.filter((r) => r.tool === tool && (!pin || r.host.id === pin)).flatMap((r) => (r.permission_modes ? [r.permission_modes] : []));
   });
   return PERMISSION_MODES.filter((m) => reports.every((modes) => !modes.length || modes.some((x) => x.includes(m))));
 }
@@ -169,17 +170,19 @@ export const direct_line = (s: DirectSettings) =>
     .join(' · ');
 
 /** Who pays for a chat straight with `s`'s tool: a workspace key or credits, else the host's own login of the CLI. */
-export function payer(s: ChainSpec, runtimes: Runtime[]): string {
+export function payer(s: ChainSpec, runtimes: Runtime[], credentials: Credential[]): string {
   if (s.credential) {
-    const credits = runtimes.find((r) => !r.host && r.name === s.credential)?.source === 'credits';
+    const credits = credentials.find((c) => c.name === s.credential)?.source === 'credits';
     return credits ? `Paid from workspace credits (${s.credential}).` : `Paid by the workspace key ${s.credential}.`;
   }
-  const host = runtimes.find((r) => r.host && r.host.id === s.host)?.host?.name;
+  const host = runtimes.find((r) => r.host.id === s.host)?.host.name;
   return `Runs on ${host ? `${host}’s` : 'its host’s'} ${tool_label(s.tool)} login.`;
 }
 
-/** The distinct chain names of a runtime list (one per tool, however many hosts have it). */
-export const chain_names = (runtimes: Runtime[]) => [...new Set(runtimes.map((r) => r.name))];
+/** The distinct chain names of a runtime list (one per tool, however many hosts have it), then the credentials'. */
+export const chain_names = (runtimes: Runtime[], credentials: Pick<Credential, 'name'>[] = []) => [
+  ...new Set([...runtimes.map((r) => r.name), ...credentials.map((c) => c.name)]),
+];
 
 export const money = (usd: number) => `$${usd.toFixed(2)}`;
 

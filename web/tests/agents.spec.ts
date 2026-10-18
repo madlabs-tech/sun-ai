@@ -175,6 +175,10 @@ test('agent form: host, model and effort per chain entry, from the hosts’ cata
   // A tool with no catalog greys the picker out and says why.
   await expect(settings('lan-qwen').getByLabel('Effort')).toBeDisabled();
   await expect(settings('lan-qwen')).toContainText('OpenCode reports no effort levels.');
+  // Who pays: the credentials for that entry's tool; none for Codex here, so no picker.
+  await expect(options('lan-qwen', 'Paid by')).toHaveText(['OpenCode’s own login', 'credits', 'lan-qwen']);
+  await expect(settings('lan-qwen').getByLabel('Paid by')).toHaveValue('lan-qwen');
+  await expect(settings('codex').getByLabel('Paid by')).toHaveCount(0);
 
   // Switching model swaps them again where the tool scopes effort per model.
   await codex.getByLabel('Model').fill('gpt-5-mini');

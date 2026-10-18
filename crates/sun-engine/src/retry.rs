@@ -171,6 +171,7 @@ impl Executor {
             },
             // The hand-off resumes this session and runtime when it can.
             runtime_id: previous.runtime_id.filter(|_| agent),
+            credential_id: previous.credential_id.filter(|_| agent),
             session_id: previous.session_id.filter(|_| agent),
             started_at: None,
             ended_at: None,

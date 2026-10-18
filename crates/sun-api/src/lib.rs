@@ -43,6 +43,7 @@ mod bypass;
 mod catalog;
 mod chats;
 mod corrections;
+mod credentials;
 mod device;
 mod entitlement;
 mod error;

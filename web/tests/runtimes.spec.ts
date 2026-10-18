@@ -11,6 +11,10 @@ test('runtimes: one row per host and CLI, each state with its badge, line and ac
   await page.goto('/?mock=1#/runtimes');
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Runtimes');
 
+  // Key-backed entries are credentials, in their own section.
+  await expect(page.getByRole('region', { name: 'Credentials' }).getByRole('article', { name: 'lan-qwen' })).toBeVisible();
+  await expect(page.getByRole('article', { name: / on / }).filter({ hasText: 'lan-qwen' })).toHaveCount(0);
+
   // Two hosts with the same CLI are two rows.
   await expect(page.getByRole('article', { name: /^Claude Code on / })).toHaveCount(3);
   await expect(page.getByRole('article', { name: /^Codex on / })).toHaveCount(2);

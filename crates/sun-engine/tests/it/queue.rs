@@ -24,7 +24,8 @@ use sun_engine::{
     TaskLease, WatchdogConfig,
 };
 use sun_store::{
-    EventLog, NewEvent, RunRepo, RuntimeRepo, SettingRepo, Store, TaskRepo, WorkflowRepo,
+    CredentialRepo, EventLog, NewEvent, RunRepo, RuntimeRepo, SettingRepo, Store, TaskRepo,
+    WorkflowRepo,
 };
 
 const WORKFLOW: &str = r#"
@@ -1663,12 +1664,12 @@ async fn queue_cools_the_account_not_every_host_with_the_tool() {
     assert_eq!(placed_on(&store, b).await, Some(h2), "h2's doesn't");
 
     // `fake` now runs on a key: its cooldown holds on every host.
-    let key = sun_core::model::Runtime {
-        id: sun_core::RuntimeId::generate(),
+    let key = sun_core::model::Credential {
+        id: sun_core::CredentialId::generate(),
         workspace_id: sun_core::WorkspaceId::MAIN,
         name: "fake".into(),
-        adapter: "fake".into(),
         source: RuntimeSource::Credits,
+        default_tool: "fake".into(),
         byo_key: None,
         created_by: None,
     };
@@ -1676,7 +1677,7 @@ async fn queue_cools_the_account_not_every_host_with_the_tool() {
     let cooling = serde_json::json!({ "runtime": "fake", "until": until });
     let mut tx = store.begin().await.unwrap();
     tx.set_cooldown(&account, Some(until)).await.unwrap();
-    assert!(tx.insert_runtime(&key).await.unwrap());
+    assert!(tx.insert_credential(&key).await.unwrap());
     tx.set_cooldown(&account, Some(until)).await.unwrap();
     tx.append_event(NewEvent::new(run_a, None, "runtime_cooling", cooling))
         .await
@@ -1797,19 +1798,19 @@ async fn queue_a_workspaces_cooling_key_never_blocks_another_workspaces_host() {
     let store = Store::open(dir.path()).await.unwrap();
     let main_task = tasks_of(&store, WORKFLOW, 1).await.remove(0);
     let main_host = add_host(&store, "main-mac", true).await;
-    let key = sun_core::model::Runtime {
-        id: sun_core::RuntimeId::generate(),
+    let key = sun_core::model::Credential {
+        id: sun_core::CredentialId::generate(),
         workspace_id: sun_core::WorkspaceId::MAIN,
         name: "fake".into(),
-        adapter: "fake".into(),
         source: RuntimeSource::Credits,
+        default_tool: "fake".into(),
         byo_key: None,
         created_by: None,
     };
     let until = chrono::Utc::now() + chrono::Duration::minutes(10);
     // Stored before the kernel starts: the queue loads cooldowns at start.
     let mut tx = store.begin().await.unwrap();
-    assert!(tx.insert_runtime(&key).await.unwrap());
+    assert!(tx.insert_credential(&key).await.unwrap());
     tx.set_cooldown(&Account::Credential(key.id).key(main_host), Some(until))
         .await
         .unwrap();

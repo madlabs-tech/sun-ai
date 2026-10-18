@@ -3,7 +3,7 @@
 import type { Agent, AgentFields, ChainEntry } from './types';
 import { chain_modes, entry_name } from '../format';
 import { MAIN_WORKSPACE } from './types';
-import { MockError, RUNTIMES, clone, not_found } from './mock';
+import { CREDENTIALS, MockError, RUNTIMES, clone, not_found } from './mock';
 
 const invalid = (message: string) => new MockError(422, { error: { code: 'invalid_input', message } });
 let next_id = 0;
@@ -37,10 +37,15 @@ if (agent_params.has('no_bypass') || agent_params.has('bypass_agent')) agents[1]
 /** An agent by id, archived ones too (a task keeps its agent). */
 export const find_agent = (id: string) => agents.find((a) => a.id === id);
 
-/** The agent with its readiness read now. */
+/** The names of the active agents whose chain names `credential` (DELETE /credentials/{name} refuses those). */
+export const agents_naming = (credential: string) =>
+  agents.filter((a) => !a.archived_at && a.runtime_chain.some((e) => entry_name(e) === credential)).map((a) => a.name);
+
+/** The agent with its readiness read now; a credential runs on its tool's hosts. */
 function view(a: Agent): Agent {
   const reasons = a.runtime_chain.map(entry_name).map((id) => {
-    const of_name = RUNTIMES.filter((x) => x.name === id);
+    const tool = CREDENTIALS.find((c) => c.name === id)?.default_tool ?? id;
+    const of_name = RUNTIMES.filter((x) => x.name === tool);
     // Logged in on an online host; a limit doesn't log it out.
     const ready = of_name.some((x) => ['idle', 'busy', 'limited'].includes(x.state));
     return of_name.length ? (ready ? null : `${id}: log in to ${id} on a host`) : `${id}: no host reports it`;
@@ -52,7 +57,7 @@ function view(a: Agent): Agent {
 /** A `{tool, host, model, effort}` entry checked like the kernel: the host reported the tool, the effort is in its catalog. */
 function check_entry(e: ChainEntry, i: number) {
   if (typeof e === 'string') return;
-  const reports = RUNTIMES.filter((r) => r.host && r.tool === e.tool && (!e.host || r.host.id === e.host));
+  const reports = RUNTIMES.filter((r) => r.tool === e.tool && (!e.host || r.host.id === e.host));
   if (e.host && !reports.length) throw invalid(`invalid input: runtime_chain[${i}].host: that host has not reported ${e.tool}`);
   const offered = (r: (typeof reports)[number]) => (r.models.find((m) => m.id === e.model)?.effort_options ?? r.effort_options).some((l) => l.value === e.effort);
   if (e.effort && !reports.some(offered)) throw invalid(`invalid input: runtime_chain[${i}].effort: \`${e.effort}\` is not an effort level ${e.tool} offers`);
@@ -67,7 +72,7 @@ function apply(a: Agent, fields: AgentFields): Agent {
   if ([...next.instructions].length > 20_000) throw invalid('Keep the instructions to 20000 characters.');
   if (!next.runtime_chain.length || next.runtime_chain.length > 32) throw invalid('Pick 1 to 32 runtimes for the agent.');
   next.runtime_chain.forEach(check_entry);
-  if (next.permission_mode && !chain_modes(RUNTIMES, next.runtime_chain).includes(next.permission_mode))
+  if (next.permission_mode && !chain_modes(RUNTIMES, next.runtime_chain, CREDENTIALS).includes(next.permission_mode))
     throw invalid(`invalid input: permission_mode: the chain can't run in \`${next.permission_mode}\` on its hosts`);
   if (fields.permission_mode === 'bypass_permissions' && !RUNTIMES[0]?.allow_bypass)
     throw invalid('bypass_permissions lets the agent run anything. Set `runtimes.allow_bypass: true` in sun.yaml first.');

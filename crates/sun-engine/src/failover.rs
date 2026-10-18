@@ -78,8 +78,8 @@ use sun_core::{
     StepStatus, SunEvent, TaskId, Timestamp,
 };
 use sun_store::{
-    EventLog, HostRepo, NewEvent, RunRepo, RuntimeRepo, SecretRepo, SessionRepo, SettingRepo,
-    TaskRepo, Tx,
+    CredentialRepo, EventLog, HostRepo, NewEvent, RunRepo, RuntimeRepo, SecretRepo, SessionRepo,
+    SettingRepo, TaskRepo, Tx,
 };
 use sun_workflow::{OnLimit, QuestionKind, Workflow};
 
@@ -438,7 +438,9 @@ impl Executor {
         // A `route` decision puts its runtime first, if it is one of the
         // workspace's.
         if let Some(to) = super::decision::routed(tx, run.id).await?
-            && (chain.contains(&to) || tx.runtime_by_name(workspace, &to).await?.is_some())
+            && (chain.contains(&to)
+                || tx.credential_by_name(workspace, &to).await?.is_some()
+                || tx.runtime_by_name(workspace, &to).await?.is_some())
         {
             chain.retain(|r| *r != to);
             chain.insert(0, to);
@@ -499,8 +501,8 @@ impl Executor {
         let mode = mode.map(sun_core::PermissionMode::as_str);
         // A `market:` runtime runs on the seller's host, not this one.
         for name in chain.iter().filter(|n| !n.starts_with(MARKET_PREFIX)) {
-            let adapter = match tx.runtime_by_name(workspace, name).await? {
-                Some(row) => row.adapter,
+            let adapter = match tx.credential_by_name(workspace, name).await? {
+                Some(credential) => credential.default_tool,
                 None => name.clone(),
             };
             let entry = entry(&entries, name);
@@ -535,8 +537,8 @@ impl Executor {
     /// of `run_id`.
     async fn account(&self, tx: &mut Tx, run_id: RunId, name: &str) -> Result<String> {
         let workspace = tx.workspace_of_run(run_id).await?;
-        let row = tx.runtime_by_name(workspace, name).await?;
-        Ok(Account::of(row.as_ref(), name).key(self.host(run_id)))
+        let credential = tx.credential_by_name(workspace, name).await?;
+        Ok(Account::of(credential.as_ref(), name).key(self.host(run_id)))
     }
 
     /// When chain entry `name`'s account on the host of `run_id` is back,
@@ -564,10 +566,11 @@ impl Executor {
     }
 
     /// The runtime (chain name) of the step's latest session
-    /// (`step.runtime_id`); a step that never had one gets the first ready.
+    /// ([`super::ran_on`]); a step that never had one gets the first ready.
     pub(super) async fn runtime_of(&mut self, tx: &mut Tx, step: &Step) -> Result<String> {
-        match tx.get_step(step.id).await?.runtime_id {
-            Some(id) => Ok(tx.get_runtime(id).await?.name),
+        let stored = tx.get_step(step.id).await?;
+        match super::ran_on(tx, &stored).await? {
+            Some((name, _)) => Ok(name),
             None => self.first_runtime(tx, step).await,
         }
     }

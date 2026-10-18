@@ -166,7 +166,7 @@ test('support: in My Account for a member; without a paid plan Sun Cloud says wh
 
 test('credits: not available on this deployment yet', async ({ page }) => {
   await open(page, 'runtimes');
-  await page.getByRole('button', { name: 'Add runtime' }).click();
+  await page.getByRole('button', { name: 'Add credential' }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog.getByRole('radio', { name: /Sun credits/ })).toBeDisabled();
   await expect(dialog).toContainText('Sun credits are not available on this deployment yet; bring your own key or runtime.');

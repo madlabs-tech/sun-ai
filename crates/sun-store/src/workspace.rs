@@ -235,9 +235,10 @@ impl WorkspaceRepo for Tx {
         }
         // Hidden workflows here ran no task (there is none): they go too.
         let system = format!("SELECT id FROM workflow WHERE workspace_id = $1 AND {HIDDEN}");
-        // So do its agents, runtimes (their cooldowns and gateway models) and
-        // memory.
+        // So do its agents, runtimes, credentials (their cooldowns and
+        // gateway models) and memory.
         let runtimes = "SELECT id FROM runtime WHERE workspace_id = $1";
+        let credentials = "SELECT id FROM credential WHERE workspace_id = $1";
         for sql in [
             format!("DELETE FROM workflow_version WHERE workflow_id IN ({system})"),
             format!("DELETE FROM workflow WHERE id IN ({system})"),
@@ -245,13 +246,14 @@ impl WorkspaceRepo for Tx {
             format!("DELETE FROM runtime_state WHERE runtime_id IN ({runtimes})"),
             format!(
                 "DELETE FROM account_cooldown \
-                 WHERE account IN (SELECT 'cred:' || id FROM ({runtimes}))"
+                 WHERE account IN (SELECT 'cred:' || id FROM ({credentials}))"
             ),
             format!(
                 "DELETE FROM kernel_setting \
-                 WHERE key IN (SELECT 'credits_model:' || id FROM ({runtimes}))"
+                 WHERE key IN (SELECT 'credits_model:' || id FROM ({credentials}))"
             ),
             "DELETE FROM runtime WHERE workspace_id = $1".to_owned(),
+            "DELETE FROM credential WHERE workspace_id = $1".to_owned(),
             "DELETE FROM memory_item WHERE workspace_id = $1".to_owned(),
         ] {
             sqlx::query(&sql)

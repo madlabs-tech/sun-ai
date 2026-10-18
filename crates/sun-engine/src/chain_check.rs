@@ -1,12 +1,12 @@
 //! Save-time checks of a chain's `{tool, credential, host, model, effort}`
 //! entries against the workspace (TRD BLO-117 FR6, §15 item 8). The YAML
-//! parser checks their shape; only here are the workspace's key-backed
-//! runtimes and hosts known. Bare names are not checked here: they resolve
-//! as they always did (market, tool id, then key-backed runtime name).
+//! parser checks their shape; only here are the workspace's credentials and
+//! hosts known. Bare names are not checked here: they resolve as they always
+//! did (market, then a credential's name, which runs on its `default_tool`,
+//! then a tool id).
 //!
-//! - `credential` names one of the workspace's `byo_key`/`credits` runtimes
-//!   (they keep their names when they become credentials), whose adapter is
-//!   `tool`.
+//! - `credential` names one of the workspace's credentials (item 7), whose
+//!   `default_tool` is `tool`.
 //! - `host` is a host attached to the workspace that reported `tool`.
 //! - `effort` is a level the host's catalog lists for `tool` and `model`
 //!   (BLO-119): the pinned host's, else any attached host's. The kernel
@@ -18,9 +18,9 @@
 //!
 //! Errors name the field: `runtime_chain[1].effort: ...`.
 
-use sun_core::model::{Host, RuntimeSource};
+use sun_core::model::Host;
 use sun_core::{ChainEntry, ChainSpec, Error, PermissionMode, Result, WorkspaceId};
-use sun_store::{HostRepo, RuntimeRepo, Tx};
+use sun_store::{CredentialRepo, HostRepo, Tx};
 
 use crate::executor::failover::Reported;
 use crate::executor::runtime_rows;
@@ -47,28 +47,24 @@ pub(crate) async fn check(
         let at = |name: &str| format!("{field}[{i}].{name}");
         let invalid = |name: &str, why: String| Error::InvalidInput(format!("{}: {why}", at(name)));
         let tool = &spec.tool;
-        let keyed = |row: &sun_core::model::Runtime| row.source != RuntimeSource::ByoRuntime;
         match &spec.credential {
-            Some(name) => match tx.runtime_by_name(workspace, name).await? {
-                Some(row) if keyed(&row) && row.adapter == *tool => {}
-                Some(row) if keyed(&row) => {
-                    let why = format!("`{name}` runs on {}, not {tool}", row.adapter);
+            Some(name) => match tx.credential_by_name(workspace, name).await? {
+                Some(c) if c.default_tool == *tool => {}
+                Some(c) => {
+                    let why = format!("`{name}` runs on {}, not {tool}", c.default_tool);
                     return Err(invalid("credential", why));
                 }
-                _ => {
-                    let why =
-                        format!("this workspace has no key or credits runtime named `{name}`");
+                None => {
+                    let why = format!("this workspace has no credential named `{name}`");
                     return Err(invalid("credential", why));
                 }
             },
             // Without a credential the entry means the CLI's own login; a
-            // key-backed runtime of the same name would silently pay instead.
+            // credential of the same name would silently pay instead.
             None => {
-                if let Some(row) = tx.runtime_by_name(workspace, tool).await?
-                    && keyed(&row)
-                {
+                if tx.credential_by_name(workspace, tool).await?.is_some() {
                     let why = format!(
-                        "this workspace has a key runtime named `{tool}`; set `credential: {tool}` to use it"
+                        "this workspace has a credential named `{tool}`; set `credential: {tool}` to use it"
                     );
                     return Err(invalid("tool", why));
                 }
@@ -132,8 +128,8 @@ pub(crate) async fn check_mode(
         let tool = match entry {
             ChainEntry::Spec(spec) => spec.tool.clone(),
             ChainEntry::Name(name) if name.starts_with(crate::market::MARKET_PREFIX) => continue,
-            ChainEntry::Name(name) => match tx.runtime_by_name(workspace, name).await? {
-                Some(row) => row.adapter,
+            ChainEntry::Name(name) => match tx.credential_by_name(workspace, name).await? {
+                Some(c) => c.default_tool,
                 None => name.clone(),
             },
         };

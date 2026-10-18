@@ -57,6 +57,7 @@ async fn fixture() -> Fixture {
         attempt: 1,
         status: StepStatus::Queued,
         runtime_id: None,
+        credential_id: None,
         session_id: None,
         started_at: None,
         ended_at: None,

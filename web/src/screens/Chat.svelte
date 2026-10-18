@@ -15,7 +15,7 @@
   import IconButton from '../lib/ui/IconButton.svelte';
   import TaskActivity from './TaskActivity.svelte';
   import { api, watch_activity, watch_events } from '../lib/api/client';
-  import type { Agent, ChainEntry, ChainSpec, Chat, DirectSettings, Host, PermissionMode, Runtime, TaskActivity as Activity } from '../lib/api/types';
+  import type { Agent, ChainEntry, ChainSpec, Chat, Credential, DirectSettings, Host, PermissionMode, Runtime, TaskActivity as Activity } from '../lib/api/types';
   import { app, can, current_workspace, error_text, local_get, local_set, toast } from '../lib/app_state.svelte';
   import { SOURCE_LABEL, chain_modes, chain_names, clock, direct_line, direct_name, entry_name, payer, tool_label } from '../lib/format';
   import { bypass_off, isolated, mode_hint, mode_options } from '../lib/permission_mode';
@@ -105,6 +105,11 @@
     (rows) => (runtimes = rows),
     () => {},
   );
+  let credentials = $state<Credential[]>([]);
+  api.list_credentials(workspace).then(
+    (rows) => (credentials = rows),
+    () => {},
+  );
   /** `null` until listed (or not visible to the caller): placement still refuses bypass on a bare host. */
   let hosts = $state<Host[] | null>(null);
   api.list_hosts(workspace).then(
@@ -112,17 +117,18 @@
     () => {},
   );
   const NOT_READY: Record<string, string> = { offline: 'Host offline', needs_login: 'Needs login', limited: 'Limit reached', unsupported: 'Not supported yet' };
-  /** Each tool or key-backed runtime once: what the radio says, and why it can't take a chat now ('' when it can). */
-  const tools = $derived(
-    chain_names(runtimes).map((n) => {
+  /** Why a tool or credential can't take a chat now. */
+  const why_not = (x: { state: string; detail: string | null; cooldown_until: string | null }) =>
+    `${NOT_READY[x.state] ?? x.state}${x.detail ? `: ${x.detail}` : x.state === 'limited' && x.cooldown_until ? `, back at ${clock(x.cooldown_until)}` : ''}.`;
+  /** Each tool once, then each credential: what the radio says, and why it can't take a chat now ('' when it can). */
+  const tools = $derived([
+    ...chain_names(runtimes).map((n) => {
       const reports = runtimes.filter((r) => r.name === n);
-      const r = reports[0];
       const ready = reports.some((x) => x.state === 'idle' || x.state === 'busy');
-      const cooldown = r.state === 'limited' && r.cooldown_until ? `, back at ${clock(r.cooldown_until)}` : '';
-      const why = ready ? '' : `${NOT_READY[r.state] ?? r.state}${r.detail ? `: ${r.detail}` : cooldown}.`;
-      return { name: n, label: r.host ? tool_label(r.tool) : n, why, source: SOURCE_LABEL[r.source] };
+      return { name: n, label: tool_label(n), why: ready ? '' : why_not(reports[0]), source: SOURCE_LABEL[reports[0].source] };
     }),
-  );
+    ...credentials.map((c) => ({ name: c.name, label: c.name, why: c.state === 'idle' ? '' : why_not(c), source: SOURCE_LABEL[c.source] })),
+  ]);
 
   const REMEMBER = `sun.direct_chat.${workspace}`;
   let picking = $state(false);
@@ -135,10 +141,10 @@
   let error = $state('');
   let saving = $state(false);
 
-  /** A runtime name as a chain spec: a key-backed runtime pays with its own name. */
+  /** A tool or credential name as a chain spec: a credential pays for its `default_tool`. */
   function spec_of(n: string): ChainSpec {
-    const r = runtimes.find((x) => x.name === n);
-    return r && !r.host ? { tool: r.adapter, credential: r.name } : { tool: n };
+    const c = credentials.find((x) => x.name === n);
+    return c ? { tool: c.default_tool, credential: c.name } : { tool: n };
   }
   const spec = $derived(!tool ? null : typeof chain[0] === 'object' ? chain[0] : spec_of(tool));
   const off = $derived(bypass_off(runtimes));
@@ -233,7 +239,7 @@
         {#if can('run')}<Button size="sm" variant="secondary" iconLeft="plus" loading={starting} onclick={() => (agent ? start(agent) : pick(chat!))}>New chat</Button>{/if}
       </header>
       {#if chat.runtime}
-        <p class="chat__settings"><span>{direct_line({ runtime: chat.runtime, permission_mode: chat.permission_mode })}</span> <span><Icon name="wallet" size={14} /> {payer(chat.runtime, runtimes)}</span></p>
+        <p class="chat__settings"><span>{direct_line({ runtime: chat.runtime, permission_mode: chat.permission_mode })}</span> <span><Icon name="wallet" size={14} /> {payer(chat.runtime, runtimes, credentials)}</span></p>
       {/if}
       <div class="chat__messages">
         <TaskActivity
@@ -275,9 +281,9 @@
       {/each}
     </fieldset>
     {#if spec}
-      <ChainSettings {runtimes} bind:chain />
+      <ChainSettings {runtimes} {credentials} credential_picker={false} bind:chain />
       <Select label="Permissions" options={modes} bind:value={mode} hint={mode_hint(mode, off, safe)} />
-      <p class="direct__payer"><Icon name="wallet" size={14} /> {payer(spec, runtimes)}</p>
+      <p class="direct__payer"><Icon name="wallet" size={14} /> {payer(spec, runtimes, credentials)}</p>
       {#if switching && !patching}<p class="direct__note">Another tool or host starts a new chat; this one stays as it is.</p>{/if}
     {/if}
     {#if error}<p class="direct__error" role="alert">{error}</p>{/if}

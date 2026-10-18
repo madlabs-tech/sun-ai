@@ -59,6 +59,7 @@ mod budget;
 mod bypass;
 mod chain_check;
 mod conversation;
+mod credentials;
 mod data_touched;
 mod device;
 mod dry_run;
@@ -94,13 +95,13 @@ mod users;
 mod vcs;
 mod workspaces;
 
-pub use access::credits_model_key;
 pub use agents::{AGENT_STEP, AgentFields};
 pub use approval::Principal;
 pub use attention::Attention;
 pub use budget::Spend;
 pub use bypass::capped_line;
 pub use conversation::{Chat, ChatChange, DirectSettings};
+pub use credentials::{CredentialRemoval, credits_model_key};
 pub use data_touched::Touch;
 pub use dry_run::{SimStep, Simulation};
 pub use eval::{

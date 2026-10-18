@@ -656,3 +656,190 @@ async fn direct_chat_migration_leaves_existing_workflows_owned_as_before() {
     let _store = Store::open(dir.path()).await.unwrap();
     assert_eq!(snapshot().await, (rows, applied), "no migration ran twice");
 }
+
+/// BLO-122 (TRD BLO-117 item 7, the one-way door): every `byo_key` and
+/// `credits` runtime row becomes a credential under the same id and name
+/// (row count and ids identical), with `default_tool` from its adapter; the
+/// steps it paid for name it; its gateway model and cooldown keys still
+/// match; CLI-login rows, their states and steps stay as they were.
+#[tokio::test]
+async fn key_backed_runtimes_become_credentials_with_their_ids_and_names() {
+    use sqlx::migrate::Migrate;
+    use sun_store::{CredentialRepo, RuntimeRepo};
+
+    const CREDENTIAL: i64 = 20261111090000;
+    let dir = tempfile::tempdir().unwrap();
+    let url = format!("sqlite://{}?mode=rwc", dir.path().join("sun.db").display());
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    conn.ensure_migrations_table().await.unwrap();
+    let migrator = sqlx::migrate!("./migrations");
+    assert!(migrator.iter().any(|m| m.version == CREDENTIAL));
+    for migration in migrator.iter().filter(|m| m.version < CREDENTIAL) {
+        conn.apply(migration).await.unwrap();
+    }
+    let main = "00000000000000000000000001";
+    let anthropic = r#"{"kind":"anthropic","endpoint":"","model":"claude-sonnet-4-5","key_secret":"ANTHROPIC_KEY"}"#;
+    let ollama = r#"{"endpoint":"http://localhost:11434/v1","model":"qwen2.5-coder:7b"}"#;
+    // Steps of runs this test doesn't build: only the runtime links matter.
+    sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    for (sql, binds) in [
+        (
+            "INSERT INTO runtime (id, workspace_id, name, adapter, source, config_json, created_by)
+             VALUES ('01K0000000000000000000KEY1', $1, 'claude-key', 'claude-code', 'byo_key', $2, '01K0000000000000000000MBR1'),
+                    ('01K0000000000000000000KEY2', $1, 'ollama-qwen', 'opencode', 'byo_key', $3, NULL),
+                    ('01K0000000000000000000CRD1', $1, 'claude-credits', 'claude-code', 'credits', NULL, NULL),
+                    ('01K0000000000000000000RTN1', $1, 'codex', 'codex', 'byo_runtime', NULL, NULL)",
+            vec![main, anthropic, ollama],
+        ),
+        (
+            "INSERT INTO runtime_state (runtime_id, status, cooldown_until) VALUES
+               ('01K0000000000000000000KEY1', 'ready', NULL),
+               ('01K0000000000000000000RTN1', 'ready', NULL)",
+            vec![],
+        ),
+        (
+            "INSERT INTO step (id, run_id, step_key, attempt, status, runtime_id) VALUES
+               ('S1', 'R', 'implement', 1, 'succeeded', '01K0000000000000000000KEY1'),
+               ('S2', 'R', 'implement', 2, 'running', '01K0000000000000000000RTN1'),
+               ('S3', 'R', 'review', 1, 'queued', NULL)",
+            vec![],
+        ),
+        (
+            "INSERT INTO kernel_setting (key, value_json) VALUES
+               ('credits_model:01K0000000000000000000CRD1', '\"m\"')",
+            vec![],
+        ),
+        (
+            "INSERT INTO account_cooldown (account, until) VALUES
+               ('cred:01K0000000000000000000KEY2', '2026-10-18T20:00:00+00:00')",
+            vec![],
+        ),
+    ] {
+        let mut query = sqlx::query(sql);
+        for bind in binds {
+            query = query.bind(bind);
+        }
+        query.execute(&mut conn).await.unwrap();
+    }
+    let keyed: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, name FROM runtime WHERE source IN ('byo_key', 'credits') ORDER BY id",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    conn.close().await.unwrap();
+
+    let store = Store::open(dir.path()).await.unwrap();
+    let mut conn = sqlx::SqliteConnection::connect(&url).await.unwrap();
+    let moved: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, name FROM credential ORDER BY id")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    assert_eq!(moved, keyed, "same rows, ids and names");
+    // One line per credential; `-` is NULL.
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT name || ' ' || family || ' ' || COALESCE(endpoint, '-') || ' '
+                || COALESCE(default_model, '-') || ' ' || COALESCE(key_secret, '-') || ' '
+                || default_tool
+         FROM credential ORDER BY name",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .unwrap();
+    let rows: Vec<String> = rows.into_iter().map(|(row,)| row).collect();
+    assert_eq!(
+        rows,
+        [
+            "claude-credits anthropic - - - claude-code",
+            "claude-key anthropic - claude-sonnet-4-5 ANTHROPIC_KEY claude-code",
+            "ollama-qwen openai_compatible http://localhost:11434/v1 qwen2.5-coder:7b - opencode",
+        ]
+    );
+    let runtimes: Vec<(String,)> = sqlx::query_as("SELECT id FROM runtime")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(runtimes, [("01K0000000000000000000RTN1".to_owned(),)]);
+    let states: Vec<(String,)> = sqlx::query_as("SELECT runtime_id FROM runtime_state")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(states, runtimes);
+    let steps: Vec<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT id, runtime_id, credential_id FROM step ORDER BY id")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    let step = |id: &str, runtime: Option<&str>, credential: Option<&str>| {
+        (
+            id.to_owned(),
+            runtime.map(str::to_owned),
+            credential.map(str::to_owned),
+        )
+    };
+    assert_eq!(
+        steps,
+        [
+            step("S1", None, Some("01K0000000000000000000KEY1")),
+            step("S2", Some("01K0000000000000000000RTN1"), None),
+            step("S3", None, None),
+        ]
+    );
+    // Keyed by id, so untouched and still pointing at the credential.
+    let model: Vec<(String,)> =
+        sqlx::query_as("SELECT key FROM kernel_setting WHERE key LIKE 'credits_model:%'")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    assert_eq!(
+        model,
+        [("credits_model:01K0000000000000000000CRD1".to_owned(),)]
+    );
+    let cooling: Vec<(String,)> = sqlx::query_as("SELECT account FROM account_cooldown")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(cooling, [("cred:01K0000000000000000000KEY2".to_owned(),)]);
+    conn.close().await.unwrap();
+
+    // The store reads them back as the runtimes were configured.
+    let mut tx = store.read().await.unwrap();
+    let workspace = sun_core::WorkspaceId::MAIN;
+    let key = tx
+        .credential_by_name(workspace, "claude-key")
+        .await
+        .unwrap()
+        .unwrap();
+    let byo = key.byo_key.unwrap();
+    assert_eq!(
+        (byo.kind, byo.endpoint.as_str(), byo.key_secret.as_deref()),
+        (sun_core::ByoKeyKind::Anthropic, "", Some("ANTHROPIC_KEY"))
+    );
+    let added_by = key.created_by.map(|m| m.to_string());
+    assert_eq!(added_by.as_deref(), Some("01K0000000000000000000MBR1"));
+    let credits = tx
+        .credential_by_name(workspace, "claude-credits")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (credits.byo_key, credits.default_tool.as_str()),
+        (None, "claude-code")
+    );
+    assert!(
+        tx.runtime_by_name(workspace, "claude-key")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tx.runtime_by_name(workspace, "codex")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

@@ -321,16 +321,16 @@ async fn buyer_leases_a_task_its_seller_host_joins_and_accepts_or_disputes() {
     assert_eq!(calls, ["accept lea_1", "dispute lea_1: no PR was opened"]);
 }
 
-/// No `credits` runtime is added from the API for now, with or without Sun
-/// Cloud: the deployment sells no credits yet.
+/// No `credits` credential is added from the API for now, with or without
+/// Sun Cloud: the deployment sells no credits yet.
 #[tokio::test]
-async fn credits_runtimes_are_refused_until_credits_are_sold() {
+async fn credits_credentials_are_refused_until_credits_are_sold() {
     let credits =
-        json!({ "name": "claude-credits", "adapter": "claude-code", "source": "credits" });
+        json!({ "name": "claude-credits", "default_tool": "claude-code", "source": "credits" });
     let plain = common::kernel().await;
     let connected = common::kernel_with_market(Arc::new(FakeCloud::default())).await;
     for app in [&plain.app, &connected.app] {
-        let (status, body) = call(app, "POST", "/api/v1/runtimes", Some(credits.clone())).await;
+        let (status, body) = call(app, "POST", "/api/v1/credentials", Some(credits.clone())).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         assert_eq!(
             body["error"]["message"],
@@ -338,15 +338,8 @@ async fn credits_runtimes_are_refused_until_credits_are_sold() {
              or runtime."
         );
     }
-    let (_, runtimes) = call(&connected.app, "GET", "/api/v1/runtimes", None).await;
-    assert!(
-        runtimes
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|r| r["source"] != "credits"),
-        "{runtimes}"
-    );
+    let (_, credentials) = call(&connected.app, "GET", "/api/v1/credentials", None).await;
+    assert_eq!(credentials, json!([]));
 }
 
 /// The ecosystem's monthly cap and a task's budget round-trip.

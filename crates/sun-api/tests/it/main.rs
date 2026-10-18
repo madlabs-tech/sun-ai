@@ -12,6 +12,7 @@ mod bypass_live;
 mod bypass_paths;
 mod chats;
 mod common;
+mod credentials;
 mod device;
 mod direct_chats;
 mod entitlement;

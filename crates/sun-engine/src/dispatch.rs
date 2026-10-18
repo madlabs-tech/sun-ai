@@ -39,7 +39,7 @@ use sun_core::model::{ActivityKind, Run, Step};
 use sun_core::{
     Error, HostId, Result, RunStatus, SessionHandle, SessionId, StepId, StepStatus, SunEvent,
 };
-use sun_store::{HostRepo, RunRepo, RuntimeRepo, SessionRepo, TaskRepo, Tx};
+use sun_store::{HostRepo, RunRepo, SessionRepo, TaskRepo, Tx};
 
 use super::{Command, Effect, Executor, Start, append, kind, move_step};
 use crate::{conversation, queue, queued, state};
@@ -232,12 +232,15 @@ impl Executor {
             .into_iter()
             .filter(|s| s.session_id.is_some())
             .max_by_key(|s| s.started_at);
-        let Some((Some(session), Some(runtime_id))) = last.map(|s| (s.session_id, s.runtime_id))
-        else {
+        let Some(last) = last else {
             return Ok(None);
         };
-        if tx.get_runtime(runtime_id).await?.name != runtime {
+        let Some(session) = last.session_id else {
             return Ok(None);
+        };
+        match super::ran_on(tx, &last).await? {
+            Some((name, _)) if name == runtime => {}
+            _ => return Ok(None),
         }
         let Some(native_id) = tx.get_session(session).await?.native_id else {
             return Ok(None);

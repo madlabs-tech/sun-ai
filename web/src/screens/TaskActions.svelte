@@ -75,7 +75,7 @@
     return (run?.runtime_chain ?? [])
       .filter((r) => r !== switchable?.runtime_id)
       .map((r) => {
-        const rt = app.runtimes.find((x) => x.name === r);
+        const rt = app.runtimes.find((x) => x.name === r) ?? app.credentials.find((x) => x.name === r);
         const cooling = rt?.cooldown_until ? ` · cooling down until ${clock(rt.cooldown_until)}` : '';
         return { value: r, label: runtime_name(app.runtimes, r), about: (rt ? SOURCE_LABEL[rt.source] : 'Runtime') + cooling };
       });

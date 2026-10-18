@@ -4,7 +4,7 @@
   import { Badge, Button, Card, Input, Select } from '@hryer/madlabs-design-system/svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import { api } from '../lib/api/client';
-  import type { EvalOutcome, EvalPick, EvalRun, EvalSet, Runtime, Workflow } from '../lib/api/types';
+  import type { Credential, EvalOutcome, EvalPick, EvalRun, EvalSet, Runtime, Workflow } from '../lib/api/types';
   import { current_workspace, error_text, toast } from '../lib/app_state.svelte';
   import { CAUSE_BADGE, chain_names, day, runtime_name } from '../lib/format';
   import { go, href, route } from '../lib/router.svelte';
@@ -13,6 +13,7 @@
   let sets = $state<EvalSet[]>([]);
   let workflows = $state<Workflow[]>([]);
   let runtimes = $state<Runtime[]>([]);
+  let credentials = $state<Credential[]>([]);
   let error = $state('');
   let loaded = $state(false);
 
@@ -28,6 +29,7 @@
   load();
   api.list_workflows().then((w) => (workflows = w), () => {});
   api.list_runtimes(current_workspace()).then((r) => (runtimes = r), () => {});
+  api.list_credentials(current_workspace()).then((c) => (credentials = c), () => {});
 
   // ponytail: polls while a replay runs; an eval SSE stream would replace this.
   const running = $derived(evals.some((e) => e.status === 'running'));
@@ -246,7 +248,7 @@
       </details>
       <Select
         label="Run on"
-        options={[{ value: '', label: 'Recorded transcripts (free, no model runs)' }, ...chain_names(runtimes).map((name) => ({ value: name, label: `${runtime_name(runtimes, name)} (real runs, uses quota)` }))]}
+        options={[{ value: '', label: 'Recorded transcripts (free, no model runs)' }, ...chain_names(runtimes, credentials).map((name) => ({ value: name, label: `${runtime_name(runtimes, name)} (real runs, uses quota)` }))]}
         bind:value={runtime}
         hint="Pull requests, messages and other side effects are recorded, never sent."
       />

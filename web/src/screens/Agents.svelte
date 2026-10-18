@@ -13,7 +13,7 @@
   import ChainSettings from '../lib/ui/ChainSettings.svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
   import { api } from '../lib/api/client';
-  import type { Agent, AgentFields, ChainEntry, PermissionMode, Runtime } from '../lib/api/types';
+  import type { Agent, AgentFields, ChainEntry, Credential, PermissionMode, Runtime } from '../lib/api/types';
   import { app, can, current_workspace, error_text, toast } from '../lib/app_state.svelte';
   import { PERMISSION_MODE_COPY as MODE, chain_modes, chain_names, entry_name } from '../lib/format';
   import { bypass_off, isolated as has_isolation, mode_hint, mode_options } from '../lib/permission_mode';
@@ -23,12 +23,17 @@
   /** The list, also kept for the assignee pickers and cards. */
   const fetch_agents = () => api.list_agents(workspace).then((list) => (app.agents = list));
   let load = $state(fetch_agents());
-  /** Every (host, tool) and key-backed runtime: chain name suggestions, and each entry's hosts, models
-   *  and effort levels. Plus the catalog's installed skills. */
+  /** Every (host, tool) and the workspace's credentials: chain name suggestions, and each entry's hosts, models,
+   *  effort levels and who pays. Plus the catalog's installed skills. */
   let runtimes = $state<Runtime[]>([]);
+  let credentials = $state<Credential[]>([]);
   let skills = $state<string[]>([]);
   api.list_runtimes(workspace).then(
     (rows) => (runtimes = rows),
+    () => {},
+  );
+  api.list_credentials(workspace).then(
+    (rows) => (credentials = rows),
     () => {},
   );
   /** Some online host has a container or VM ready: where a bypass session may run. */
@@ -61,7 +66,7 @@
   let archiving = $state<Agent | null>(null);
   const off = $derived(bypass_off(runtimes));
   /** What every runtime of the chain can enforce on its hosts (BLO-163). */
-  const offered = $derived(chain_modes(runtimes, form.runtime_chain));
+  const offered = $derived(chain_modes(runtimes, form.runtime_chain, credentials));
   // The picked mode keeps showing, even once bypass is off or the chain can't run it, so `mode_error` can say why.
   const modes = $derived(mode_options(offered, !off, isolated, form.permission_mode));
 
@@ -194,12 +199,12 @@
     <Chips
       label="Runtimes, in failover order"
       placeholder="claude-code"
-      suggestions={chain_names(runtimes)}
+      suggestions={chain_names(runtimes, credentials)}
       name={entry_name}
       hint="The first ready one runs; the next takes over at a limit."
       bind:items={form.runtime_chain}
     />
-    <ChainSettings {runtimes} bind:chain={form.runtime_chain} />
+    <ChainSettings {runtimes} {credentials} bind:chain={form.runtime_chain} />
     <Select label="Permissions" options={modes} bind:value={form.permission_mode} hint={mode_hint(form.permission_mode, off, isolated)} error={mode_error} />
     <Chips label="Skills" placeholder="tdd" suggestions={skills} hint="Installed skills from the Catalog." bind:items={form.skill_ids} />
     {#if error}<p class="agent-form__error" role="alert">{error}</p>{/if}

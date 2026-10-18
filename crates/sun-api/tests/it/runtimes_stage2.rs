@@ -12,9 +12,9 @@ use axum::http::StatusCode;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sun_api::RuntimesModel;
-use sun_core::model::{Account, Role, Runtime, RuntimeSource};
+use sun_core::model::{Account, Credential, Role, RuntimeSource};
 use sun_core::{HostId, WorkspaceId};
-use sun_store::{HostRepo, RuntimeRepo};
+use sun_store::{CredentialRepo, HostRepo, RuntimeRepo};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::{
@@ -79,8 +79,8 @@ async fn another_workspaces_admin_cannot_see_or_reprobe_a_host() {
 
     for path in [
         format!("/api/v1/runtimes?workspace={MAIN}"),
-        format!("/api/v1/runtimes?workspace={MAIN}&model=v1"),
         format!("/api/v1/runtimes?workspace={MAIN}&model=v2"),
+        format!("/api/v1/credentials?workspace={MAIN}"),
         format!("/api/v1/hosts?workspace={MAIN}"),
     ] {
         let (status, body) = call_as(app, &bea, "GET", &path, None).await;
@@ -96,7 +96,7 @@ async fn another_workspaces_admin_cannot_see_or_reprobe_a_host() {
     // Her own workspace's lists hold nothing of Main's host.
     for path in [
         format!("/api/v1/runtimes?workspace={b}"),
-        format!("/api/v1/runtimes?workspace={b}&model=v1"),
+        format!("/api/v1/credentials?workspace={b}"),
         format!("/api/v1/hosts?workspace={b}"),
     ] {
         let (status, body) = call_as(app, &bea, "GET", &path, None).await;
@@ -172,9 +172,9 @@ async fn reprobe_needs_manage_runtimes_in_the_hosts_workspace() {
 
 // --- Case 3: no secret in any response ---------------------------------
 
-/// A byo_key runtime's key, the host's key, an enrolment token and the
-/// kernel token never show in any `/runtimes` or `/hosts` answer, under
-/// either list model and either kill-switch setting.
+/// A credential's key and its key secret's name, the host's key, an
+/// enrolment token and the kernel token never show in any `/runtimes`,
+/// `/credentials` or `/hosts` answer, under either data source.
 #[tokio::test]
 async fn no_key_or_token_in_runtimes_or_hosts_answers() {
     const KEY: &str = "sk-live-stage2-0123456789abcdef";
@@ -193,26 +193,32 @@ async fn no_key_or_token_in_runtimes_or_hosts_answers() {
     let put = format!("/api/v1/secrets/workspace/{MAIN}/OR_KEY");
     let (status, body) = call(app, "PUT", &put, Some(json!({ "value": KEY }))).await;
     assert!(status.is_success(), "{status} {body}");
-    let runtime = json!({ "name": "or-qwen", "source": "byo_key", "config":
-        { "endpoint": "http://localhost:11434/v1", "model": "qwen", "key_secret": "OR_KEY" } });
+    let credential = json!({ "name": "or-qwen", "source": "byo_key",
+        "endpoint": "http://localhost:11434/v1", "default_model": "qwen", "key_secret": "OR_KEY" });
     let (status, saved) = call(
         app,
         "POST",
-        &format!("/api/v1/runtimes?workspace={MAIN}"),
-        Some(runtime),
+        &format!("/api/v1/credentials?workspace={MAIN}"),
+        Some(credential),
     )
     .await;
     assert!(status.is_success(), "{status} {saved}");
     let host_key = sun_api::host_key_for(SECRET, k.host);
 
-    let secrets = [KEY, host_key.as_str(), enrol_token.as_str(), TOKEN];
+    let secrets = [
+        KEY,
+        "OR_KEY",
+        host_key.as_str(),
+        enrol_token.as_str(),
+        TOKEN,
+    ];
     let paths = [
         "/api/v1/runtimes".to_owned(),
-        "/api/v1/runtimes?model=v1".to_owned(),
         "/api/v1/runtimes?model=v2".to_owned(),
         format!("/api/v1/runtimes?workspace={MAIN}"),
-        format!("/api/v1/runtimes?workspace={MAIN}&model=v1"),
-        "/api/v1/runtimes/or-qwen/readiness".to_owned(),
+        "/api/v1/credentials".to_owned(),
+        format!("/api/v1/credentials?workspace={MAIN}"),
+        "/api/v1/credentials/or-qwen".to_owned(),
         "/api/v1/hosts".to_owned(),
         format!("/api/v1/hosts?workspace={MAIN}"),
     ];
@@ -231,16 +237,27 @@ async fn no_key_or_token_in_runtimes_or_hosts_answers() {
             }
         }
     }
-    // What a literal grep for `key_secret` finds: the secret's *name*, as v1
-    // has always returned in `config`, never its value.
-    let (_, v2) = call(app, "GET", "/api/v1/runtimes?model=v2", None).await;
-    let keyed = v2
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["name"] == "or-qwen")
-        .unwrap();
-    assert_eq!(keyed["config"]["key_secret"], "OR_KEY", "{keyed}");
+    // `key_secret` is write-only: the answers say only that one is set, and
+    // the POST that set it answered the same.
+    for answer in [
+        &saved,
+        &call(app, "GET", "/api/v1/credentials/or-qwen", None)
+            .await
+            .1,
+    ] {
+        assert!(answer.get("key_secret").is_none(), "{answer}");
+        assert_eq!(answer["key_secret_set"], true, "{answer}");
+        assert!(!answer.to_string().contains("OR_KEY"), "{answer}");
+    }
+    let (_, runtimes) = call(app, "GET", "/api/v1/runtimes", None).await;
+    assert!(
+        runtimes
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["name"] != "or-qwen"),
+        "a credential is not a runtime: {runtimes}"
+    );
 }
 
 // --- Case 4: the §6 state table, one assertion per row -------------------
@@ -376,18 +393,18 @@ async fn limited_follows_the_account_per_host_and_tool() {
 
     // A key both hosts would run Claude Code with: both limited, and the
     // key's own entry carries the cooldown.
-    let key = Runtime {
-        id: sun_core::RuntimeId::generate(),
+    let key = Credential {
+        id: sun_core::CredentialId::generate(),
         workspace_id: MAIN,
         name: "claude-credits".into(),
-        adapter: "claude-code".into(),
         source: RuntimeSource::Credits,
+        default_tool: "claude-code".into(),
         byo_key: None,
         created_by: None,
     };
     let until = chrono::Utc::now() + chrono::Duration::minutes(30);
     let mut tx = k.store.begin().await.unwrap();
-    assert!(tx.insert_runtime(&key).await.unwrap());
+    assert!(tx.insert_credential(&key).await.unwrap());
     tx.set_cooldown(&Account::Credential(key.id).key(k.host), Some(until))
         .await
         .unwrap();
@@ -399,19 +416,25 @@ async fn limited_follows_the_account_per_host_and_tool() {
         .iter()
         .filter(|r| r["tool"] == "claude-code")
         .collect();
-    assert_eq!(claude.len(), 3, "two hosts and the key: {list}");
+    assert_eq!(
+        claude.len(),
+        2,
+        "two hosts; the key is a credential: {list}"
+    );
     for entry in claude {
         assert!(entry["cooldown_until"].is_string(), "{entry}");
-        // The key's own entry: credits aren't on this deployment, which
-        // comes first.
-        if !entry["host"].is_null() {
-            assert_eq!(entry["state"], "limited", "{entry}");
-        }
+        assert_eq!(entry["state"], "limited", "{entry}");
     }
-    let text = list.to_string();
+    // The key's own entry carries the cooldown too; credits aren't on this
+    // deployment, which comes first.
+    let (status, credential) = call(app, "GET", "/api/v1/credentials/claude-credits", None).await;
+    assert_eq!(status, StatusCode::OK, "{credential}");
+    assert!(credential["cooldown_until"].is_string(), "{credential}");
+    assert_eq!(credential["state"], "unsupported", "{credential}");
+    let text = format!("{list}{credential}");
     assert!(
         !text.contains("cred:") && !text.contains("login:"),
-        "no account key in the API: {list}"
+        "no account key in the API: {text}"
     );
 }
 
@@ -517,23 +540,6 @@ async fn an_offline_host_after_a_restart_was_last_seen_at_its_last_probe() {
 
 // --- Case 5: the kill switch ---------------------------------------------
 
-/// The old list's exact field set (main before item 2).
-const V1_FIELDS: [&str; 13] = [
-    "adapter",
-    "allow_bypass",
-    "config",
-    "cooldown_until",
-    "id",
-    "max_sessions",
-    "model",
-    "name",
-    "permission_mode",
-    "sessions",
-    "source",
-    "status",
-    "workspace_id",
-];
-
 /// `sun.yaml` `runtimes.model` picks the data source, not the shape (option
 /// B, BLO-132): with no `?model=` both values answer the §6 per-`(host,
 /// tool)` list, so the page works under either. `v1` reads the raw report
@@ -582,7 +588,7 @@ async fn sun_yaml_runtimes_model_picks_the_source_of_the_default_list() {
     assert_eq!(lists[0], lists[1], "same facts from either source");
 }
 
-/// `?model=` takes `v1` or `v2` only, under either `sun.yaml` value.
+/// `?model=` takes `v2` only (`v1` is gone), under either `sun.yaml` value.
 #[tokio::test]
 async fn an_unknown_model_flag_is_refused_under_either_default() {
     let k = kernel().await;
@@ -610,11 +616,10 @@ fn strip_source(mut list: Value) -> Value {
 }
 
 /// Flipping the switch v2 → v1 → v2 loses nothing: no `host_runtime` row
-/// is lost or changed, `?model=v1` is the same old JSON under either value,
-/// the default list comes back identical, and placement (an agent's
-/// readiness) reads the same from either source.
+/// is lost or changed, the default list comes back identical, and
+/// placement (an agent's readiness) reads the same from either source.
 #[tokio::test]
-async fn flipping_the_kill_switch_loses_nothing_and_v1_stays_the_old_json() {
+async fn flipping_the_kill_switch_loses_nothing() {
     let k = kernel().await;
     let _host = host_with(&k, claude_code(true)).await;
     let (_vps, _socket) = enrol_host(&k.app, "vps-sg-1", claude_code(false)).await;
@@ -651,17 +656,11 @@ async fn flipping_the_kill_switch_loses_nothing_and_v1_stays_the_old_json() {
         }
     };
     let list_on_v2 = get(RuntimesModel::V2, "/api/v1/runtimes").await;
-    let v1_on_v2 = get(RuntimesModel::V2, "/api/v1/runtimes?model=v1").await;
     let agents_on_v2 = get(RuntimesModel::V2, "/api/v1/agents").await;
     // Flip to v1, then back to v2.
     let list_on_v1 = get(RuntimesModel::V1, "/api/v1/runtimes").await;
-    let v1_on_v1 = get(RuntimesModel::V1, "/api/v1/runtimes?model=v1").await;
     let agents_on_v1 = get(RuntimesModel::V1, "/api/v1/agents").await;
     let list_again = get(RuntimesModel::V2, "/api/v1/runtimes").await;
-    assert_eq!(
-        v1_on_v1, v1_on_v2,
-        "?model=v1 is the same under either value"
-    );
     assert_eq!(list_on_v2, list_again, "flip and back");
     assert_eq!(strip_source(list_on_v1), strip_source(list_on_v2.clone()));
     assert_eq!(agents_on_v1, agents_on_v2, "placement reads the same");
@@ -677,26 +676,6 @@ async fn flipping_the_kill_switch_loses_nothing_and_v1_stays_the_old_json() {
         "{agents_on_v2}"
     );
     assert_eq!(rows().await, before, "no host_runtime row lost or changed");
-    for entry in v1_on_v1.as_array().unwrap() {
-        let mut keys: Vec<_> = entry
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(keys, V1_FIELDS, "the old shape: {entry}");
-    }
-    let claude = v1_on_v1
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["name"] == "claude-code")
-        .unwrap();
-    assert_eq!(
-        claude["status"], "ready",
-        "one online host is logged in: {claude}"
-    );
 }
 
 // --- BLO-136 case 3: a cooling key stays in its own workspace ----------
@@ -732,18 +711,18 @@ async fn a_cooling_key_never_marks_another_workspaces_host() {
     hello["capabilities"]["runtimes"] = claude_code(true);
     let _beta_socket = connect_host(app, beta_host, hello).await;
 
-    let key = Runtime {
-        id: sun_core::RuntimeId::generate(),
+    let key = Credential {
+        id: sun_core::CredentialId::generate(),
         workspace_id: MAIN,
         name: "claude-credits".into(),
-        adapter: "claude-code".into(),
         source: RuntimeSource::Credits,
+        default_tool: "claude-code".into(),
         byo_key: None,
         created_by: None,
     };
     let until = chrono::Utc::now() + chrono::Duration::minutes(30);
     let mut tx = k.store.begin().await.unwrap();
-    assert!(tx.insert_runtime(&key).await.unwrap());
+    assert!(tx.insert_credential(&key).await.unwrap());
     tx.set_cooldown(&Account::Credential(key.id).key(k.host), Some(until))
         .await
         .unwrap();

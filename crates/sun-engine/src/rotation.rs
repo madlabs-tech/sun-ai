@@ -30,7 +30,7 @@ use serde_json::json;
 use sun_context::HandoffReason;
 use sun_core::model::Step;
 use sun_core::{Result, SessionId, StepId, SunEvent};
-use sun_store::{RuntimeRepo, Tx};
+use sun_store::Tx;
 
 use super::failover::Handoff;
 use super::{Effect, Executor, append};
@@ -79,10 +79,9 @@ impl Executor {
                 context_used: Some(used),
                 ..
             } => {
-                let Some(runtime) = step.runtime_id else {
+                let Some((_, adapter)) = super::ran_on(tx, step).await? else {
                     return Ok(());
                 };
-                let adapter = tx.get_runtime(runtime).await?.adapter;
                 let Some(window) = self.context_window(&adapter) else {
                     return Ok(());
                 };

@@ -495,6 +495,7 @@ async fn packs_are_stored_as_blob_plus_row() {
         attempt: 1,
         status: StepStatus::Queued,
         runtime_id: None,
+        credential_id: None,
         session_id: None,
         started_at: None,
         ended_at: None,

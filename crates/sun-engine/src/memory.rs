@@ -46,8 +46,8 @@ use sun_core::{
     TaskId, Timestamp, WorkflowId, WorkspaceId,
 };
 use sun_store::{
-    AgentRepo, CorrectionRepo, EventLog, MemoryRepo, NoteRepo, OutboxRepo, RepoRepo, RunRepo,
-    RuntimeRepo, Tx, WorkflowRepo,
+    AgentRepo, CorrectionRepo, EventLog, MemoryRepo, NoteRepo, OutboxRepo, RepoRepo, RunRepo, Tx,
+    WorkflowRepo,
 };
 
 use sun_workflow::StepKind;
@@ -768,13 +768,20 @@ impl Engine {
                 slot.insert(name.unwrap_or_else(|_| workflow.to_string()));
                 let mut agents = Vec::new();
                 for s in tx.steps_of_run(e.run_id).await? {
-                    let (Some(at), Some(id)) = (s.started_at, s.runtime_id) else {
+                    let id = match (s.credential_id, s.runtime_id) {
+                        (Some(c), _) => c.to_string(),
+                        (None, Some(r)) => r.to_string(),
+                        (None, None) => continue,
+                    };
+                    let Some(at) = s.started_at else {
                         continue;
                     };
-                    if let std::collections::hash_map::Entry::Vacant(slot) = runtime_names.entry(id)
+                    if let std::collections::hash_map::Entry::Vacant(slot) =
+                        runtime_names.entry(id.clone())
                     {
-                        let name = tx.get_runtime(id).await.map(|r| r.name);
-                        slot.insert(name.unwrap_or_else(|_| id.to_string()));
+                        let name = crate::executor::ran_on(&mut tx, &s).await;
+                        let name = name.ok().flatten().map(|(name, _)| name);
+                        slot.insert(name.unwrap_or_else(|| id.clone()));
                     }
                     agents.push((at, runtime_names[&id].clone()));
                 }

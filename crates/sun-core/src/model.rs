@@ -10,11 +10,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    AgentId, ArtifactId, AuditId, BlobHash, ContextPackId, CorrectionId, EcosystemId, EvalRunId,
-    EvalSetId, HandoffPackId, HostId, HostRuntimeId, IdemKey, MemberId, MemoryItemId, NoteId,
-    OutboxId, PinId, ProjectId, PullRequestId, RepoId, RunId, RunStatus, RuntimeId, SessionId,
-    StepId, StepKey, StepStatus, TaskActivityId, TaskId, TaskStatus, Timestamp, VcsConnectionId,
-    WorkflowId, WorkspaceId,
+    AgentId, ArtifactId, AuditId, BlobHash, ContextPackId, CorrectionId, CredentialId, EcosystemId,
+    EvalRunId, EvalSetId, HandoffPackId, HostId, HostRuntimeId, IdemKey, MemberId, MemoryItemId,
+    NoteId, OutboxId, PinId, ProjectId, PullRequestId, RepoId, RunId, RunStatus, RuntimeId,
+    SessionId, StepId, StepKey, StepStatus, TaskActivityId, TaskId, TaskStatus, Timestamp,
+    VcsConnectionId, WorkflowId, WorkspaceId,
 };
 
 /// `repo` — one of a workspace's repositories (`{url, description}`): what
@@ -1032,8 +1032,11 @@ pub struct Step {
     pub attempt: u32,
     /// Status.
     pub status: StepStatus,
-    /// Runtime used, for agent steps.
+    /// The tool row of the CLI login used, for agent steps on one.
     pub runtime_id: Option<RuntimeId>,
+    /// The credential paid with, for agent steps on one.
+    #[serde(default)]
+    pub credential_id: Option<CredentialId>,
     /// Session used, for agent steps.
     pub session_id: Option<SessionId>,
     /// When it started running.
@@ -1107,37 +1110,57 @@ string_enum! {
     }
 }
 
-/// `runtime` — a configured runtime of one workspace, which `runtime.chain`
-/// entries of that workspace's workflows and agents name.
+/// `runtime` — a tool a chain of one workspace names (`claude-code`), run
+/// on the CLI's own login: what `step.runtime_id` points at. Rows of other
+/// sources are history only: key-backed ones became [`Credential`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Runtime {
     /// Id.
     pub id: RuntimeId,
     /// The workspace whose chains it serves.
     pub workspace_id: WorkspaceId,
-    /// Name used in workflow chains, unique in its workspace, e.g.
-    /// `opencode-openrouter`.
+    /// Name used in workflow chains, unique in its workspace: the tool id.
     pub name: String,
     /// Adapter id (`RuntimeAdapter::id`), e.g. `opencode`.
     pub adapter: String,
-    /// Who pays.
+    /// Who pays: `byo_runtime`.
     pub source: RuntimeSource,
-    /// The endpoint, model and key secret when `source` is `byo_key`
-    /// (`runtime.config_json`).
+}
+
+/// `credential` — who pays for a session (TRD BLO-117 §7): one workspace's
+/// own API key (`byo_key`) or Sun credits through the gateway (`credits`).
+/// A chain entry names it (`{tool, credential: ollama-qwen}`, or the bare
+/// name, which runs it on `default_tool`). Its id and name are those of the
+/// `byo_key`/`credits` runtime row it replaced; it is never renamed, since
+/// chains name it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credential {
+    /// Id.
+    pub id: CredentialId,
+    /// The workspace whose chains it pays for.
+    pub workspace_id: WorkspaceId,
+    /// Name chain entries use, unique in its workspace, e.g. `ollama-qwen`.
+    pub name: String,
+    /// `byo_key` or `credits`.
+    pub source: RuntimeSource,
+    /// The tool (`RuntimeAdapter::id`) a bare-name chain entry runs it on.
+    pub default_tool: String,
+    /// The provider kind, endpoint, model and key secret name when `source`
+    /// is `byo_key`.
     #[serde(default)]
     pub byo_key: Option<crate::ByoKey>,
-    /// Who added it; `None` for one a chain or `sun.yaml` named first, or
-    /// one from before runtimes were per workspace.
+    /// Who added it; `None` for one `sun.yaml` named, or one from before
+    /// runtimes were per workspace.
     #[serde(default)]
     pub created_by: Option<crate::MemberId>,
 }
 
-impl Runtime {
-    /// Checks a runtime before it is saved: a slug name, and for `byo_key`
-    /// a valid [`crate::ByoKey`] (and only then) whose kind the adapter runs
-    /// ([`crate::ByoKeyKind::runs_on`]).
+impl Credential {
+    /// Checks a credential before it is saved: a slug name, a key-backed
+    /// source, and for `byo_key` a valid [`crate::ByoKey`] (and only then)
+    /// whose kind `default_tool` runs ([`crate::ByoKeyKind::runs_on`]).
     /// Like [`crate::ByoKey::validate`], the message starts with the field
-    /// (`name: `, `adapter: `, `source: `, ...).
+    /// (`name: `, `default_tool: `, `source: `, ...).
     pub fn validate(&self) -> crate::Result<()> {
         let invalid = |msg: &str| Err(crate::Error::InvalidInput(msg.into()));
         let slug = (1..=64).contains(&self.name.len())
@@ -1149,19 +1172,35 @@ impl Runtime {
             return invalid("name: 1–64 lowercase letters, digits, - or _, e.g. ollama-qwen");
         }
         match (self.source, &self.byo_key) {
-            (RuntimeSource::ByoKey, Some(byo)) if !byo.kind.runs_on(&self.adapter) => invalid(
-                "adapter: opencode takes any key; claude-code takes an anthropic key, \
+            (RuntimeSource::ByoRuntime, _) => {
+                invalid("source: a credential is byo_key or credits; a CLI's own login needs none")
+            }
+            (RuntimeSource::ByoKey, Some(byo)) if !byo.kind.runs_on(&self.default_tool) => invalid(
+                "default_tool: opencode takes any key; claude-code takes an anthropic key, \
                      codex an openai_compatible one",
             ),
             (RuntimeSource::ByoKey, Some(byo)) => byo.validate(),
             (RuntimeSource::ByoKey, None) => invalid("endpoint: no endpoint"),
             (RuntimeSource::Credits, _)
-                if !matches!(self.adapter.as_str(), "claude-code" | "codex" | "opencode") =>
+                if !matches!(
+                    self.default_tool.as_str(),
+                    "claude-code" | "codex" | "opencode"
+                ) =>
             {
-                invalid("adapter: Sun credits run on claude-code, codex or opencode")
+                invalid("default_tool: Sun credits run on claude-code, codex or opencode")
             }
-            (_, Some(_)) => invalid("source: only a byo_key runtime takes an endpoint"),
+            (_, Some(_)) => invalid("source: only a byo_key credential takes an endpoint"),
             (_, None) => Ok(()),
+        }
+    }
+
+    /// The provider API it speaks (`credential.family`): its key's kind, or
+    /// for credits the one `default_tool` speaks.
+    pub fn family(&self) -> crate::ByoKeyKind {
+        match &self.byo_key {
+            Some(byo) => byo.kind,
+            None if self.default_tool == "claude-code" => crate::ByoKeyKind::Anthropic,
+            None => crate::ByoKeyKind::OpenaiCompatible,
         }
     }
 }
@@ -1171,19 +1210,18 @@ impl Runtime {
 /// internal: never in an API response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Account {
-    /// A `byo_key` or `credits` runtime's key, whatever host runs it.
-    Credential(RuntimeId),
-    /// The CLI's own login on each host (`byo_runtime`, or an entry with no
-    /// runtime row): the tool.
+    /// A credential's key or credits, whatever host runs it.
+    Credential(CredentialId),
+    /// The CLI's own login on each host: the tool.
     Login(String),
 }
 
 impl Account {
-    /// What chain entry `name` spends: its `runtime` row's, if configured.
-    pub fn of(runtime: Option<&Runtime>, name: &str) -> Self {
-        match runtime {
-            Some(r) if r.source != RuntimeSource::ByoRuntime => Self::Credential(r.id),
-            Some(r) => Self::Login(r.adapter.clone()),
+    /// What chain entry `name` spends: the workspace's credential of that
+    /// name, else the CLI login of the tool `name`.
+    pub fn of(credential: Option<&Credential>, name: &str) -> Self {
+        match credential {
+            Some(c) => Self::Credential(c.id),
             None => Self::Login(name.to_owned()),
         }
     }
@@ -1197,8 +1235,8 @@ impl Account {
         }
     }
 
-    /// `cred:<runtime id>`.
-    pub fn credential_key(id: RuntimeId) -> String {
+    /// `cred:<credential id>`.
+    pub fn credential_key(id: CredentialId) -> String {
         format!("cred:{id}")
     }
 }
@@ -2733,18 +2771,18 @@ mod runtime_tests {
     }
 
     #[test]
-    fn byo_key_runtimes_name_the_field_to_fix() {
+    fn byo_key_credentials_name_the_field_to_fix() {
         let byo = |endpoint: &str, model: &str, key: Option<&str>| crate::ByoKey {
             kind: crate::ByoKeyKind::OpenaiCompatible,
             endpoint: endpoint.into(),
             model: model.into(),
             key_secret: key.map(Into::into),
         };
-        let runtime = |name: &str, adapter: &str, source, b| Runtime {
-            id: RuntimeId::generate(),
+        let runtime = |name: &str, tool: &str, source, b| Credential {
+            id: CredentialId::generate(),
             workspace_id: WorkspaceId::MAIN,
             name: name.into(),
-            adapter: adapter.into(),
+            default_tool: tool.into(),
             source,
             byo_key: b,
             created_by: None,
@@ -2752,14 +2790,7 @@ mod runtime_tests {
         let ollama = byo("http://localhost:11434/v1", "qwen2.5-coder:7b", None);
         let ok = runtime("ollama", "opencode", RuntimeSource::ByoKey, Some(ollama));
         assert_eq!(ok.validate(), Ok(()));
-        let plain = runtime(
-            "claude-code",
-            "claude-code",
-            RuntimeSource::ByoRuntime,
-            None,
-        );
-        assert_eq!(plain.validate(), Ok(()));
-        let field = |r: Runtime| match r.validate() {
+        let field = |r: Credential| match r.validate() {
             Err(crate::Error::InvalidInput(m)) => m.split(':').next().unwrap_or("").to_owned(),
             other => panic!("{other:?}"),
         };
@@ -2775,8 +2806,16 @@ mod runtime_tests {
             field(with(byo("https://h/v1", "m", Some("1X")))),
             "key_secret"
         );
-        let bad_name = runtime("Big Name", "opencode", RuntimeSource::ByoRuntime, None);
+        let bad_name = runtime("Big Name", "opencode", RuntimeSource::ByoKey, None);
         assert_eq!(field(bad_name), "name");
+        // A CLI's own login is not a credential.
+        let login = runtime(
+            "claude-code",
+            "claude-code",
+            RuntimeSource::ByoRuntime,
+            None,
+        );
+        assert_eq!(field(login), "source");
         // Claude Code takes an anthropic key (endpoint optional), Codex an
         // OpenAI-compatible one; nothing else.
         let codex = runtime(
@@ -2787,21 +2826,21 @@ mod runtime_tests {
         );
         assert_eq!(codex.validate(), Ok(()));
         let claude = |b| runtime("x", "claude-code", RuntimeSource::ByoKey, Some(b));
-        assert_eq!(field(claude(byo("http://h", "m", None))), "adapter");
+        assert_eq!(field(claude(byo("http://h", "m", None))), "default_tool");
         let anthropic = crate::ByoKey {
             kind: crate::ByoKeyKind::Anthropic,
             ..byo("", "claude-sonnet-4-5", Some("ANTHROPIC_KEY"))
         };
         assert_eq!(claude(anthropic.clone()).validate(), Ok(()));
         let codex = runtime("x", "codex", RuntimeSource::ByoKey, Some(anthropic));
-        assert_eq!(field(codex), "adapter");
+        assert_eq!(field(codex), "default_tool");
         let unknown = runtime(
             "x",
             "aider",
             RuntimeSource::ByoKey,
             Some(byo("http://h", "m", None)),
         );
-        assert_eq!(field(unknown), "adapter");
+        assert_eq!(field(unknown), "default_tool");
         assert_eq!(
             field(runtime("x", "opencode", RuntimeSource::ByoKey, None)),
             "endpoint"
@@ -2819,5 +2858,17 @@ mod runtime_tests {
             panic!()
         };
         assert!(!m.contains("sk-secret"), "{m}");
+        for (endpoint, key_secret) in [
+            ("https://h/v1?key=AIzaQ", None),
+            ("https://h/v1#AIzaQ", None),
+            ("https://h/v1", Some("gsk_AIzaQ")),
+        ] {
+            let Err(crate::Error::InvalidInput(m)) =
+                with(byo(endpoint, "m", key_secret)).validate()
+            else {
+                panic!("{endpoint} {key_secret:?}")
+            };
+            assert!(!m.contains("AIzaQ"), "{m}");
+        }
     }
 }

@@ -155,11 +155,11 @@ async fn agents_runtimes_and_byo_keys_count_per_workspace() {
 
     let byo = |name: &str| {
         Some(json!({ "name": name, "source": "byo_key",
-            "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen" } }))
+            "endpoint": "http://localhost:11434/v1", "default_model": "qwen" }))
     };
-    let runtimes = format!("/api/v1/runtimes?workspace={ops}");
+    let runtimes = format!("/api/v1/credentials?workspace={ops}");
     let (status, value) = call(app, "POST", &runtimes, byo("one")).await;
-    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(status, StatusCode::CREATED, "{value}");
     let (status, value) = call(app, "POST", &runtimes, byo("two")).await;
     assert!(
         status == StatusCode::FORBIDDEN && limited(&value),
@@ -305,14 +305,14 @@ async fn runtimes_count_up_to_the_limit() {
         ..Limits::default()
     };
     common::plan(&k, ops, limits);
-    let runtimes = format!("/api/v1/runtimes?workspace={ops}");
+    let runtimes = format!("/api/v1/credentials?workspace={ops}");
     let byo = |name: &str| {
         Some(json!({ "name": name, "source": "byo_key",
-            "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen" } }))
+            "endpoint": "http://localhost:11434/v1", "default_model": "qwen" }))
     };
     for name in ["one", "two"] {
         let (status, value) = call(app, "POST", &runtimes, byo(name)).await;
-        assert_eq!(status, StatusCode::OK, "{name}: {value}");
+        assert_eq!(status, StatusCode::CREATED, "{name}: {value}");
     }
     let (status, value) = call(app, "POST", &runtimes, byo("three")).await;
     assert_eq!(
@@ -321,36 +321,48 @@ async fn runtimes_count_up_to_the_limit() {
     );
 }
 
-/// A runtime row a chain name made doesn't count; turning it into a BYO key
-/// runtime with `PUT` is one more BYO key, so the plan applies there too.
+/// A runtime row a chain name made doesn't count; turning a credential
+/// into a BYO key with `PUT` is one more BYO key, so the plan applies there
+/// too.
 #[tokio::test]
-async fn changing_a_runtime_into_a_byo_key_counts_against_the_plan() {
-    use sun_core::model::RuntimeSource;
-    use sun_store::RuntimeRepo;
+async fn changing_a_credential_into_a_byo_key_counts_against_the_plan() {
+    use sun_core::model::{Credential, RuntimeSource};
+    use sun_store::{CredentialRepo, RuntimeRepo};
     let k = common::kernel().await;
     let app = &k.app;
     let ops = workspace(app, common::TOKEN, "Ops").await;
     let limits = Limits {
-        runtimes: Some(1),
+        runtimes: Some(3),
         byo_keys: Some(1),
         ..Limits::default()
     };
     common::plan(&k, ops, limits);
     let byo = |name: &str| {
         json!({ "name": name, "source": "byo_key",
-            "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen" } })
+            "endpoint": "http://localhost:11434/v1", "default_model": "qwen" })
     };
-    let runtimes = format!("/api/v1/runtimes?workspace={ops}");
-    let (status, value) = call(app, "POST", &runtimes, Some(byo("one"))).await;
-    assert_eq!(status, StatusCode::OK, "{value}");
-    // A run named `codex` in a chain: the row it makes is free.
+    let credentials = format!("/api/v1/credentials?workspace={ops}");
+    let (status, value) = call(app, "POST", &credentials, Some(byo("one"))).await;
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    // A run named `codex` in a chain: the row it makes is free. A credits
+    // credential from before credits were off sale is a credential, not a key.
     let mut tx = k.store.begin().await.unwrap();
     tx.upsert_runtime(ops, "codex", "codex", RuntimeSource::ByoRuntime)
         .await
         .unwrap();
+    let credits = Credential {
+        id: sun_core::CredentialId::generate(),
+        workspace_id: ops,
+        name: "paid".into(),
+        source: RuntimeSource::Credits,
+        default_tool: "opencode".into(),
+        byo_key: None,
+        created_by: None,
+    };
+    assert!(tx.insert_credential(&credits).await.unwrap());
     tx.commit().await.unwrap();
-    let path = format!("/api/v1/runtimes/codex?workspace={ops}");
-    let (status, value) = call(app, "PUT", &path, Some(byo("codex"))).await;
+    let path = format!("/api/v1/credentials/paid?workspace={ops}");
+    let (status, value) = call(app, "PUT", &path, Some(byo("paid"))).await;
     assert_eq!(
         (status, &value["error"]["code"]),
         (StatusCode::FORBIDDEN, &json!("plan_limit")),
@@ -390,10 +402,10 @@ async fn the_last_runtime_slot_goes_to_one_of_two_racing_creates() {
         ..Limits::default()
     };
     common::plan(&k, ops, limits);
-    let runtimes = format!("/api/v1/runtimes?workspace={ops}");
+    let runtimes = format!("/api/v1/credentials?workspace={ops}");
     let byo = |name: &str| {
         Some(json!({ "name": name, "source": "byo_key",
-            "config": { "endpoint": "http://localhost:11434/v1", "model": "qwen" } }))
+            "endpoint": "http://localhost:11434/v1", "default_model": "qwen" }))
     };
     let (a, b) = tokio::join!(
         call(app, "POST", &runtimes, byo("one")),
@@ -403,7 +415,7 @@ async fn the_last_runtime_slot_goes_to_one_of_two_racing_creates() {
     statuses.sort();
     assert_eq!(
         statuses,
-        [StatusCode::OK, StatusCode::FORBIDDEN],
+        [StatusCode::CREATED, StatusCode::FORBIDDEN],
         "{} / {}",
         a.1,
         b.1

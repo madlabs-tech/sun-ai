@@ -1,4 +1,4 @@
-//! `sun runtime add --byo-key` / `sun runtime check` through a running kernel,
+//! `sun credential add|check|rm` through a running kernel,
 //! `sun secret set` in a workspace (Main by default; value on stdin), and the
 //! `sun task pause|resume|cancel` interventions and `sun task|runtime on-limit`.
 #![allow(clippy::unwrap_used)]
@@ -115,7 +115,7 @@ fn task_pause_resume_journals_both() {
 }
 
 #[test]
-fn byo_key_runtime_add_check_and_workspace_secret() {
+fn byo_key_credential_add_check_rm_and_workspace_secret() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
@@ -137,10 +137,9 @@ fn byo_key_runtime_add_check_and_workspace_secret() {
     let run = |args: &[&str], stdin: &str| sun(&data, &base, &kernel.token, args, stdin);
 
     let add = [
-        "runtime",
+        "credential",
         "add",
         "openrouter",
-        "--byo-key",
         "--endpoint",
         "https://openrouter.ai/api/v1",
         "--model",
@@ -150,16 +149,7 @@ fn byo_key_runtime_add_check_and_workspace_secret() {
     ];
     let out = run(&add, "");
     assert!(out.status.success(), "{}", text(&out));
-    let bad = [
-        "runtime",
-        "add",
-        "x",
-        "--byo-key",
-        "--endpoint",
-        "",
-        "--model",
-        "m",
-    ];
+    let bad = ["credential", "add", "x", "--endpoint", "", "--model", "m"];
     let out = run(&bad, "");
     assert!(!out.status.success());
     assert!(
@@ -168,7 +158,11 @@ fn byo_key_runtime_add_check_and_workspace_secret() {
         text(&out)
     );
 
-    let out = run(&["runtime", "check", "openrouter"], "");
+    // Keys are credentials now; `sun runtime add` is gone.
+    let old = ["runtime", "add", "y", "--byo-key", "--model", "m"];
+    assert!(!run(&old, "").status.success());
+
+    let out = run(&["credential", "check", "openrouter"], "");
     assert!(!out.status.success());
     assert!(text(&out).contains("`OR_KEY` is not set"), "{}", text(&out));
 
@@ -183,7 +177,7 @@ fn byo_key_runtime_add_check_and_workspace_secret() {
     let out = run(&["secret", "list"], "");
     assert!(text(&out).contains("OR_KEY"), "{}", text(&out));
     assert!(!text(&out).contains("sk-or-0123456789"));
-    let out = run(&["runtime", "check", "openrouter"], "");
+    let out = run(&["credential", "check", "openrouter"], "");
     // Config and key are fine; no host runs OpenCode in this kernel.
     assert!(!text(&out).contains("is not set"), "{}", text(&out));
     assert!(
@@ -192,14 +186,14 @@ fn byo_key_runtime_add_check_and_workspace_secret() {
         text(&out)
     );
 
-    // Another workspace: its own runtime of that name, and its own key.
+    // Another workspace: its own credential of that name, and its own key.
     let out = run(&["workspace", "create", "Ops"], "");
     assert!(out.status.success(), "{}", text(&out));
     let mut in_ops = add.to_vec();
     in_ops.extend(["--workspace", "ops"]);
     let out = run(&in_ops, "");
     assert!(out.status.success(), "{}", text(&out));
-    let check = ["runtime", "check", "openrouter", "--workspace", "Ops"];
+    let check = ["credential", "check", "openrouter", "--workspace", "Ops"];
     let out = run(&check, "");
     assert!(
         text(&out).contains("`OR_KEY` is not set"),
@@ -213,6 +207,19 @@ fn byo_key_runtime_add_check_and_workspace_secret() {
     assert!(out.status.success(), "{}", text(&out));
     let out = run(&check, "");
     assert!(!text(&out).contains("is not set"), "{}", text(&out));
+    // Ops deletes its own; Main's stays.
+    let out = run(
+        &["credential", "rm", "openrouter", "--workspace", "ops"],
+        "",
+    );
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(!run(&check, "").status.success(), "gone from Ops");
+    let out = run(&["credential", "check", "openrouter"], "");
+    assert!(
+        text(&out).contains("no online host has opencode"),
+        "{}",
+        text(&out)
+    );
     // A deployment secret stays in the ecosystem.
     let out = run(&["secret", "set", "GITHUB_APP_SLUG"], "sun-app\n");
     assert!(text(&out).contains("(ecosystem:"), "{}", text(&out));

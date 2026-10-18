@@ -20,7 +20,8 @@ import type { OnLimit, OutboxItem, Resolution,
   CatalogFile,
   CatalogView,
   ContextPreview,
-  CreateRuntime,
+  CreateCredential,
+  Credential,
   CreateTask,
   DecisionAnswer,
   Design,
@@ -66,7 +67,6 @@ import type { OnLimit, OutboxItem, Resolution,
   PreviewSide,
   QualityMetrics,
   Screen,
-  Readiness,
   RunEvent,
   Runtime,
   SearchHit,
@@ -88,6 +88,7 @@ import type { OnLimit, OutboxItem, Resolution,
   RunDetail,
   TaskStatus,
   TaskSummary,
+  UpdateCredential,
   UploadDoc,
   UploadFile,
   Usage,
@@ -462,11 +463,17 @@ export const api = {
   create_agent: (fields: AgentFields, workspace?: string) =>
     request<Agent>('POST', '/agents' + query({ workspace }), fields),
   list_runtimes: (workspace?: string) => request<Runtime[]>('GET', '/runtimes' + query({ workspace })),
-  /** `manage_runtimes` in the workspace: adds a BYO key runtime (its key is the workspace's secret, set through `set_secret`), or with Sun Cloud a credits one. */
-  create_runtime: (input: CreateRuntime, workspace?: string) =>
-    request<Runtime>('POST', '/runtimes' + query({ workspace }), input),
-  runtime_readiness: (id: string, workspace?: string) =>
-    request<Readiness>('GET', `/runtimes/${id_path(id)}/readiness` + query({ workspace })),
+  /** The workspace's credentials (API keys, Sun credits), by name; any member. Never the key's secret name. */
+  list_credentials: (workspace?: string) => request<Credential[]>('GET', '/credentials' + query({ workspace })),
+  /** `manage_runtimes` in the workspace: adds a BYO key credential (its key is the workspace's secret, set through `set_secret`), or with Sun Cloud a credits one. */
+  create_credential: (input: CreateCredential, workspace?: string) =>
+    request<Credential>('POST', '/credentials' + query({ workspace }), input),
+  /** `manage_runtimes`: replaces its settings; no `key_secret` keeps the stored one, `''` clears it. */
+  update_credential: (name: string, input: UpdateCredential, workspace?: string) =>
+    request<Credential>('PUT', `/credentials/${id_path(name)}` + query({ workspace }), input),
+  /** `manage_runtimes`: 409 while an agent's chain names it. */
+  delete_credential: (name: string, workspace?: string) =>
+    request<null>('DELETE', `/credentials/${id_path(name)}` + query({ workspace })),
   /** A workspace scope lists that workspace's (`manage_secrets` there); without a scope, the deployment's (owners). Names and times, never values. */
   list_secrets: (scope?: SecretScope) =>
     request<Secret[]>(

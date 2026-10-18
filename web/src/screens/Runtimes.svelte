@@ -1,22 +1,26 @@
 <!-- Runtimes: one row per (host, CLI) with an honest state (TRD §6 copy: badge, one line, one action; "Check again"
      asks that host to re-probe). Permission modes are each agent's, not the runtime's.
-     With manage_runtimes, "Add runtime" stores a BYO key runtime: a provider key (OpenAI-compatible, Anthropic
-     or Google) run through OpenCode, Claude Code or Codex; its key is a secret of the workspace picked by name
-     (POST /runtimes), and "Check" shows its readiness. With Sun Cloud connected it can also add a runtime paid
-     with Sun credits: Claude Code or Codex for premium models, OpenCode with a gateway model. -->
+     Credentials (TRD BLO-117 item 7): the workspace's key-backed ways to pay for a tool, which an agent's chain
+     entry names. With manage_runtimes, "Add credential" stores a BYO key: a provider key (OpenAI-compatible,
+     Anthropic or Google) run through OpenCode, Claude Code or Codex; its key is a workspace secret picked by name
+     (POST /credentials) and never shown again, only whether one is set. "Check" re-reads its state; Delete asks
+     first and is refused while an agent's chain names it. With Sun Cloud connected it can also add one paid with
+     Sun credits: Claude Code or Codex for premium models, OpenCode with a gateway model. -->
 <script lang="ts">
   import { Badge, Button, Dialog, Icon, Input, Radio, Select } from '@hryer/madlabs-design-system/svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import Loaded from '../lib/ui/Loaded.svelte';
+  import IconButton from '../lib/ui/IconButton.svelte';
   import SecretPicker from '../lib/ui/SecretPicker.svelte';
   import { ApiFailure, api } from '../lib/api/client';
   import {
     BYO_KEY_ADAPTERS,
     type ByoKeyAdapter,
     type ByoKeyKind,
-    type Readiness,
+    type CreateCredential,
+    type Credential,
+    type CredentialSource,
     type Runtime,
-    type RuntimeSource,
     type RuntimeState,
     type RuntimeUsage,
   } from '../lib/api/types';
@@ -42,17 +46,20 @@
     `${SUPPORT_URL}?title=${encodeURIComponent(`Support ${r.tool} ${r.version ?? ''}`.trim())}`;
 
   const workspace = current_workspace();
+  const manage = $derived(can('manage_runtimes'));
   const list = () => api.list_runtimes(workspace);
   let load = $state(list());
-  /** Tokens and cost per runtime, and for subscriptions within their quota window. Advisory. */
+  const list_credentials = () => api.list_credentials(workspace);
+  let credentials = $state(list_credentials());
+  /** Tokens and cost per runtime or credential, and for subscriptions within their quota window. Advisory. */
   let usage = $state<Record<string, RuntimeUsage>>({});
   api.usage_by_runtime().then(
     (rows) => (usage = Object.fromEntries(rows.map((u) => [u.runtime, u]))),
     () => {},
   );
   const used = (u: { input_tokens: number; output_tokens: number }) => `${tokens(u.input_tokens)} in · ${tokens(u.output_tokens)} out`;
-  // Add runtime. The kernel validates; a 422 message starts with the field to fix (`endpoint: …`).
-  const FIELDS = ['name', 'adapter', 'endpoint', 'model', 'key_secret'] as const;
+  // Add credential. The kernel validates; a 422 message starts with the field to fix (`endpoint: …`).
+  const FIELDS = ['name', 'default_tool', 'endpoint', 'default_model', 'key_secret'] as const;
   type Field = (typeof FIELDS)[number];
   const KINDS: { value: ByoKeyKind; label: string }[] = [
     { value: 'openai_compatible', label: 'OpenAI-compatible (OpenAI, OpenRouter, Ollama)' },
@@ -78,12 +85,12 @@
     google: 'Optional. Leave empty for Google’s Gemini API.',
   };
   const empty_form = () => ({
-    source: 'byo_key' as RuntimeSource,
+    source: 'byo_key' as CredentialSource,
     name: '',
-    kind: 'openai_compatible' as ByoKeyKind,
-    adapter: 'opencode' as ByoKeyAdapter,
+    family: 'openai_compatible' as ByoKeyKind,
+    default_tool: 'opencode' as ByoKeyAdapter,
     endpoint: '',
-    model: '',
+    default_model: '',
     key_secret: '',
   });
   let adding = $state(false);
@@ -98,32 +105,33 @@
   }
 
   /** A provider change keeps the CLI when it can run that key, else falls back to OpenCode. */
-  function pick_kind(kind: ByoKeyKind) {
-    form.kind = kind;
-    if (!BYO_KEY_ADAPTERS[kind].includes(form.adapter)) form.adapter = 'opencode';
+  function pick_kind(family: ByoKeyKind) {
+    form.family = family;
+    if (!BYO_KEY_ADAPTERS[family].includes(form.default_tool)) form.default_tool = 'opencode';
   }
 
   async function add(e: SubmitEvent) {
     e.preventDefault();
-    if (form.source === 'byo_runtime') return;
     creating = true;
     errors = {};
     const name = form.name.trim();
+    const input: CreateCredential =
+      form.source === 'credits'
+        ? { name, source: 'credits', default_tool: form.default_tool, default_model: form.default_tool === 'opencode' ? form.default_model.trim() : null }
+        : {
+            name,
+            source: 'byo_key',
+            default_tool: form.default_tool,
+            family: form.family,
+            endpoint: form.endpoint.trim() || undefined,
+            default_model: form.default_model.trim(),
+            key_secret: form.key_secret || undefined,
+          };
     try {
-      await api.create_runtime(
-        form.source === 'credits'
-          ? { name, adapter: form.adapter, source: 'credits', model: form.adapter === 'opencode' ? form.model.trim() : null }
-          : {
-              name,
-              adapter: form.adapter,
-              source: 'byo_key',
-              config: { kind: form.kind, endpoint: form.endpoint.trim(), model: form.model.trim(), key_secret: form.key_secret || null },
-            },
-        workspace,
-      );
+      await api.create_credential(input, workspace);
       adding = false;
-      toast('success', `${name} added`, 'Use it in a workflow’s runtime.chain. Check shows whether it can take work.');
-      load = list();
+      toast('success', `${name} added`, 'Pick it as who pays in an agent’s runtime chain. Check shows whether it can take work.');
+      credentials = list_credentials();
     } catch (err) {
       const [, field, why] = /^(\w+): (.+)$/s.exec(err instanceof ApiFailure ? err.message : '') ?? [];
       errors = (FIELDS as readonly string[]).includes(field)
@@ -140,7 +148,6 @@
   const seen = (r: Runtime | undefined) => (r ? `${r.state}|${r.availability}|${r.detail}` : '');
 
   async function check_again(r: Runtime) {
-    if (!r.host) return;
     rechecking[r.id] = true;
     const waited = new Promise<'waited'>((done) => setTimeout(() => done('waited'), CHECK_WAIT_MS));
     try {
@@ -159,121 +166,148 @@
   /** "How to restart the host": the host whose steps are open. */
   let restarting = $state<Runtime | null>(null);
 
-  // Check: what the kernel can verify without starting a session.
-  let checks = $state<Record<string, Readiness | null>>({});
+  // Check a credential: the kernel derives its state on every read, so this re-reads the list.
+  let checking = $state<Record<string, boolean>>({});
 
-  async function check(r: Runtime) {
-    checks[r.id] = null;
+  async function check(c: Credential) {
+    checking[c.name] = true;
     try {
-      checks[r.id] = await api.runtime_readiness(r.id, workspace);
+      const rows = await list_credentials();
+      credentials = Promise.resolve(rows);
+      const now = rows.find((x) => x.name === c.name);
+      if (!now) toast('info', `${c.name} is gone`, 'Someone deleted it meanwhile.');
+      else if (now.state === 'idle') toast('success', `${c.name}: ready`, `${tool_label(now.default_tool)} can run on it.`);
+      else toast('warning', `${c.name}: ${STATE[now.state][1].toLowerCase()}`, now.detail ?? undefined);
     } catch (err) {
-      delete checks[r.id];
-      toast('danger', `${r.name} not checked`, error_text(err));
+      toast('danger', `${c.name} not checked`, error_text(err));
     }
+    checking[c.name] = false;
   }
 
-  const check_text = (r: Runtime, ready: Readiness) =>
-    ready.installed && ready.logged_in
-      ? `Ready: ${ADAPTER_LABEL[r.adapter as ByoKeyAdapter] ?? r.adapter} is on a host and ${r.source === 'credits' ? 'Sun Cloud is connected' : 'the key settings are complete'}.`
-      : (ready.detail ?? 'Not ready.');
-  /** Stored runtimes (BYO key, credits) get a readiness check. */
-  const stored = (r: Runtime) => !!r.config || r.source === 'credits';
+  /** The credential whose delete confirm is open. */
+  let deleting = $state<Credential | null>(null);
+  let removing = $state(false);
+
+  async function remove(c: Credential) {
+    removing = true;
+    try {
+      await api.delete_credential(c.name, workspace);
+      toast('success', `${c.name} deleted`, 'Its key stays in the workspace’s secrets.');
+      credentials = list_credentials();
+    } catch (err) {
+      toast('danger', `${c.name} not deleted`, error_text(err));
+    }
+    removing = false;
+    deleting = null;
+  }
 </script>
 
-<PageHeader title="Runtimes" subtitle="Agent CLIs Sun can dispatch to. Each agent sets what its sessions may do.">
-  {#if can('manage_runtimes')}<Button variant="ice" iconLeft="plus" onclick={open_add}>Add runtime</Button>{/if}
+<PageHeader title="Runtimes" subtitle="Agent CLIs Sun can dispatch to, and the credentials that pay for them. Each agent sets what its sessions may do.">
+  {#if manage}<Button variant="ice" iconLeft="plus" onclick={open_add}>Add credential</Button>{/if}
 </PageHeader>
 
 <div class="sun-page">
   <Loaded {load} empty="No runtimes yet. Install Claude Code, Codex or OpenCode on a host.">
     {#snippet row(r: Runtime)}
       {@const [tone, label] = badge(r)}
-      {@const ready = checks[r.id]}
       {@const u = usage[r.name]}
-      <article class="sun-row runtime" aria-label={r.host ? `${tool_label(r.tool)} on ${r.host.name}` : r.name}>
-        <span class="sun-tile"><Icon name={r.config ? 'key-round' : r.source === 'credits' ? 'coins' : 'cpu'} size={18} /></span>
+      {@const host = r.host.name}
+      <article class="sun-row runtime" aria-label="{tool_label(r.tool)} on {host}">
+        <span class="sun-tile"><Icon name="cpu" size={18} /></span>
         <div class="sun-row__body">
           <div class="sun-row__title">
-            {r.host ? tool_label(r.tool) : r.name}
-            <span class="ml-mono" style="font-size:11px;color:var(--fg-3)">{r.host ? r.host.name : r.adapter}</span>
+            {tool_label(r.tool)}
+            <span class="ml-mono runtime__sub">{host}</span>
             <Badge {tone} dot live={r.state === 'busy'}>{label}</Badge>
             {#if r.state === 'idle' || r.state === 'busy'}
               {#if r.availability === 'outdated'}<Badge tone="warning" title={r.detail ?? undefined}>Untested version {r.version ?? ''}</Badge>{/if}
               {#if r.availability === 'auth_unknown'}<Badge tone="neutral">Login not checked</Badge>{/if}
             {/if}
           </div>
-          {#if r.host}
-            {@const host = r.host.name}
-            {#if r.state === 'offline'}
-              <p class="sun-row__meta runtime__meta">{host} hasn’t been seen since {r.last_seen_at ? stamp(r.last_seen_at) : 'it joined'}.</p>
-            {:else if r.state === 'needs_login'}
-              {@const command = login_command(r)}
-              <p class="sun-row__meta runtime__meta">
-                {tool_label(r.tool)} is installed but not signed in on {host}.
-                {#if command}Run <code class="ml-mono">{command}</code> there.{:else}{r.detail}{/if}
-              </p>
-            {:else if r.state === 'limited'}
-              <p class="sun-row__meta runtime__meta">This account hit its usage limit.{#if r.cooldown_until}{' '}Back at {clock(r.cooldown_until)}.{/if}</p>
-            {:else if r.state === 'unsupported'}
-              <p class="sun-row__meta runtime__meta">Sun found <code class="ml-mono">{r.tool}</code>{r.version ? ` ${r.version}` : ''} but can’t run it yet.</p>
-            {/if}
-          {:else}
-            <div class="sun-row__meta runtime__meta">
-              {SOURCE_LABEL[r.source]} ·
-              {#if r.config}
-                <span class="ml-mono">{r.config.model}</span> at
-                <span class="ml-mono">{r.config.endpoint || (r.config.kind === 'google' ? 'Google' : 'Anthropic')}</span> ·
-                {r.config.key_secret ? 'key ' : 'no key'}{#if r.config.key_secret}<span class="ml-mono">{r.config.key_secret}</span>{/if}
-              {:else if r.source === 'credits'}
-                {#if r.model}<span class="ml-mono">{r.model}</span>{:else}the CLI’s own model{/if} through the Sun gateway
-              {/if}
-              {#if r.state !== 'idle' && r.detail} · {r.detail}{/if}
-            </div>
-          {/if}
-          {#if u}
-            <p class="runtime__usage">
-              <Icon name="gauge" size={14} />
-              <span>
-                {r.host ? 'All hosts: ' : ''}{used(u.usage)}{u.usage.cost_usd ? ` · ${money(u.usage.cost_usd)}` : ''}
-                {#if u.quota_window}<br />Quota window, last {u.quota_window.hours} h: {used(u.quota_window.usage)}{/if}
-              </span>
+          {#if r.state === 'offline'}
+            <p class="sun-row__meta runtime__meta">{host} hasn’t been seen since {r.last_seen_at ? stamp(r.last_seen_at) : 'it joined'}.</p>
+          {:else if r.state === 'needs_login'}
+            {@const command = login_command(r)}
+            <p class="sun-row__meta runtime__meta">
+              {tool_label(r.tool)} is installed but not signed in on {host}.
+              {#if command}Run <code class="ml-mono">{command}</code> there.{:else}{r.detail}{/if}
             </p>
+          {:else if r.state === 'limited'}
+            <p class="sun-row__meta runtime__meta">This account hit its usage limit.{#if r.cooldown_until}{' '}Back at {clock(r.cooldown_until)}.{/if}</p>
+          {:else if r.state === 'unsupported'}
+            <p class="sun-row__meta runtime__meta">Sun found <code class="ml-mono">{r.tool}</code>{r.version ? ` ${r.version}` : ''} but can’t run it yet.</p>
           {/if}
-          {#if ready}
-            <p class="runtime__check" class:runtime__check--ok={ready.installed && ready.logged_in} role="status">
-              <Icon name={ready.installed && ready.logged_in ? 'circle-check' : 'circle-alert'} size={14} />
-              <span>{check_text(r, ready)}</span>
-            </p>
-          {/if}
-          {#if r.host && r.state === 'needs_login' && can('manage_runtimes')}
+          {#if u}{@render usage_line(u, 'All hosts: ')}{/if}
+          {#if r.state === 'needs_login' && manage}
             <div class="runtime__action">
               <Button size="sm" variant="secondary" iconLeft="refresh-cw" loading={rechecking[r.id]} onclick={() => check_again(r)}>Check again</Button>
             </div>
-          {:else if r.host && r.state === 'offline'}
+          {:else if r.state === 'offline'}
             <div class="runtime__action">
               <Button size="sm" variant="ghost" iconLeft="circle-help" onclick={() => (restarting = r)}>How to restart the host</Button>
             </div>
-          {:else if r.host && r.state === 'unsupported'}
+          {:else if r.state === 'unsupported'}
             <div class="runtime__action">
               <Button size="sm" variant="ghost" iconLeft="external-link" href={support_url(r)} target="_blank" rel="noopener noreferrer">Request support</Button>
             </div>
           {/if}
         </div>
-        {#if stored(r)}
-          <Button class="runtime__mode" size="sm" variant="secondary" iconLeft="activity" loading={ready === null} onclick={() => check(r)}>
-            Check
-          </Button>
-        {/if}
       </article>
     {/snippet}
   </Loaded>
+
+  <section class="credentials" aria-labelledby="credentials-head">
+    <h2 class="sun-label" id="credentials-head">Credentials</h2>
+    <p class="sun-row__meta">API keys and Sun credits that pay for a tool. An agent’s runtime chain picks one per entry; it runs on any host with that tool.</p>
+    <Loaded load={credentials} empty={manage ? 'No credentials yet. Add an API key or a local model endpoint.' : 'No credentials yet.'}>
+      {#snippet row(c: Credential)}
+        {@const [tone, label] = STATE[c.state]}
+        {@const u = usage[c.name]}
+        <article class="sun-row runtime" aria-label={c.name}>
+          <span class="sun-tile"><Icon name={c.source === 'credits' ? 'coins' : 'key-round'} size={18} /></span>
+          <div class="sun-row__body">
+            <div class="sun-row__title">
+              {c.name}
+              <span class="ml-mono runtime__sub">{c.default_tool}</span>
+              <Badge {tone} dot>{label}</Badge>
+            </div>
+            <div class="sun-row__meta runtime__meta">
+              {SOURCE_LABEL[c.source]} ·
+              {#if c.source === 'credits'}
+                {#if c.default_model}<span class="ml-mono">{c.default_model}</span>{:else}the CLI’s own model{/if} through the Sun gateway
+              {:else}
+                <span class="ml-mono">{c.default_model}</span> at
+                <span class="ml-mono">{c.endpoint || (c.family === 'google' ? 'Google' : 'Anthropic')}</span> ·
+                {c.key_secret_set ? 'key set' : 'no key'}
+              {/if}
+              {#if c.state !== 'idle' && c.detail} · {c.detail}{/if}
+            </div>
+            {#if u}{@render usage_line(u, '')}{/if}
+          </div>
+          <div class="runtime__mode">
+            <Button size="sm" variant="secondary" iconLeft="activity" loading={checking[c.name]} onclick={() => check(c)}>Check</Button>
+            {#if manage}<IconButton icon="trash-2" label="Delete {c.name}" variant="ghost" size="sm" onclick={() => (deleting = c)} />{/if}
+          </div>
+        </article>
+      {/snippet}
+    </Loaded>
+  </section>
 </div>
 
-<Dialog bind:open={adding} onclose={() => (adding = false)} title="Add a runtime">
-  <form id="add-runtime" class="add" onsubmit={add} novalidate>
+{#snippet usage_line(u: RuntimeUsage, prefix: string)}
+  <p class="runtime__usage">
+    <Icon name="gauge" size={14} />
+    <span>
+      {prefix}{used(u.usage)}{u.usage.cost_usd ? ` · ${money(u.usage.cost_usd)}` : ''}
+      {#if u.quota_window}<br />Quota window, last {u.quota_window.hours} h: {used(u.quota_window.usage)}{/if}
+    </span>
+  </p>
+{/snippet}
+
+<Dialog bind:open={adding} onclose={() => (adding = false)} title="Add a credential">
+  <form id="add-credential" class="add" onsubmit={add} novalidate>
     <fieldset class="add__source">
-      <legend class="ml-field__label">Source</legend>
-      <Radio bind:group={form.source} name="source" value="byo_runtime" label="BYO runtime" description="A CLI you’re logged in to on a host." />
+      <legend class="ml-field__label">Who pays</legend>
       <Radio bind:group={form.source} name="source" value="byo_key" label="BYO key" description="Your API key or a local model, run by OpenCode, Claude Code or Codex." />
       <Radio
         bind:group={form.source}
@@ -285,59 +319,68 @@
       />
     </fieldset>
     {#if form.source === 'byo_key'}
-      <Input label="Name" mono placeholder="ollama-qwen" hint="Workflows pick it in runtime.chain." autocomplete="off" bind:value={form.name} error={errors.name} />
+      <Input label="Name" mono placeholder="ollama-qwen" hint="Agents pick it as who pays in their runtime chain." autocomplete="off" bind:value={form.name} error={errors.name} />
       <Select
         label="Provider"
-        value={form.kind}
+        value={form.family}
         options={KINDS}
         onchange={(e: Event) => pick_kind((e.currentTarget as HTMLSelectElement).value as ByoKeyKind)}
       />
       <Select
         label="Runs on"
-        bind:value={form.adapter}
-        options={BYO_KEY_ADAPTERS[form.kind].map((a) => ({ value: a, label: ADAPTER_LABEL[a] }))}
-        hint={form.adapter === 'opencode' ? 'OpenCode takes any provider.' : `${ADAPTER_LABEL[form.adapter]} uses the key as its own login.`}
-        error={errors.adapter}
+        bind:value={form.default_tool}
+        options={BYO_KEY_ADAPTERS[form.family].map((a) => ({ value: a, label: ADAPTER_LABEL[a] }))}
+        hint={form.default_tool === 'opencode' ? 'OpenCode takes any provider.' : `${ADAPTER_LABEL[form.default_tool]} uses the key as its own login.`}
+        error={errors.default_tool}
       />
       <Input
         label="Endpoint"
         type="url"
         inputmode="url"
         mono
-        placeholder={form.kind === 'openai_compatible' ? 'http://localhost:11434/v1' : 'Provider default'}
-        hint={ENDPOINT_HINT[form.kind]}
+        placeholder={form.family === 'openai_compatible' ? 'http://localhost:11434/v1' : 'Provider default'}
+        hint={ENDPOINT_HINT[form.family]}
         autocomplete="off"
         bind:value={form.endpoint}
         error={errors.endpoint}
       />
-      <Input label="Model" mono placeholder={MODEL_EXAMPLE[form.kind]} autocomplete="off" bind:value={form.model} error={errors.model} />
+      <Input label="Model" mono placeholder={MODEL_EXAMPLE[form.family]} autocomplete="off" bind:value={form.default_model} error={errors.default_model} />
       <SecretPicker scope={{ kind: 'workspace', id: workspace }} bind:value={form.key_secret} none_label="None (local endpoint)" error={errors.key_secret} />
     <!-- ponytail: Sun credits are off until the deployment sells them; the form stays for when they return. -->
-    {:else if form.source === 'credits'}
-      <Input label="Name" mono placeholder="claude-credits" hint="Workflows pick it in runtime.chain." autocomplete="off" bind:value={form.name} error={errors.name} />
+    {:else}
+      <Input label="Name" mono placeholder="claude-credits" hint="Agents pick it as who pays in their runtime chain." autocomplete="off" bind:value={form.name} error={errors.name} />
       <Select
         label="Runs on"
-        bind:value={form.adapter}
+        bind:value={form.default_tool}
         options={CREDITS_ADAPTERS}
-        hint={form.adapter === 'opencode' ? 'Open models, on the Pro and Business plans.' : 'Premium models, on the Business plan.'}
-        error={errors.adapter}
+        hint={form.default_tool === 'opencode' ? 'Open models, on the Pro and Business plans.' : 'Premium models, on the Business plan.'}
+        error={errors.default_tool}
       />
-      {#if form.adapter === 'opencode'}
-        <Input label="Model" mono placeholder="qwen3-coder" hint="A model from the Sun points table." autocomplete="off" bind:value={form.model} error={errors.model} />
+      {#if form.default_tool === 'opencode'}
+        <Input label="Model" mono placeholder="qwen3-coder" hint="A model from the Sun points table." autocomplete="off" bind:value={form.default_model} error={errors.default_model} />
       {/if}
       <p class="add__note">Each step costs points: the provider’s price plus Sun’s margin.</p>
-    {:else}
-      <p class="add__note">Install Claude Code, Codex or OpenCode on a host and log in there. It shows up here on its own.</p>
     {/if}
     {#if errors.form}<p class="add__error" role="alert">{errors.form}</p>{/if}
   </form>
   {#snippet footer()}
     <Button variant="secondary" onclick={() => (adding = false)}>Cancel</Button>
-    <Button variant="ice" type="submit" form="add-runtime" loading={creating} disabled={form.source === 'byo_runtime'}>Add runtime</Button>
+    <Button variant="ice" type="submit" form="add-credential" loading={creating}>Add credential</Button>
   {/snippet}
 </Dialog>
 
-{#if restarting?.host}
+{#if deleting}
+  {@const c = deleting}
+  <Dialog open onclose={() => (deleting = null)} title="Delete {c.name}?">
+    <p class="confirm">Agents can no longer pay with it. Its key stays in the workspace’s secrets. An agent whose chain names it has to drop it first.</p>
+    {#snippet footer()}
+      <Button variant="secondary" onclick={() => (deleting = null)}>Cancel</Button>
+      <Button variant="danger" loading={removing} onclick={() => remove(c)}>Delete</Button>
+    {/snippet}
+  </Dialog>
+{/if}
+
+{#if restarting}
   {@const host = restarting.host.name}
   <Dialog open onclose={() => (restarting = null)} title="Restart {host}">
     <div class="restart">
@@ -357,15 +400,31 @@
   .runtime {
     align-items: center;
   }
-  .runtime :global(.runtime__mode) {
-    flex: 0 1 240px;
-    min-width: 0;
+  .runtime__sub {
+    font-size: 11px;
+    color: var(--fg-3);
   }
-  /* Phones: the mode goes under the name, full width. */
+  .runtime__mode {
+    display: flex;
+    gap: var(--space-2);
+    align-items: center;
+    flex: none;
+  }
+  /* Phones: the actions go under the name. */
   @media (max-width: 520px) {
-    .runtime :global(.runtime__mode) {
+    .runtime__mode {
       flex: 1 1 100%;
+      justify-content: flex-end;
     }
+  }
+  .credentials {
+    display: grid;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+  }
+  .credentials h2,
+  .credentials > p {
+    margin: 0;
   }
   .runtime__meta {
     overflow-wrap: anywhere;
@@ -383,26 +442,14 @@
     flex: none;
     margin-top: 2px;
   }
-  .runtime__check {
-    display: flex;
-    gap: var(--space-2);
-    align-items: flex-start;
-    margin: var(--space-2) 0 0;
-    font-size: var(--size-xs);
-    line-height: 1.5;
-    color: var(--fg-2);
-    overflow-wrap: anywhere;
-  }
-  .runtime__check :global(.ml-icon) {
-    flex: none;
-    margin-top: 2px;
-    color: var(--warning-fg);
-  }
-  .runtime__check--ok :global(.ml-icon) {
-    color: var(--success-fg);
-  }
   .runtime__action {
     margin-top: var(--space-2);
+  }
+  .confirm {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--fg-1);
   }
   .restart {
     display: grid;

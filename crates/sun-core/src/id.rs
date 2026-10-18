@@ -59,6 +59,9 @@ ulid_id!(
     OutboxId,
     /// `runtime.id`
     RuntimeId,
+    /// `credential.id` — the id of the `byo_key`/`credits` runtime row it
+    /// replaced (TRD BLO-117 item 7).
+    CredentialId,
     /// `host.id`
     HostId,
     /// `host_runtime.id` — one `(host, tool)` the host reported.
