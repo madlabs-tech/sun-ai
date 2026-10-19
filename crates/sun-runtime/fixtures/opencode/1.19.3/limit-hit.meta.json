@@ -1,0 +1,63 @@
+{
+  "cli": "opencode",
+  "case": "limit-hit",
+  "transport": "acp",
+  "synthetic": true,
+  "cli_version": "1.18.34",
+  "recorded_at": "2026-10-07T00:00:00Z",
+  "argv": [
+    "npx",
+    "-y",
+    "opencode-ai@1.18.34",
+    "acp"
+  ],
+  "client_messages": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": false,
+            "writeTextFile": false
+          },
+          "terminal": false
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/work",
+        "mcpServers": []
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "ses_eed7000000ffeSynthLimit0001",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "Create file hello.txt containing hi, then reply done."
+          }
+        ]
+      }
+    }
+  ],
+  "exit_code": 143,
+  "stderr_tail": "",
+  "note": null,
+  "source": "Hand-built. Lines 1-2 are the real initialize and session/new responses. How opencode surfaces a provider 429 over ACP was not observed: modeled as a JSON-RPC error on session/prompt carrying the provider status and retry-after. Verify against a real limit before relying on the text.",
+  "confidence": "low",
+  "detect": [
+    "session/prompt error with data.statusCode == 429 or message matching /rate limit|quota|usage limit/i",
+    "retry-after header → reset_at"
+  ]
+}
