@@ -1,0 +1,57 @@
+{
+  "cli": "opencode",
+  "case": "normal",
+  "transport": "acp",
+  "synthetic": false,
+  "cli_version": "1.19.3",
+  "recorded_at": "2026-10-19T10:01:49Z",
+  "argv": [
+    "npx",
+    "-y",
+    "opencode-ai@latest",
+    "acp"
+  ],
+  "client_messages": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": false,
+            "writeTextFile": false
+          },
+          "terminal": false
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/work",
+        "mcpServers": []
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "ses_eac644f69ffeZhtg7NUo509g15",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "Create file hello.txt containing hi, then reply done."
+          }
+        ]
+      }
+    }
+  ],
+  "exit_code": 0,
+  "stderr_tail": "",
+  "note": null
+}
