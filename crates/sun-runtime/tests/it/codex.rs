@@ -5,7 +5,7 @@
 use crate::common;
 
 use chrono::{TimeZone, Utc};
-use common::{collect, parts, pinned_dir, replay_case, sandbox, spec};
+use common::{collect, exact_dir, parts, replay_case, sandbox, spec};
 use serde_json::json;
 use sun_core::{
     HostCtx, HostId, LimitKind, Role, RuntimeAdapter, SessionId, Steer, StopMode, SunEvent, Todo,
@@ -225,7 +225,7 @@ fn repo_sandbox(name: &str) -> std::path::PathBuf {
 async fn live_run_matches_replay_and_passes_the_envelope() {
     let dir = repo_sandbox("live");
     let adapter = Codex::new(dir.join("codex"));
-    let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
+    let fixture = format!("{}/normal.jsonl", exact_dir("codex"));
     let mut spec = spec(&dir, &[("SUN_FIXTURE", &fixture)]);
     spec.model = Some("gpt-5".into());
     spec.effort = Some("xhigh".into());
@@ -305,7 +305,7 @@ async fn folder_task_skips_the_git_repo_check_on_every_turn() {
 #[tokio::test]
 async fn repo_task_keeps_the_git_repo_check() {
     let dir = repo_sandbox("repo");
-    let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
+    let fixture = format!("{}/normal.jsonl", exact_dir("codex"));
     let adapter = Codex::new(dir.join("codex"));
     let handle = adapter
         .start(spec(&dir, &[("SUN_FIXTURE", &fixture)]))
@@ -328,7 +328,7 @@ async fn mcp_token_stays_off_argv() {
         "docs": server(&["mcp", "relay", "{}"]),
     }});
     std::fs::write(dir.join("mcp.json"), config.to_string()).unwrap();
-    let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
+    let fixture = format!("{}/normal.jsonl", exact_dir("codex"));
     let mut spec = spec(&dir, &[("SUN_FIXTURE", &fixture)]);
     spec.mcp_config = Some(dir.join("mcp.json"));
     let adapter = Codex::new(dir.join("codex"));
@@ -354,7 +354,7 @@ async fn mcp_token_stays_off_argv() {
 async fn live_crash_honors_the_contract() {
     let dir = repo_sandbox("crash");
     let adapter = Codex::new(dir.join("codex"));
-    let fixture = format!("{}/crash.jsonl", pinned_dir("codex"));
+    let fixture = format!("{}/crash.jsonl", exact_dir("codex"));
     let spec = spec(&dir, &[("SUN_FIXTURE", &fixture), ("SUN_EXIT", "137")]);
     let handle = adapter.start(spec).await.unwrap();
     let events = collect(adapter.events(&handle)).await;
@@ -540,7 +540,7 @@ async fn start_resumes_an_earlier_thread() {
 async fn builtin_template_reaches_the_first_prompt() {
     let dir = repo_sandbox("template");
     let adapter = Codex::new(dir.join("codex"));
-    let fixture = format!("{}/normal.jsonl", pinned_dir("codex"));
+    let fixture = format!("{}/normal.jsonl", exact_dir("codex"));
     let mut spec = spec(&dir, &[("SUN_FIXTURE", &fixture)]);
     spec.envelope_parts = Some(parts());
     let handle = adapter.start(spec).await.unwrap();

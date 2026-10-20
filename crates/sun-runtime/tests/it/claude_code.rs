@@ -20,7 +20,7 @@ use sun_runtime::process::{args_hash, replay};
 use crate::common;
 
 fn fixtures() -> String {
-    common::pinned_dir("claude-code")
+    common::exact_dir("claude-code")
 }
 
 fn fixture(case: &str) -> (String, Option<i32>) {
