@@ -20,10 +20,18 @@ pub fn cli_dir(cli: &str) -> String {
     format!("{}/fixtures/{cli}", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The recordings of `cli`'s pinned (known-good) version.
-pub fn pinned_dir(cli: &str) -> String {
-    let pinned = sun_runtime::process::tested_versions(cli)[0];
-    format!("{}/{pinned}", cli_dir(cli))
+/// The recordings the exact-replay tests read. Fixed on purpose, not the
+/// pinned version: those tests assert values from one recording (session ids,
+/// token counts, exit codes, paths), so pinning a new version in versions.txt
+/// must not move them. `contract::` covers every recorded version.
+pub fn exact_dir(cli: &str) -> String {
+    let version = match cli {
+        "claude-code" => "2.1.291",
+        "codex" => "0.160.0",
+        "opencode" => "1.18.34",
+        _ => panic!("no exact recording for {cli}"),
+    };
+    format!("{}/{version}", cli_dir(cli))
 }
 
 /// Every version of `cli` with recordings (sorted), listed in versions.txt or
@@ -39,9 +47,9 @@ pub fn recorded_versions(cli: &str) -> Vec<String> {
     versions
 }
 
-/// A recorded fixture of the pinned version: stdout lines, exit code and stderr tail.
+/// A recorded fixture in [`exact_dir`]: stdout lines, exit code and stderr tail.
 pub fn fixture(cli: &str, case: &str) -> (String, Option<i32>, String) {
-    fixture_in(&pinned_dir(cli), case)
+    fixture_in(&exact_dir(cli), case)
 }
 
 /// A recorded fixture in `dir`.
@@ -57,9 +65,9 @@ pub fn fixture_in(dir: &str, case: &str) -> (String, Option<i32>, String) {
     (jsonl, code, stderr)
 }
 
-/// Replays `cli`'s pinned fixture `case` through that adapter's normalizer.
+/// Replays `cli`'s fixture `case` in [`exact_dir`] through that adapter's normalizer.
 pub fn replay_case(cli: &str, case: &str) -> Vec<SunEvent> {
-    replay_in(cli, &pinned_dir(cli), case)
+    replay_in(cli, &exact_dir(cli), case)
 }
 
 /// Replays fixture `case` in `dir` through `cli`'s normalizer. The

@@ -185,7 +185,7 @@ sleep 300
 "#;
 
 fn normal_fixture() -> String {
-    format!("{}/normal.jsonl", common::pinned_dir("opencode"))
+    format!("{}/normal.jsonl", common::exact_dir("opencode"))
 }
 
 fn stdin(dir: &std::path::Path) -> Vec<Value> {
