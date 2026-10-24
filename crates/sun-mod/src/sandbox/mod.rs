@@ -17,7 +17,11 @@
 //!   path). An entry script starting `#!/usr/bin/env <interpreter>` runs as
 //!   `<interpreter> <script>`, so the interpreter is its runtime. MCP command
 //!   servers (npx, uvx launchers) may run any program, still inside the same
-//!   file and network jail.
+//!   file and network jail. A declared multicall binary (uutils coreutils,
+//!   busybox) is refused: its other names would run too. On Linux the list
+//!   binds what the mod `exec`s, not what its code can do: the dynamic
+//!   loader stays executable and runs any readable binary (`ld.so <file>`),
+//!   still inside the same jail.
 //! - **Secrets:** only granted values of declared secret names, as env vars.
 //!   The kernel's own environment never reaches the mod.
 //!
@@ -109,6 +113,27 @@ impl Sandbox {
             }
             paths.push(Path::new("/dev").join(device));
         }
+        let mut processes = Vec::new();
+        for process in &perms.processes {
+            let Some(real) = resolve(process) else {
+                continue;
+            };
+            let others = multicall_names(process, &real);
+            if !others.is_empty() {
+                let more = others.len().saturating_sub(3);
+                let mut also = others.into_iter().take(3).collect::<Vec<_>>().join(", ");
+                if more > 0 {
+                    also.push_str(&format!(" and {more} more"));
+                }
+                return Err(Error::InvalidInput(format!(
+                    "mod {}: process {process} is {}, a multicall binary that also runs as \
+                     {also}; the sandbox can't grant one of its names without the others",
+                    manifest.name,
+                    real.display(),
+                )));
+            }
+            processes.push(real);
+        }
         std::fs::create_dir_all(data_dir)
             .map_err(|e| Error::Unavailable(format!("mod data dir {}: {e}", data_dir.display())))?;
         let launcher = std::env::current_exe()
@@ -120,7 +145,7 @@ impl Sandbox {
             paths,
             data_dir: data_dir.to_path_buf(),
             secrets,
-            processes: Some(perms.processes.iter().filter_map(|p| resolve(p)).collect()),
+            processes: Some(processes),
             launcher,
         })
     }
@@ -234,6 +259,47 @@ fn resolve(process: &str) -> Option<PathBuf> {
         false => return None,
     };
     std::fs::canonicalize(found).ok()
+}
+
+/// Other programs the file `real` (`process` resolved) runs as. The sandbox
+/// grants a file (Landlock: its inode), and a multicall binary picks the
+/// program from the name it was started by, so granting one name grants
+/// all: hard links beside it (uutils coreutils on Ubuntu >= 26.04), or a
+/// symlink to busybox/toybox. Versioned names (`perl`, `perl5.38.2`) are the
+/// same program. Hard links in other directories are not found.
+fn multicall_names(process: &str, real: &Path) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(name) = Path::new(process).file_name().map(|n| n.to_string_lossy()) else {
+        return vec![];
+    };
+    let Ok(meta) = std::fs::metadata(real) else {
+        return vec![];
+    };
+    let mut names: Vec<String> = Vec::new();
+    let file_name = real.file_name().map(|n| n.to_string_lossy().into_owned());
+    if let Some(file_name) = file_name.filter(|n| matches!(n.as_str(), "busybox" | "toybox")) {
+        names.push(file_name);
+    }
+    if meta.nlink() > 1 {
+        let entries = real.parent().and_then(|dir| std::fs::read_dir(dir).ok());
+        names.extend(
+            entries
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| {
+                    // DirEntry::metadata doesn't follow symlinks: links only.
+                    e.metadata()
+                        .is_ok_and(|m| m.ino() == meta.ino() && m.dev() == meta.dev())
+                })
+                .map(|e| e.file_name().to_string_lossy().into_owned()),
+        );
+    }
+    let same = |other: &str| other.starts_with(&*name) || name.starts_with(other);
+    let mut others: Vec<String> = names.into_iter().filter(|n| !same(n)).collect();
+    others.sort();
+    others.dedup();
+    others
 }
 
 /// For an entry command found on `PATH` (`node`, `python3`): the install
@@ -404,6 +470,51 @@ mod tests {
         assert!(allowed(&entry), "entry not executable: {rules:?}");
         assert!(allowed(&mod_dir), "mod folder: {rules:?}");
         assert!(!allowed(&undeclared), "undeclared executable: {rules:?}");
+        // Not whole lib dirs: Ubuntu >= 26.04 keeps every coreutil there.
+        let coreutil = Path::new("/usr/lib/cargo/bin/coreutils/date");
+        assert!(!allowed(coreutil), "lib dir executable: {rules:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Ubuntu >= 26.04: `/bin/echo` and `/bin/date` are hard links to one
+    /// uutils binary, so granting `echo` would let a mod run `date`.
+    #[test]
+    fn sandbox_policy_refuses_a_process_that_is_a_multicall_binary() {
+        let root = std::env::temp_dir().join(format!("sun-multicall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap_or_else(|e| panic!("{e}"));
+        let file = |name: &str| {
+            std::fs::write(root.join(name), "\x7fELF").unwrap_or_else(|e| panic!("{e}"));
+        };
+        let link = |from: &str, to: &str| {
+            std::fs::hard_link(root.join(from), root.join(to)).unwrap_or_else(|e| panic!("{e}"));
+        };
+        file("echo");
+        link("echo", "date");
+        file("perl");
+        link("perl", "perl5.38.2");
+        file("busybox");
+        std::os::unix::fs::symlink(root.join("busybox"), root.join("cat"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        file("dash");
+        std::os::unix::fs::symlink(root.join("dash"), root.join("sh"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        let declare = |process: &str| {
+            let process = root.join(process);
+            let m = manifest(&format!("{{ processes: [{}] }}", process.display()));
+            Sandbox::for_mod(&m, &root.join("data"), vec![])
+        };
+        for multicall in ["echo", "date", "cat"] {
+            let err = declare(multicall).err();
+            assert!(
+                matches!(&err, Some(Error::InvalidInput(e)) if e.contains("multicall")),
+                "{multicall}: {err:?}"
+            );
+        }
+        for single in ["perl", "perl5.38.2", "sh", "busybox"] {
+            let ok = declare(single).unwrap_or_else(|e| panic!("{single}: {e}"));
+            assert_eq!(ok.processes.map(|p| p.len()), Some(1), "{single}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

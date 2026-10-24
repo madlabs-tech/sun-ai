@@ -30,6 +30,15 @@ fn pong_server() -> u16 {
     port
 }
 
+/// The process the evil mod declares, and its args to print `hi`. Linux:
+/// not a coreutil, which on Ubuntu >= 26.04 is one multicall binary the
+/// sandbox refuses to grant by one name. macOS: `/bin/sh` would start bash.
+const DECLARED: (&str, &[&str]) = if cfg!(target_os = "linux") {
+    ("/bin/sh", &["-c", "echo hi"])
+} else {
+    ("/bin/echo", &["hi"])
+};
+
 struct Fixture {
     host: ModHost,
     root: PathBuf,
@@ -60,8 +69,9 @@ provides:
 permissions:
   network: ["127.0.0.1:{pong_port}"]
   secrets: [SUN_TEST_TOKEN]
-  processes: [/bin/echo]
-"#
+  processes: [{declared}]
+"#,
+            declared = DECLARED.0
         );
         let manifest = parse_manifest(&yaml).unwrap();
         let host = ModHost::new(HostConfig {
@@ -192,8 +202,9 @@ async fn sandbox_blocks_undeclared_files_network_and_secrets() {
     );
 
     // Processes: the declared one runs; anything else is blocked.
+    let (program, args) = DECLARED;
     assert_eq!(
-        f.probe("exec", json!({"program": "/bin/echo", "args": ["hi"]}))
+        f.probe("exec", json!({"program": program, "args": args}))
             .await,
         (true, "hi\n".into())
     );
