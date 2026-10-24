@@ -18,6 +18,7 @@ mod direct_chats;
 mod editor;
 mod editor_boundaries;
 mod editor_grants;
+mod editor_matrix;
 mod entitlement;
 mod features;
 mod isolation;
