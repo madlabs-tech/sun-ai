@@ -53,7 +53,8 @@ pub trait WorkspaceRepo {
     async fn link(&mut self, workspace: WorkspaceId, item: WorkspaceItem<'_>) -> Result<()>;
     /// Unlinks `item` from `workspace`; `false` when it wasn't linked.
     async fn unlink(&mut self, workspace: WorkspaceId, item: WorkspaceItem<'_>) -> Result<bool>;
-    /// The workspaces `item` is linked to, oldest first.
+    /// The workspaces `item` is linked to, oldest first (a host: those its
+    /// link still gives it, see [`crate::HostRepo::attach_host`]).
     async fn workspaces_of(&mut self, item: WorkspaceItem<'_>) -> Result<Vec<WorkspaceId>>;
     /// The workspaces `member` is a member of (`workspace_member`), by id.
     async fn workspaces_of_member(&mut self, member: MemberId) -> Result<Vec<WorkspaceId>>;
@@ -302,6 +303,11 @@ impl WorkspaceRepo for Tx {
     }
 
     async fn workspaces_of(&mut self, item: WorkspaceItem<'_>) -> Result<Vec<WorkspaceId>> {
+        // A host link through a share counts only while the share holds.
+        if let WorkspaceItem::Host(host) = item {
+            let live = crate::host::live_links(self, None, Some(host)).await?;
+            return Ok(live.into_iter().map(|(workspace, _)| workspace).collect());
+        }
         let (table, column, id) = item.link();
         let ids: Vec<String> = sqlx::query_scalar(&format!(
             "SELECT workspace_id FROM {table} WHERE {column} = $1 ORDER BY workspace_id"

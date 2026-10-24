@@ -4,6 +4,7 @@ mod acl;
 mod agent;
 mod export;
 mod host_runtime;
+mod host_shares;
 mod migrations;
 mod multitenant_upgrade;
 mod permission_split;
