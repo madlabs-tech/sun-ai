@@ -2432,6 +2432,13 @@ string_enum! {
         WorkspaceChange => "workspace_change",
         /// An agent was created, edited or archived.
         AgentChange => "agent_change",
+        /// An editor capability was granted or revoked.
+        EditorGrant => "editor_grant",
+        /// A file was written, created, renamed or deleted in the editor
+        /// (the repo, host and path; never its contents).
+        EditorFile => "editor_file",
+        /// An editor terminal was opened or closed (never its keystrokes).
+        Terminal => "terminal",
     }
 }
 
