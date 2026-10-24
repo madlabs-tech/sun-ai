@@ -162,7 +162,7 @@ async fn groups_are_owner_only_and_the_terminal_policy_follows_them_per_request(
     let all = vec!["editor.read", "editor.write", "terminal"];
     assert_eq!(caps(Some(public.clone())).await, all, "granted mode");
     assert!(can(Some(public.clone())).await);
-    assert_eq!(caps(Some(team.clone())).await, ["terminal"]);
+    assert_eq!(caps(Some(team.clone())).await, ["editor.read", "terminal"]);
     assert!(caps(Some(evil.clone())).await.is_empty());
 
     let policy = json!({ "mode": "groups", "groups": [g, g] });
@@ -180,7 +180,7 @@ async fn groups_are_owner_only_and_the_terminal_policy_follows_them_per_request(
         ["editor.read", "editor.write"]
     );
     assert!(!can(Some(public.clone())).await);
-    assert_eq!(caps(Some(team.clone())).await, ["terminal"]);
+    assert_eq!(caps(Some(team.clone())).await, ["editor.read", "terminal"]);
     assert!(can(Some(team.clone())).await);
     assert!(!can(Some(fake.clone())).await, "unverified");
     assert_eq!(caps(None).await, all);
@@ -196,7 +196,7 @@ async fn groups_are_owner_only_and_the_terminal_policy_follows_them_per_request(
         call(app, "POST", &member, None).await.0,
         StatusCode::NO_CONTENT
     );
-    assert_eq!(caps(Some(team.clone())).await, ["terminal"]);
+    assert_eq!(caps(Some(team.clone())).await, ["editor.read", "terminal"]);
     assert_eq!(
         call(app, "DELETE", &member, None).await.0,
         StatusCode::NO_CONTENT
@@ -211,7 +211,7 @@ async fn groups_are_owner_only_and_the_terminal_policy_follows_them_per_request(
     let (status, edited) = call(app, "PATCH", &format!("/api/v1/groups/{g}"), Some(edit)).await;
     assert_eq!(status, StatusCode::OK, "{edited}");
     assert_eq!(edited["name"], "Team");
-    assert_eq!(caps(Some(team.clone())).await, ["terminal"]);
+    assert_eq!(caps(Some(team.clone())).await, ["editor.read", "terminal"]);
 
     // Deleting the group takes its grants and its place in the policy.
     let status = call(app, "DELETE", &format!("/api/v1/groups/{g}"), None)

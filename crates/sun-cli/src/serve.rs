@@ -170,6 +170,9 @@ pub async fn start(
     options: ServeOptions,
     mut adapters: Vec<Arc<dyn RuntimeAdapter>>,
 ) -> Result<Kernel> {
+    // Before any child is spawned: same-uid children (mods, sessions,
+    // terminals) can't read the kernel's env or memory.
+    sun_host::forbid_inspection().context("making the kernel non-dumpable")?;
     let data_dir = &options.data_dir;
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("creating data dir {}", data_dir.display()))?;

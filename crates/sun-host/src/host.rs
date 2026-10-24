@@ -137,7 +137,10 @@ struct Live {
 impl Host {
     /// Opens the host's data dir (resuming any buffered events) with the
     /// runtime adapters it offers. `sun-cli` injects the real adapters.
+    /// Its sessions and terminals can't inspect this process
+    /// ([`process::forbid_inspection`]).
     pub fn open(config: HostConfig, adapters: Vec<Arc<dyn RuntimeAdapter>>) -> Result<Arc<Self>> {
+        process::forbid_inspection()?;
         Ok(Arc::new(Self {
             buffer: Buffer::open(config.data_dir.join("buffer"), config.buffer_cap)?,
             worktrees: Worktrees::new(&config.data_dir)?,
