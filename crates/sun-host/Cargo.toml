@@ -22,6 +22,10 @@ tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"]
 # Terminals (`pty.open`): openpty + setsid, which need `unsafe` this workspace forbids.
 pty-process = { version = "=0.5.3", features = ["async"] }
 
+# `PR_SET_DUMPABLE` (`forbid_inspection`) without `unsafe`.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["process"] }
+
 [dev-dependencies]
 futures-core.workspace = true
 # The echo test mod serves an `extension` exec env.

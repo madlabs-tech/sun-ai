@@ -343,6 +343,68 @@ async fn the_terminal_capability_is_checked_on_every_connect() {
     assert_eq!(refused(again), StatusCode::FORBIDDEN);
 }
 
+/// Set in the child process [`a_terminal_cannot_read_the_kernels_environ`] starts.
+const ENVIRON_CHILD: &str = "TERMINAL_ENVIRON_CHILD";
+
+/// The child's half: a kernel with its in-process host (as `sun serve
+/// --with-host`), `SUN_MASTER_KEY` in its env; the shell's parent's
+/// `/proc/$PPID/environ` (the kernel's) typed in a terminal, printed.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn kernel_environ_child() {
+    if std::env::var_os(ENVIRON_CHILD).is_none() {
+        return;
+    }
+    let w = world().await;
+    let owner = member_token(&w.k.store, "own", Role::Owner).await;
+    w.open_editor(&owner).await;
+    let mut ws = w.connect(&owner, "").await.unwrap();
+    opened(&mut ws).await;
+    type_line(
+        &mut ws,
+        "tr '\\0' '\\n' < /proc/$PPID/environ; echo END-$((40+2))",
+    )
+    .await;
+    let mut screen = Screen::default();
+    read_until(&mut ws, &mut screen, |s| s.output.contains("END-42")).await;
+    println!("PTY<<<{}>>>PTY", screen.output);
+}
+
+/// BLO-201: the kernel is non-dumpable (`PR_SET_DUMPABLE` 0), so a shell on
+/// its own host, the same uid, can't read the kernel's `/proc/<pid>/environ`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_terminal_cannot_read_the_kernels_environ() {
+    const MASTER_KEY: &str = "7e57ab1e0000000000000000000000000000000000000000000000000000beef";
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "terminal::kernel_environ_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(ENVIRON_CHILD, "1")
+        .env("SUN_MASTER_KEY", MASTER_KEY)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_, rest) = stdout.split_once("PTY<<<").expect("the child ran");
+    let (seen, _) = rest.split_once(">>>PTY").unwrap();
+    assert!(seen.to_lowercase().contains("permission denied"), "{seen}");
+    for secret in ["SUN_MASTER_KEY", MASTER_KEY] {
+        assert!(
+            !seen.contains(secret),
+            "the terminal shows {secret}: {seen}"
+        );
+    }
+}
+
 /// Keystroke echo latency and `cat` throughput through kernel and host on
 /// loopback. `cargo test -p sun-api --test it terminal::measure -- --ignored --nocapture`.
 #[tokio::test(flavor = "multi_thread")]

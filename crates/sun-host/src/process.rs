@@ -14,6 +14,18 @@ use tokio::process::Command;
 
 pub use sun_runtime::process::kill_group;
 
+/// Makes this process non-dumpable (Linux `PR_SET_DUMPABLE` 0), so a
+/// same-uid process without `CAP_SYS_PTRACE` (a terminal's shell, a
+/// session) can't read its `/proc/<pid>/environ` or `mem`: under `sun serve
+/// --with-host` that is the kernel's, `SUN_MASTER_KEY` among it. Children
+/// that `exec` are dumpable again. A no-op elsewhere.
+pub fn forbid_inspection() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    nix::sys::prctl::set_dumpable(false)
+        .map_err(|e| Error::Unavailable(format!("PR_SET_DUMPABLE: {e}")))?;
+    Ok(())
+}
+
 /// How much of an exec's output is kept (the tail, where failures are).
 const OUTPUT_TAIL: usize = 64 * 1024;
 
