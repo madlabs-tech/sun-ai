@@ -1,5 +1,5 @@
 <!-- Settings shell: a sub-nav ("My Account": Account and Support, then a group named after the open workspace: its General, Members
-     Code, Editor access, Secrets and Plan & billing, then "Deployment": Overview and the deployment's own pages with Security / Agents sub-headings, for
+     Code, Editor access, Secrets and Plan & billing, then "Deployment": Overview, Users, Groups and the deployment's own pages with Security / Agents sub-headings, for
      deployment owners only) and one page per entry at #/settings/<id>. Pages the signed-in person can't use are hidden;
      an unknown or hidden id opens the first visible page. Phones (< 768 px): #/settings is the list, a page has a
      back link to it. The section components own their cards; this file only picks and frames them. -->
@@ -25,6 +25,8 @@
   import SettingsCode from './SettingsCode.svelte';
   import SettingsEditor from './SettingsEditor.svelte';
   import SettingsAccounts from './SettingsAccounts.svelte';
+  import SettingsGroups from './SettingsGroups.svelte';
+  import SettingsTerminal from './SettingsTerminal.svelte';
   import { can, current_workspace, feature_on, is_owner, workspace_of } from '../lib/app_state.svelte';
   import { href, route } from '../lib/router.svelte';
 
@@ -61,9 +63,11 @@
     { id: 'plan', get label() { return feature_on('billing') ? 'Plan & billing' : 'Plan'; }, icon: 'shield-check', group: 'workspace', show: in_workspace(), parts: [SettingsPlan] },
     { id: 'overview', label: 'Overview', icon: 'settings', group: 'deployment', show: owner, parts: [SettingsGeneral] },
     { id: 'users', label: 'Users', icon: 'user-cog', group: 'deployment', show: owner, parts: [SettingsAccounts] },
+    { id: 'groups', label: 'Groups', icon: 'users', group: 'deployment', show: owner, parts: [SettingsGroups] },
     { id: 'audit', label: 'Audit log', icon: 'scroll-text', group: 'deployment', show: owner, parts: [SettingsAudit] },
     { id: 'sign-in', label: 'Sign-in & 2-step', icon: 'shield-check', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSignIn, SettingsTwoStep] },
     { id: 'bypass', label: 'Bypass permissions', icon: 'shield-off', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsBypass] },
+    { id: 'terminal', label: 'Terminal', icon: 'terminal', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsTerminal] },
     { id: 'email', label: 'Email', icon: 'mail', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsEmail] },
     { id: 'deployment-secrets', label: 'Deployment secrets', icon: 'key-round', group: 'deployment', subgroup: 'Security', show: owner, parts: [SettingsSecrets] },
     { id: 'usage', label: 'Usage limits', icon: 'gauge', group: 'deployment', subgroup: 'Agents', show: owner, parts: [SettingsLimit, SettingsSpend] },

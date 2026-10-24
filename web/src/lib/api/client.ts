@@ -38,6 +38,7 @@ import type { OnLimit, OutboxItem, Resolution,
   Secret,
   SecretScope,
   Host,
+  HostShares,
   HostToken,
   KernelUse,
   Correction,
@@ -548,7 +549,15 @@ export const api = {
    *  503 when it is offline or too old to re-probe. */
   reprobe_host: (workspace: string, host_id: string) =>
     request<null>('POST', `/workspaces/${id_path(workspace)}/hosts/${id_path(host_id)}/reprobe`, {}),
-  /** `manage_runtimes` in the workspace, and a deployment owner or whoever enrolled the host. */
+  /** Deployment owners. */
+  host_shares: (host_id: string) => request<HostShares>('GET', `/hosts/${id_path(host_id)}/shares`),
+  /** Deployment owners; 409 for the kernel's own host unless `confirm_kernel_host`. */
+  share_host: (host_id: string, group_id: string, confirm_kernel_host = false) =>
+    request<null>('PUT', `/hosts/${id_path(host_id)}/shares/${id_path(group_id)}`, confirm_kernel_host ? { confirm_kernel_host } : {}),
+  /** Deployment owners: workspaces that had the host only through this share get no new runs on it. */
+  unshare_host: (host_id: string, group_id: string) => request<null>('DELETE', `/hosts/${id_path(host_id)}/shares/${id_path(group_id)}`),
+  /** `manage_runtimes` in the workspace, and a deployment owner, whoever enrolled the host or a member of a group it
+   *  is shared with. */
   attach_host: (workspace: string, host_id: string) =>
     request<null>('PUT', `/workspaces/${id_path(workspace)}/hosts/${id_path(host_id)}`),
   /** `manage_runtimes` in the workspace: its runs stop going to the host. */

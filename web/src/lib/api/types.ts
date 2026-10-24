@@ -420,8 +420,38 @@ export interface Repo {
 /** What the caller may do in a repo's editor (`GET …/editor/me`). */
 export type EditorCapability = 'editor.read' | 'editor.write' | 'terminal';
 
-/** Who an editor grant is for: every member, a role and those above it, or one member. */
-export type GrantSubject = { subject_type: 'all' } | { subject_type: 'role'; subject_id: Role } | { subject_type: 'member'; subject_id: Ulid };
+/** Who an editor grant is for: every member, a role and those above it, a group, or one member. */
+export type GrantSubject =
+  | { subject_type: 'all' }
+  | { subject_type: 'role'; subject_id: Role }
+  | { subject_type: 'group'; subject_id: Ulid }
+  | { subject_type: 'member'; subject_id: Ulid };
+
+/** `GET /groups` (deployment owners): a deployment-wide set of people. Its members are the ones added by hand
+ *  (`member_ids`) and anyone whose verified email is on one of `domains`. It grants nothing by itself: editor
+ *  grants, host shares and the terminal policy name it. */
+export interface MemberGroup {
+  id: Ulid;
+  name: string;
+  description: string;
+  domains: string[];
+  created_by: Ulid | null;
+  created_at: string;
+  member_ids: Ulid[];
+}
+
+/** `GET /settings/terminal`: who may open terminals besides holding the `terminal` grant. Deployment owners always may. */
+export interface TerminalPolicy {
+  mode: 'granted' | 'groups';
+  groups: Ulid[];
+}
+
+/** `GET /hosts/{id}/shares` (deployment owners): the groups whose members may attach the host. */
+export interface HostShares {
+  /** The kernel's own host: sharing it needs `confirm_kernel_host`. */
+  kernel: boolean;
+  shares: { host_id: Ulid; group_id: Ulid; shared_by: Ulid | null; created_at: string }[];
+}
 
 /** `GET /workspaces/:id/editor/grants`: one capability for a subject, on every repo (`repo_id` null) or one.
  *  Workspace owners hold everything implicitly and never appear here. */

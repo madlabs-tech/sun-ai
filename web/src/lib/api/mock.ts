@@ -47,7 +47,7 @@ import type { OutboxItem, Agent, Chat, ChainSpec, PermissionMode, MemoryItem,
 } from './types';
 import { BYO_KEY_ADAPTERS, MAIN_WORKSPACE, PERMISSION_MODES, TASK_MOVES } from './types';
 import { LineCounter, isMap, isSeq, parse, parseDocument, stringify } from 'yaml';
-import { DESIGN_WORKSPACE, mock_join, mock_me, need } from './auth';
+import { DESIGN_WORKSPACE, mock_host_shares, mock_join, mock_me, mock_shared_with_me, need } from './auth';
 import { eval_route } from './mock_evals';
 import { market_route } from './mock_market';
 import { billing_route } from './mock_billing';
@@ -328,7 +328,7 @@ const HOSTS: Host[] = [
     android_emulator: tool(false, [], 'No Android system image: run `sdkmanager "system-images;android-35;google_apis;arm64-v8a"`'),
     maestro: tool(true),
   } }, sessions: 2, session_stats: [live(142, 'fix', 612, 38.5, 1460), live(147, 'draft', 248, 4.2, 312)],
-  disk: [{ task_id: fake_id('T', 142), bytes: 1.4 * 1024 * MIB }, { task_id: fake_id('T', 147), bytes: 3 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
+  disk: [{ task_id: fake_id('T', 142), bytes: 1.4 * 1024 * MIB }, { task_id: fake_id('T', 147), bytes: 3 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null, kernel: true },
   { id: fake_id('H', 2), name: 'build-box-01', status: 'online', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['claude-code', 'opencode', 'codex', 'kiro-cli'], devices: ['Pixel_8_API_35'] }, sessions: 1,
     session_stats: [live(139, 'fix', 410, 0.4, 7380)], disk: [{ task_id: fake_id('T', 139), bytes: 820 * MIB }], last_seen_at: today('10:12'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: null },
   { id: fake_id('H', 3), name: 'rina-laptop', status: 'offline', capabilities: { os: 'linux', arch: 'x86_64', runtimes: ['claude-code'], devices: [] }, sessions: 0, last_seen_at: today('06:40'), workspace_ids: [MAIN_WORKSPACE], enrolled_by: 'm_me' },
@@ -1394,7 +1394,7 @@ function route(method: string, full_path: string, body: unknown, headers?: Recor
       const workspace = find_workspace(parts[1]).id;
       need('manage_runtimes', workspace, 'manage runtimes');
       const me = mock_me();
-      const host = HOSTS.find((h) => h.id === parts[3] && (method === 'DELETE' || me.is_owner || h.enrolled_by === me.id));
+      const host = HOSTS.find((h) => h.id === parts[3] && (method === 'DELETE' || me.is_owner || h.enrolled_by === me.id || mock_shared_with_me().includes(h.id)));
       if (!host || (method === 'DELETE' && !host.workspace_ids.includes(workspace))) throw not_found(`host ${parts[3]}`);
       host.workspace_ids = host.workspace_ids.filter((w) => w !== workspace).concat(method === 'PUT' ? [workspace] : []);
       return null;
@@ -1434,8 +1434,11 @@ function route(method: string, full_path: string, body: unknown, headers?: Recor
       if (Object.values(WORKFLOWS).some((w) => w.name === t.id && w.workspace_id === workspace)) throw new MockError(409, { error: { code: 'conflict', message: `This workspace already has a workflow named \`${t.id}\`.` } });
       return save_source(null, t.source_yaml, workspace);
     }
-    case 'GET /runtimes':
-      return clone(RUNTIMES);
+    case 'GET /runtimes': {
+      // A workspace's: the ones on its hosts.
+      const workspace = params.get('workspace');
+      return clone(RUNTIMES.filter((r) => !workspace || HOSTS.some((h) => h.id === r.host.id && h.workspace_ids.includes(workspace))));
+    }
     case 'GET /hosts': {
       // Each names only the workspaces the caller sees.
       const [workspace, seen] = [listed(), mock_me()];
@@ -1445,17 +1448,38 @@ function route(method: string, full_path: string, body: unknown, headers?: Recor
       }));
     }
     case 'GET /hosts/:id': {
-      // `/hosts/attachable?workspace=`: a deployment owner may attach any host, anyone else the ones they enrolled.
+      // `/hosts/attachable?workspace=`: a deployment owner may attach any host, anyone else the ones they enrolled
+      // and the ones shared with a group they are in.
       if (parts[1] !== 'attachable') throw not_found(`host ${parts[1]}`);
       const workspace = find_workspace(params.get('workspace') ?? '').id;
       need('manage_runtimes', workspace, 'manage runtimes');
-      const me = mock_me();
-      return clone(HOSTS.filter((h) => me.is_owner || h.enrolled_by === me.id)).map((h) => ({
+      const [me, shared] = [mock_me(), mock_shared_with_me()];
+      const via = (h: Host) => (me.is_owner ? 'owner' : h.enrolled_by === me.id ? 'enrolled' : shared.includes(h.id) ? 'share' : null);
+      return clone(HOSTS.filter(via)).map((h) => ({
         id: h.id, name: h.name, status: h.status, last_seen_at: h.last_seen_at, enrolled_by: h.enrolled_by,
         capabilities: { os: h.capabilities.os, arch: h.capabilities.arch },
         workspace_ids: h.workspace_ids.filter((w) => me.is_owner || me.workspaces.includes(w)),
-        via: me.is_owner ? 'owner' : 'enrolled', kernel: false, attached: h.workspace_ids.includes(workspace),
+        via: via(h), kernel: !!h.kernel, attached: h.workspace_ids.includes(workspace),
       }));
+    }
+    // Deployment owners: `/hosts/{id}/shares[/{group}]`; the kernel's own host only with `confirm_kernel_host`.
+    case 'GET /hosts/:id/shares':
+    case 'PUT /hosts/:id/shares':
+    case 'DELETE /hosts/:id/shares': {
+      if (!mock_me().is_owner) throw new MockError(403, { error: { code: 'forbidden', message: 'Only a deployment owner can do this.' } });
+      const host = HOSTS.find((h) => h.id === parts[1]);
+      if (!host) throw not_found(`host ${parts[1]}`);
+      const groups = mock_host_shares(host.id);
+      if (method === 'GET') return { kernel: !!host.kernel, shares: groups.map((group_id) => ({ host_id: host.id, group_id, shared_by: mock_me().id, created_at: today('09:00') })) };
+      if (method === 'DELETE' && !groups.includes(parts[3])) throw not_found(`share ${parts[3]}`);
+      if (method === 'PUT' && host.kernel && input.confirm_kernel_host !== true)
+        throw conflict("This is the kernel's own host: agent sessions and terminals on it run next to the kernel and can read SUN_MASTER_KEY, which decrypts every stored credential. Share a separate host instead, or send confirm_kernel_host: true.");
+      try {
+        mock_host_shares(host.id, method === 'PUT' ? [...groups, parts[3]] : groups.filter((g) => g !== parts[3]));
+      } catch {
+        throw not_found(`group ${parts[3]}`);
+      }
+      return null;
     }
     case 'GET /kernel':
       return { pid: 4242, rss_bytes: 46 * MIB, cpu_percent: 0.6, uptime_s: 93_600 };
