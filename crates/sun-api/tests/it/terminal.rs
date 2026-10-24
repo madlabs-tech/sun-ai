@@ -19,16 +19,16 @@ use crate::common::{self, SECRET, kernel};
 use crate::editor_grants::member_id;
 use crate::workspaces::{call, call_as, member_token};
 
-type Socket =
+pub(crate) type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// A kernel on TCP with a real host and a one-file repo; the base path of
 /// the repo's routes and the kernel's address.
-struct World {
-    k: common::Kernel,
-    addr: std::net::SocketAddr,
-    base: String,
-    _dir: tempfile::TempDir,
+pub(crate) struct World {
+    pub(crate) k: common::Kernel,
+    pub(crate) addr: std::net::SocketAddr,
+    pub(crate) base: String,
+    pub(crate) _dir: tempfile::TempDir,
 }
 
 fn git(cwd: &std::path::Path, args: &[&str]) {
@@ -42,8 +42,12 @@ fn git(cwd: &std::path::Path, args: &[&str]) {
 }
 
 async fn world() -> World {
-    let k = kernel().await;
-    let app = sun_api::router(k.api.clone().with_terminal_grace(Duration::from_secs(1)));
+    world_with(kernel().await, Duration::from_secs(1)).await
+}
+
+/// [`world`] on `k`, a closed browser's terminal kept for `grace`.
+pub(crate) async fn world_with(k: common::Kernel, grace: Duration) -> World {
+    let app = sun_api::router(k.api.clone().with_terminal_grace(grace));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, app).into_future());
@@ -77,7 +81,7 @@ async fn world() -> World {
 
 impl World {
     /// Opens `token`'s editor worktree (waiting for the host to dial in).
-    async fn open_editor(&self, token: &str) {
+    pub(crate) async fn open_editor(&self, token: &str) {
         let open = format!("{}/editor/open?host_id={}", self.base, self.k.host);
         for _ in 0..500 {
             let (status, body) = call_as(&self.k.app, token, "POST", &open, None).await;
@@ -91,7 +95,11 @@ impl World {
     }
 
     /// The terminal socket as `token`, with `query` after `host_id`.
-    async fn connect(&self, token: &str, query: &str) -> Result<Socket, tungstenite::Error> {
+    pub(crate) async fn connect(
+        &self,
+        token: &str,
+        query: &str,
+    ) -> Result<Socket, tungstenite::Error> {
         let url = format!(
             "ws://{}{}/terminal?host_id={}{query}",
             self.addr, self.base, self.k.host
@@ -106,7 +114,7 @@ impl World {
 }
 
 /// The HTTP status a refused upgrade answered.
-fn refused(result: Result<Socket, tungstenite::Error>) -> StatusCode {
+pub(crate) fn refused(result: Result<Socket, tungstenite::Error>) -> StatusCode {
     match result {
         Err(tungstenite::Error::Http(response)) => {
             StatusCode::from_u16(response.status().as_u16()).unwrap()
@@ -118,13 +126,17 @@ fn refused(result: Result<Socket, tungstenite::Error>) -> StatusCode {
 
 /// What a terminal socket said: bytes so far and its control messages.
 #[derive(Default)]
-struct Screen {
-    output: String,
-    controls: Vec<Value>,
+pub(crate) struct Screen {
+    pub(crate) output: String,
+    pub(crate) controls: Vec<Value>,
 }
 
 /// Reads until `done(screen)` holds or the socket ends; panics after 20 s.
-async fn read_until(ws: &mut Socket, screen: &mut Screen, done: impl Fn(&Screen) -> bool) {
+pub(crate) async fn read_until(
+    ws: &mut Socket,
+    screen: &mut Screen,
+    done: impl Fn(&Screen) -> bool,
+) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while !done(screen) {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -143,20 +155,20 @@ async fn read_until(ws: &mut Socket, screen: &mut Screen, done: impl Fn(&Screen)
 }
 
 /// Reads up to `open`; the terminal's id.
-async fn opened(ws: &mut Socket) -> String {
+pub(crate) async fn opened(ws: &mut Socket) -> String {
     let mut screen = Screen::default();
     read_until(ws, &mut screen, |s| !s.controls.is_empty()).await;
     assert_eq!(screen.controls[0]["kind"], "open", "{:?}", screen.controls);
     screen.controls[0]["pty_id"].as_str().unwrap().to_owned()
 }
 
-async fn type_line(ws: &mut Socket, line: &str) {
+pub(crate) async fn type_line(ws: &mut Socket, line: &str) {
     let bytes = format!("{line}\r").into_bytes();
     ws.send(Message::binary(bytes)).await.unwrap();
 }
 
 /// `kill -0 pid` succeeds: the process exists, a zombie included.
-fn exists(pid: &str) -> bool {
+pub(crate) fn exists(pid: &str) -> bool {
     std::process::Command::new("kill")
         .args(["-0", pid])
         .stderr(std::process::Stdio::null())
@@ -166,7 +178,7 @@ fn exists(pid: &str) -> bool {
 }
 
 /// `name=<digits>` in `text`, after the typed line that has `name=$…`.
-fn number_after(text: &str, name: &str) -> Option<String> {
+pub(crate) fn number_after(text: &str, name: &str) -> Option<String> {
     text.match_indices(&format!("{name}="))
         .map(|(at, found)| &text[at + found.len()..])
         .map(|rest| {
