@@ -17,8 +17,9 @@ use sun_core::model::{
     WorkflowOwner, Workspace,
 };
 use sun_core::{
-    AgentId, ArtifactId, CorrectionId, Error, EvalRunId, EvalSetId, MemberId, MemoryItemId, NoteId,
-    OutboxId, ProjectId, RepoId, Result, RunId, TaskId, VcsConnectionId, WorkflowId, WorkspaceId,
+    AgentId, ArtifactId, CorrectionId, Error, EvalRunId, EvalSetId, HostId, MemberId, MemoryItemId,
+    NoteId, OutboxId, ProjectId, RepoId, Result, RunId, TaskId, VcsConnectionId, WorkflowId,
+    WorkspaceId,
 };
 use sun_store::{
     AgentRepo, ArtifactRepo, AuditRepo, CorrectionRepo, EvalRepo, HostRepo, KnowledgeRepo,
@@ -499,8 +500,9 @@ impl Engine {
 
     /// Links an existing knowledge source, host or catalog install to
     /// `workspace` too (a knowledge source: the same row, so one index).
-    /// A no-op when it is already there. Audited. `PlanLimit` for a host
-    /// `plan` has no room for.
+    /// A no-op when it is already there (a host attached through a share
+    /// becomes attached directly). Audited. `PlanLimit` for a host `plan`
+    /// has no room for.
     pub async fn import_to_workspace(
         &self,
         workspace: WorkspaceId,
@@ -508,25 +510,65 @@ impl Engine {
         actor: &str,
         plan: &Entitlement,
     ) -> Result<()> {
+        self.import(workspace, item, None, actor, plan).await
+    }
+
+    /// [`Self::import_to_workspace`] for a host `member` may attach only
+    /// because it is shared with a group they are in
+    /// ([`crate::AttachPath::Share`]): the workspace keeps it while that
+    /// holds.
+    pub async fn attach_shared_host(
+        &self,
+        workspace: WorkspaceId,
+        host: HostId,
+        member: MemberId,
+        actor: &str,
+        plan: &Entitlement,
+    ) -> Result<()> {
+        let item = WorkspaceItem::Host(host);
+        self.import(workspace, item, Some(member), actor, plan)
+            .await
+    }
+
+    async fn import(
+        &self,
+        workspace: WorkspaceId,
+        item: WorkspaceItem<'_>,
+        shared_via: Option<MemberId>,
+        actor: &str,
+        plan: &Entitlement,
+    ) -> Result<()> {
         let mut tx = self.store.begin().await?;
         let workspace_name = tx.get_workspace(workspace).await?.name;
         let what = describe(&mut tx, item).await?;
-        if tx.workspaces_of(item).await?.contains(&workspace) {
-            return Ok(());
+        let already = tx.workspaces_of(item).await?.contains(&workspace);
+        match item {
+            WorkspaceItem::Host(host) => {
+                if !already {
+                    plan.check(Quota::Hosts, tx.hosts_in(workspace).await?.len())?;
+                }
+                tx.attach_host(workspace, host, shared_via).await?;
+            }
+            _ if already => {}
+            _ => tx.link(workspace, item).await?,
         }
-        if let WorkspaceItem::Host(_) = item {
-            plan.check(Quota::Hosts, tx.hosts_in(workspace).await?.len())?;
+        if !already {
+            let via = match shared_via {
+                Some(_) => " (shared with a group of theirs)",
+                None => "",
+            };
+            tx.append_audit(
+                actor,
+                AuditAction::WorkspaceChange,
+                &workspace_name,
+                &format!("imported {what}{via}"),
+            )
+            .await?;
         }
-        tx.link(workspace, item).await?;
-        tx.append_audit(
-            actor,
-            AuditAction::WorkspaceChange,
-            &workspace_name,
-            &format!("imported {what}"),
-        )
-        .await?;
         tx.commit().await?;
-        wake_queue_for(self, item);
+        if !already {
+            wake_queue_for(self, item);
+        }
         Ok(())
     }
 

@@ -49,6 +49,8 @@
 //! - `query`: the read **Facade** the API uses (it may not reach the store).
 //! - `editor_grants`: who holds which editor capability in a workspace, and
 //!   the audit rows of what the editor does.
+//! - `host_shares`: hosts shared with groups, and who may attach which
+//!   host where.
 //! - `conversation`: an agent's final message as its comment, and comment-woken
 //!   runs that pick the conversation up.
 
@@ -70,6 +72,7 @@ mod eval;
 mod executor;
 mod gates;
 mod groups;
+mod host_shares;
 mod knowledge;
 mod market;
 mod mcp;
@@ -120,6 +123,7 @@ pub use executor::{
 };
 pub use gates::GateResult;
 pub use groups::GroupChange;
+pub use host_shares::{AttachPath, KERNEL_HOST, attach_path};
 pub use knowledge::{
     ContextPreview, EMBEDDING_API_KEY, EmbeddingProvider, EmbeddingSettings, SuggestedSource,
     SyncReport, ecosystem_scope,
