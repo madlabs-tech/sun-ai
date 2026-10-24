@@ -88,6 +88,9 @@
 //!   `sha256(token)` only.
 //! - **Editor grants** ([`EditorGrantRepo`]): the editor capabilities given
 //!   in a workspace; owners' implicit ones are never stored.
+//! - **Groups** ([`GroupRepo`]): deployment-wide sets of people, manual
+//!   members plus verified email domains; [`GroupRepo::groups_of`] is the
+//!   one membership query.
 //! - **Hosts** ([`HostRepo`]): enrolled hosts with their raw capabilities
 //!   report, and `host_runtime`, one row per `(host, tool)` projected from
 //!   that report on every `hello` / `capabilities` write (a tool gone from a
@@ -111,6 +114,7 @@ mod eval;
 mod event_query;
 mod export;
 mod factor;
+mod group;
 mod host;
 mod knowledge;
 mod member;
@@ -150,6 +154,7 @@ pub use eval::EvalRepo;
 pub use event_query::{COMPACTED, EventQuery, KEPT_KINDS};
 pub use export::{ARCHIVED_PATHS, ArchiveSecrets, SECRETS_TO_REENTER, SecretToReenter};
 pub use factor::{FactorRepo, TotpSecret};
+pub use group::GroupRepo;
 pub use host::HostRepo;
 pub use knowledge::{
     ChunkHit, ChunkText, DocChunk, DocSummary, FtsIndex, KnowledgeRepo, KnowledgeSource, NewDoc,

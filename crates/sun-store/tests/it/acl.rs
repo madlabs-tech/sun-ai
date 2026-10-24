@@ -96,9 +96,12 @@ async fn acl_fresh_install_has_roles_and_no_groups() {
     assert!(tx.members_of(WorkspaceId::MAIN).await.unwrap().is_empty());
     let url = format!("sqlite://{}", dir.path().join("sun.db").display());
     let mut conn = SqliteConnection::connect(&url).await.unwrap();
+    // `member_group` is BLO-192's people sets now, without the old
+    // `group_id`.
     let groups: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM sqlite_schema WHERE name IN ('user_group', 'member_group', \
-         'workspace_group')",
+        "SELECT (SELECT count(*) FROM sqlite_schema WHERE name IN ('user_group', \
+         'workspace_group')) + (SELECT count(*) FROM pragma_table_info('member_group') \
+         WHERE name = 'group_id')",
     )
     .fetch_one(&mut conn)
     .await
