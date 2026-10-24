@@ -1444,6 +1444,19 @@ function route(method: string, full_path: string, body: unknown, headers?: Recor
         workspace_ids: h.workspace_ids.filter((w) => seen.is_owner || seen.workspaces.includes(w)),
       }));
     }
+    case 'GET /hosts/:id': {
+      // `/hosts/attachable?workspace=`: a deployment owner may attach any host, anyone else the ones they enrolled.
+      if (parts[1] !== 'attachable') throw not_found(`host ${parts[1]}`);
+      const workspace = find_workspace(params.get('workspace') ?? '').id;
+      need('manage_runtimes', workspace, 'manage runtimes');
+      const me = mock_me();
+      return clone(HOSTS.filter((h) => me.is_owner || h.enrolled_by === me.id)).map((h) => ({
+        id: h.id, name: h.name, status: h.status, last_seen_at: h.last_seen_at, enrolled_by: h.enrolled_by,
+        capabilities: { os: h.capabilities.os, arch: h.capabilities.arch },
+        workspace_ids: h.workspace_ids.filter((w) => me.is_owner || me.workspaces.includes(w)),
+        via: me.is_owner ? 'owner' : 'enrolled', kernel: false, attached: h.workspace_ids.includes(workspace),
+      }));
+    }
     case 'GET /kernel':
       return { pid: 4242, rss_bytes: 46 * MIB, cpu_percent: 0.6, uptime_s: 93_600 };
     case 'POST /sessions/:id/kill': {

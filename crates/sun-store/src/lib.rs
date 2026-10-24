@@ -95,6 +95,7 @@
 //!   report, and `host_runtime`, one row per `(host, tool)` projected from
 //!   that report on every `hello` / `capabilities` write (a tool gone from a
 //!   later report keeps its row with `removed_at`; back again, same row).
+//!   `host_share`: the groups a host is shared with.
 //! - **Git** ([`RepoRepo`], [`VcsRepo`], [`PullRequestRepo`]): a workspace's
 //!   repos, its git-host connections, and the pull requests mirrored from
 //!   them with their task links; `upsert_pull_request` drops stale deliveries.

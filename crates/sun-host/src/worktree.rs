@@ -347,13 +347,15 @@ fn no_symlink(root: &Path, relative: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `git -C <dir>`, never prompting for credentials.
+/// `git -C <dir>`, never prompting for credentials, without the host's own
+/// `SUN_*` variables.
 pub(crate) fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(std::process::Stdio::null());
+    sun_core::scrub_kernel_env(cmd.as_std_mut());
     cmd
 }
 

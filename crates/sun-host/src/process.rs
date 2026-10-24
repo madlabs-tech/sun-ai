@@ -28,10 +28,12 @@ pub async fn exec(request: &ExecRequest) -> Result<ExecOutput> {
     run(cmd, request).await
 }
 
-/// Runs `cmd` in its own process group with stdin closed, keeping the
+/// Runs `cmd` in its own process group with stdin closed and without the
+/// host's own `SUN_*` variables ([`sun_core::scrub_kernel_env`]), keeping the
 /// redacted output tail (known secrets: `request.env` values). On
 /// `request.timeout_s` the whole group is killed.
 pub async fn run(mut cmd: Command, request: &ExecRequest) -> Result<ExecOutput> {
+    sun_core::scrub_kernel_env(cmd.as_std_mut());
     cmd.process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

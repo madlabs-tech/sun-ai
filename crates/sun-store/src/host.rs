@@ -1,19 +1,22 @@
 //! `host`: enrolled runtime hosts, deployment rows a workspace attaches
 //! (`workspace_host`, [`crate::WorkspaceItem::Host`]), `host_token`, the
 //! unused enrolment tokens by hash, and `host_runtime`, the `(host, tool)`
-//! rows projected from each host's capabilities report. No host secret is
-//! stored here; the API derives and checks host keys itself.
+//! rows projected from each host's capabilities report, and `host_share`,
+//! the groups a host is shared with. A `workspace_host` link made through a
+//! share counts only while the share still holds ([`live_links`]).
+//! No host secret is stored here; the API derives and checks host keys
+//! itself.
 
 use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
-use sun_core::model::{Host, HostRuntime};
-use sun_core::{HostId, HostRuntimeId, Timestamp, WorkspaceId};
+use sun_core::model::{Host, HostRuntime, HostShare};
+use sun_core::{GroupId, HostId, HostRuntimeId, MemberId, Timestamp, WorkspaceId};
 
 use crate::member::second;
 use crate::repo::{json, parse, parse_opt, parse_ts, parse_ts_opt, ts, u32_at};
-use crate::{Result, StoreError, Tx};
+use crate::{GroupRepo, Result, StoreError, Tx};
 
 /// **Repository** for `host` rows.
 #[async_trait]
@@ -47,6 +50,79 @@ pub trait HostRepo {
     /// The `(host, tool)` rows of the hosts attached to `workspace` (`None`:
     /// every host) that the latest report still names, by host then tool.
     async fn host_runtimes(&mut self, workspace: Option<WorkspaceId>) -> Result<Vec<HostRuntime>>;
+    /// Attaches `host` to `workspace`: directly (`shared_via` `None`), or
+    /// through a share by member `shared_via`. A direct link stays direct;
+    /// a link through a share becomes direct, or is taken over by the new
+    /// member (a link whose share lapsed comes back that way).
+    async fn attach_host(
+        &mut self,
+        workspace: WorkspaceId,
+        host: HostId,
+        shared_via: Option<MemberId>,
+    ) -> Result<()>;
+    /// Shares `host` with `group`; `false` when it already was.
+    async fn share_host(
+        &mut self,
+        host: HostId,
+        group: GroupId,
+        shared_by: Option<MemberId>,
+    ) -> Result<bool>;
+    /// Stops sharing `host` with `group`; `false` when it wasn't.
+    async fn unshare_host(&mut self, host: HostId, group: GroupId) -> Result<bool>;
+    /// The groups `host` is shared with, oldest first.
+    async fn host_shares(&mut self, host: HostId) -> Result<Vec<HostShare>>;
+    /// The hosts shared with a group `member` is in right now, by id.
+    async fn hosts_shared_with(&mut self, member: MemberId) -> Result<Vec<HostId>>;
+    /// Every workspace `host` is linked to, also through a share that no
+    /// longer holds (which would hold again on a new share).
+    async fn host_links(&mut self, host: HostId) -> Result<Vec<WorkspaceId>>;
+}
+
+/// The `workspace_host` links of `workspace` (or of `host`) that give the
+/// workspace the host now: those attached directly, and those attached
+/// through a share while the host is still shared with a group the member
+/// who attached it is in ([`GroupRepo::groups_of`], the one membership
+/// rule). Every read of the link goes through this.
+pub(crate) async fn live_links(
+    tx: &mut Tx,
+    workspace: Option<WorkspaceId>,
+    host: Option<HostId>,
+) -> Result<Vec<(WorkspaceId, HostId)>> {
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT workspace_id, host_id, shared_via FROM workspace_host \
+         WHERE ($1 IS NULL OR workspace_id = $1) AND ($2 IS NULL OR host_id = $2) \
+         ORDER BY workspace_id, host_id",
+    )
+    .bind(workspace.map(|w| w.to_string()))
+    .bind(host.map(|h| h.to_string()))
+    .fetch_all(tx.conn())
+    .await?;
+    // Per member who attached through a share: the hosts shared with them.
+    let mut shared: Vec<(MemberId, Vec<HostId>)> = Vec::new();
+    let mut live = Vec::with_capacity(rows.len());
+    for (workspace, host, via) in rows {
+        let (workspace, host): (WorkspaceId, HostId) = (parse(workspace)?, parse(host)?);
+        if let Some(member) = via.map(parse::<MemberId>).transpose()? {
+            let known = shared.iter().position(|(m, _)| *m == member);
+            let at = match known {
+                Some(at) => at,
+                None => {
+                    shared.push((member, tx.hosts_shared_with(member).await?));
+                    shared.len() - 1
+                }
+            };
+            if !shared[at].1.contains(&host) {
+                continue;
+            }
+        }
+        live.push((workspace, host));
+    }
+    Ok(live)
+}
+
+/// `ids` as a JSON array, for `IN (SELECT value FROM json_each($n))`.
+fn id_list<T: ToString>(ids: impl IntoIterator<Item = T>) -> String {
+    Value::from(ids.into_iter().map(|id| id.to_string()).collect::<Vec<_>>()).to_string()
 }
 
 #[async_trait]
@@ -83,11 +159,12 @@ impl HostRepo for Tx {
     }
 
     async fn hosts_in(&mut self, workspace: WorkspaceId) -> Result<Vec<Host>> {
+        let live = live_links(self, Some(workspace), None).await?;
         sqlx::query(&format!(
             "SELECT {HOST_COLUMNS} FROM host \
-             WHERE id IN (SELECT host_id FROM workspace_host WHERE workspace_id = $1) ORDER BY id"
+             WHERE id IN (SELECT value FROM json_each($1)) ORDER BY id"
         ))
-        .bind(workspace.to_string())
+        .bind(id_list(live.iter().map(|(_, host)| host)))
         .fetch_all(self.conn())
         .await?
         .iter()
@@ -150,22 +227,114 @@ impl HostRepo for Tx {
     }
 
     async fn host_runtimes(&mut self, workspace: Option<WorkspaceId>) -> Result<Vec<HostRuntime>> {
-        let filter = match workspace {
-            Some(_) => {
-                "AND host_id IN (SELECT host_id FROM workspace_host WHERE workspace_id = $1)"
+        let hosts = match workspace {
+            Some(workspace) => {
+                let live = live_links(self, Some(workspace), None).await?;
+                Some(id_list(live.iter().map(|(_, host)| host)))
             }
-            None => "AND $1 IS NULL",
+            None => None,
         };
         sqlx::query(&format!(
-            "SELECT {HOST_RUNTIME_COLUMNS} FROM host_runtime \
-             WHERE removed_at IS NULL {filter} ORDER BY host_id, tool"
+            "SELECT {HOST_RUNTIME_COLUMNS} FROM host_runtime WHERE removed_at IS NULL \
+             AND ($1 IS NULL OR host_id IN (SELECT value FROM json_each($1))) \
+             ORDER BY host_id, tool"
         ))
-        .bind(workspace.map(|w| w.to_string()))
+        .bind(hosts)
         .fetch_all(self.conn())
         .await?
         .iter()
         .map(host_runtime_from)
         .collect()
+    }
+
+    async fn attach_host(
+        &mut self,
+        workspace: WorkspaceId,
+        host: HostId,
+        shared_via: Option<MemberId>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO workspace_host (workspace_id, host_id, shared_via) VALUES ($1, $2, $3) \
+             ON CONFLICT (workspace_id, host_id) DO UPDATE SET shared_via = \
+                 CASE WHEN workspace_host.shared_via IS NULL OR excluded.shared_via IS NULL \
+                      THEN NULL ELSE excluded.shared_via END",
+        )
+        .bind(workspace.to_string())
+        .bind(host.to_string())
+        .bind(shared_via.map(|m| m.to_string()))
+        .execute(self.conn())
+        .await?;
+        Ok(())
+    }
+
+    async fn share_host(
+        &mut self,
+        host: HostId,
+        group: GroupId,
+        shared_by: Option<MemberId>,
+    ) -> Result<bool> {
+        let done = sqlx::query(
+            "INSERT INTO host_share (host_id, group_id, shared_by, created_at) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+        )
+        .bind(host.to_string())
+        .bind(group.to_string())
+        .bind(shared_by.map(|m| m.to_string()))
+        .bind(ts(&chrono::Utc::now()))
+        .execute(self.conn())
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn unshare_host(&mut self, host: HostId, group: GroupId) -> Result<bool> {
+        let done = sqlx::query("DELETE FROM host_share WHERE host_id = $1 AND group_id = $2")
+            .bind(host.to_string())
+            .bind(group.to_string())
+            .execute(self.conn())
+            .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn host_shares(&mut self, host: HostId) -> Result<Vec<HostShare>> {
+        sqlx::query(
+            "SELECT host_id, group_id, shared_by, created_at FROM host_share \
+             WHERE host_id = $1 ORDER BY created_at, group_id",
+        )
+        .bind(host.to_string())
+        .fetch_all(self.conn())
+        .await?
+        .iter()
+        .map(|row| {
+            Ok(HostShare {
+                host_id: parse(row.try_get("host_id")?)?,
+                group_id: parse(row.try_get("group_id")?)?,
+                shared_by: parse_opt(row.try_get("shared_by")?)?,
+                created_at: parse_ts(row.try_get("created_at")?)?,
+            })
+        })
+        .collect()
+    }
+
+    async fn hosts_shared_with(&mut self, member: MemberId) -> Result<Vec<HostId>> {
+        let groups = self.groups_of(member).await?;
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT host_id FROM host_share \
+             WHERE group_id IN (SELECT value FROM json_each($1)) ORDER BY host_id",
+        )
+        .bind(id_list(groups.iter().map(|g| g.id)))
+        .fetch_all(self.conn())
+        .await?;
+        ids.into_iter().map(parse).collect()
+    }
+
+    async fn host_links(&mut self, host: HostId) -> Result<Vec<WorkspaceId>> {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT workspace_id FROM workspace_host WHERE host_id = $1 ORDER BY workspace_id",
+        )
+        .bind(host.to_string())
+        .fetch_all(self.conn())
+        .await?;
+        ids.into_iter().map(parse).collect()
     }
 }
 

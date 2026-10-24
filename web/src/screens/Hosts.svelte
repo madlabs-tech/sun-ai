@@ -1,6 +1,7 @@
 <!-- Hosts: the machines that run the open workspace's agent sessions. Each names the workspaces it serves and who
      enrolled it. "Add host" (manage_runtimes) mints a join token that attaches the new host here; a deployment owner,
-     or whoever enrolled a host, may attach it to more workspaces; anyone with manage_runtimes may detach one. -->
+     whoever enrolled a host, or a member of a group it is shared with may attach it to more workspaces (the kernel
+     says which: GET /hosts/attachable); anyone with manage_runtimes may detach one. -->
 <script lang="ts">
   import { Badge, Button, Dialog, Icon, Input, Tag } from '@hryer/madlabs-design-system/svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
@@ -8,7 +9,7 @@
   import Loaded from '../lib/ui/Loaded.svelte';
   import { api } from '../lib/api/client';
   import { auth } from '../lib/api/auth';
-  import type { DeviceTool, Host, HostToken, KernelUse, SessionStats } from '../lib/api/types';
+  import type { AttachableHost, DeviceTool, Host, HostToken, KernelUse, SessionStats } from '../lib/api/types';
   import { app, can, copy_text, current_workspace, error_text, is_owner, toast, workspace_of } from '../lib/app_state.svelte';
   import { bytes, clock, uptime } from '../lib/format';
 
@@ -32,24 +33,21 @@
     (pairs) => (names = Object.fromEntries(pairs)),
     () => {},
   );
-  const enrolled = (h: Host) =>
+  const enrolled = (h: Pick<Host, 'enrolled_by'>) =>
     h.enrolled_by === null
       ? 'no enroller on record'
       : h.enrolled_by === me
         ? 'enrolled by you'
         : `enrolled by ${names[h.enrolled_by] ?? 'someone outside this workspace'}`;
-  const serves = (h: Host) => h.workspace_ids.map((id) => workspace_of(id)?.name ?? '').filter(Boolean).join(', ') || 'no workspace';
+  const serves = (h: Pick<Host, 'workspace_ids'>) => h.workspace_ids.map((id) => workspace_of(id)?.name ?? '').filter(Boolean).join(', ') || 'no workspace';
 
-  /** Hosts not attached here that the caller may attach: any for an owner, the ones they enrolled otherwise. */
-  let others = $state<Host[]>([]);
+  /** Hosts not attached here that the caller may attach, as the kernel decides: any for an owner, otherwise the ones
+   *  they enrolled and the ones shared with a group they are in. */
+  let others = $state<AttachableHost[]>([]);
   async function load_others() {
     if (!manage) return;
-    // ponytail: one list per workspace of the caller's; a route of "hosts I enrolled" if that grows.
-    const from = owner ? [undefined] : app.memberships.map((m) => m.workspace_id).filter((w) => w !== workspace);
-    const lists = await Promise.all(from.map((w) => api.list_hosts(w).catch(() => [] as Host[])));
-    const found = new Map<string, Host>();
-    for (const h of lists.flat()) if (!h.workspace_ids.includes(workspace) && (owner || (me && h.enrolled_by === me))) found.set(h.id, h);
-    others = [...found.values()];
+    const list = await api.attachable_hosts(workspace).catch(() => [] as AttachableHost[]);
+    others = list.filter((h) => !h.attached);
   }
   load_others();
 
@@ -59,7 +57,7 @@
   }
 
   let acting = $state('');
-  async function attach(h: Host) {
+  async function attach(h: Pick<Host, 'id' | 'name'>) {
     acting = h.id;
     try {
       await api.attach_host(workspace, h.id);
@@ -191,8 +189,8 @@
 {#if detaching}
   <Dialog open onclose={() => (detaching = null)} title="Detach {detaching.name}?">
     <p class="sun-kill__lede">
-      {here}’s new runs stop going to it; sessions already on it finish. Only a deployment owner, or whoever enrolled it,
-      can attach it again.
+      {here}’s new runs stop going to it; sessions already on it finish. Only a deployment owner, whoever enrolled it, or a
+      member of a group it’s shared with can attach it again.
     </p>
     {#snippet footer()}
       <Button variant="secondary" onclick={() => (detaching = null)}>Cancel</Button>
@@ -201,7 +199,7 @@
   </Dialog>
 {/if}
 
-{#snippet status(h: Host)}
+{#snippet status(h: Pick<Host, 'status'>)}
   {#if h.status === 'online'}<Badge tone="success" dot>Online</Badge>{:else}<Badge dot>Offline</Badge>{/if}
 {/snippet}
 
@@ -262,13 +260,13 @@
   {#if others.length}
     <section class="sun-hosts__others" aria-labelledby="other-hosts">
       <h2 id="other-hosts">Hosts you can attach</h2>
-      <p class="sun-row__meta">{owner ? 'Every other host of this deployment.' : 'Hosts you enrolled in your other workspaces.'}</p>
+      <p class="sun-row__meta">{owner ? 'Every other host of this deployment.' : 'Hosts you enrolled, and hosts shared with a group you’re in.'}</p>
       {#each others as h (h.id)}
         <article class="sun-row" aria-label={h.name}>
           <span class="sun-tile"><Icon name="server" size={18} /></span>
           <div class="sun-row__body">
             <div class="sun-row__title"><span class="ml-mono">{h.name}</span></div>
-            <div class="sun-row__meta"><span class="ml-mono">{h.capabilities.os}/{h.capabilities.arch}</span> · serves {serves(h)} · {enrolled(h)}</div>
+            <div class="sun-row__meta"><span class="ml-mono">{h.capabilities.os}/{h.capabilities.arch}</span> · serves {serves(h)} · {h.via === 'share' ? 'shared with a group you’re in' : enrolled(h)}</div>
           </div>
           <div class="sun-row__aside">
             {@render status(h)}

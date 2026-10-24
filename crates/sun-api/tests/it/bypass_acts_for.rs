@@ -92,7 +92,7 @@ where
 
 /// A host's answer to `frame`: a session for `session.start`, a path for
 /// `worktree.prepare`, a clean exit for `exec`, done for the rest.
-async fn answer_host(host: &mut Socket, frame: Value) {
+pub(crate) async fn answer_host(host: &mut Socket, frame: Value) {
     let Some(id) = frame.get("id").cloned() else {
         return;
     };

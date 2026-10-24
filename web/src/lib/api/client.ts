@@ -104,6 +104,7 @@ import type { OnLimit, OutboxItem, Resolution,
   WorkflowCheck,
   WorkflowSource,
   WorkflowTemplate,
+  AttachableHost,
 } from './types';
 import { MAIN_WORKSPACE } from './types';
 
@@ -537,6 +538,9 @@ export const api = {
   // it out for every workspace's (a change then goes to Main).
   /** The hosts attached to the workspace; its runs go only to these. */
   list_hosts: (workspace?: string) => request<Host[]>('GET', '/hosts' + query({ workspace })),
+  /** `manage_runtimes` in the workspace: every host the caller may attach there (owner: any; else the ones they
+   *  enrolled and the ones shared with a group they are in), with why (`via`) and whether it already is. */
+  attachable_hosts: (workspace: string) => request<AttachableHost[]>('GET', '/hosts/attachable' + query({ workspace })),
   /** `manage_runtimes` in the workspace: the host it enrols is attached there. */
   create_host_token: (workspace: string = MAIN_WORKSPACE) =>
     request<HostToken>('POST', `/workspaces/${id_path(workspace)}/hosts/tokens`, {}),

@@ -725,10 +725,11 @@ async fn workspace_names(api: &Api, host: HostId) -> Result<Vec<String>> {
 }
 
 /// `sun host leave`: detaches `host` from every workspace (audited as the
-/// host). Its row stays, so past runs still name it.
+/// host), a link whose share lapsed too, so a new share can't bring it
+/// back. Its row stays, so past runs still name it.
 async fn leave(api: &Api, host: HostId) -> Result<()> {
     let item = sun_engine::WorkspaceItem::Host(host);
-    for workspace in api.engine.workspaces_of(item).await? {
+    for workspace in api.engine.host_links(host).await? {
         api.engine
             .detach_from_workspace(workspace, item, &format!("host:{host}"))
             .await?;
@@ -847,8 +848,11 @@ pub(crate) async fn create_token(
 
 /// `PUT /api/v1/workspaces/{id}/hosts/{host}` (`manage_runtimes` there):
 /// attaches an enrolled host, so the workspace's runs may go to it. Only a
-/// deployment owner, or the member who enrolled the host, may (anyone else
-/// gets 404, as for a missing host). Counts against the plan; audited.
+/// deployment owner, the member who enrolled the host, or a member of a
+/// group it is shared with may ([`sun_engine::attach_path`]; anyone else
+/// gets 404, as for a missing host). Attached through a share, the
+/// workspace keeps it only while that holds. Counts against the plan;
+/// audited.
 pub(crate) async fn attach_host(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,
@@ -857,15 +861,23 @@ pub(crate) async fn attach_host(
     let workspace = crate::routes::id(&workspace, "workspace")?;
     let host = crate::routes::id::<HostId>(&host, "host")?;
     let row = api.engine.host(host).await?;
-    let enrolled_it = caller.member_id.is_some() && row.enrolled_by == caller.member_id;
-    if !caller.is_owner && !enrolled_it {
-        return Err(Error::NotFound(format!("host {host}")).into());
-    }
+    let shared = crate::host_shares::shared_with(&api, &caller).await?;
+    let path = sun_engine::attach_path(&row, caller.member_id, caller.is_owner, &shared)
+        .ok_or_else(|| Error::NotFound(format!("host {host}")))?;
     let plan = api.entitlements.for_workspace(workspace).await;
-    let item = sun_engine::WorkspaceItem::Host(host);
-    api.engine
-        .import_to_workspace(workspace, item, &caller.actor(), &plan)
-        .await?;
+    match (path, caller.member_id) {
+        (sun_engine::AttachPath::Share, Some(member)) => {
+            api.engine
+                .attach_shared_host(workspace, host, member, &caller.actor(), &plan)
+                .await?
+        }
+        _ => {
+            let item = sun_engine::WorkspaceItem::Host(host);
+            api.engine
+                .import_to_workspace(workspace, item, &caller.actor(), &plan)
+                .await?
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -907,8 +919,9 @@ pub(crate) async fn reprobe_host(
 
 /// `GET /api/v1/hosts?workspace=`: the hosts attached to the workspace (any
 /// member there); a deployment owner may leave it out for every host. Each
-/// names the workspaces it is attached to (those the caller sees) and who
-/// enrolled it; sessions and disk use show only the caller's workspaces'.
+/// names the workspaces it is attached to (those the caller sees), who
+/// enrolled it and whether it is the kernel's own (`kernel`); sessions and
+/// disk use show only the caller's workspaces'.
 pub(crate) async fn list_hosts(
     State(api): State<Api>,
     axum::Extension(caller): axum::Extension<auth::Caller>,
@@ -916,6 +929,7 @@ pub(crate) async fn list_hosts(
 ) -> ApiResult<Json<Vec<Value>>> {
     let workspace = listed_workspace(&caller, query.workspace.as_deref())?;
     let hosts = api.engine.hosts(workspace).await.map_err(ApiError::from)?;
+    let kernel = api.engine.kernel_host().await?;
     let mut attached = Vec::with_capacity(hosts.len());
     for host in &hosts {
         let item = sun_engine::WorkspaceItem::Host(host.id);
@@ -1000,6 +1014,8 @@ pub(crate) async fn list_hosts(
                 "name": host.name,
                 "workspace_ids": workspace_ids,
                 "enrolled_by": host.enrolled_by,
+                // The kernel's own host (`sun serve --with-host`).
+                "kernel": kernel == Some(host.id),
                 "status": if state.conns.contains_key(&host.id) { "online" } else { "offline" },
                 "capabilities": {
                     "os": caps.get("os").cloned().unwrap_or(Value::from("")),

@@ -730,6 +730,18 @@ export interface Host {
   workspace_ids: Ulid[];
   /** Who minted the token it joined with; `null` from before, or the kernel's own host. */
   enrolled_by: Ulid | null;
+  /** The kernel's own host (`sun serve --with-host`): its sessions run next to the kernel. */
+  kernel?: boolean;
+}
+
+/** One entry of `GET /hosts/attachable`: a host the caller may attach to the workspace, and why. */
+export interface AttachableHost extends Pick<Host, 'id' | 'name' | 'status' | 'last_seen_at' | 'workspace_ids' | 'enrolled_by'> {
+  capabilities: { os: string; arch: string };
+  /** `owner`: a deployment owner attaches any host; `enrolled`: they enrolled it; `share`: shared with a group they are in. */
+  via: 'owner' | 'enrolled' | 'share';
+  kernel: boolean;
+  /** The workspace already has it. */
+  attached: boolean;
 }
 
 /** One device tool a host detected; `detail` says what's missing and the fix. */

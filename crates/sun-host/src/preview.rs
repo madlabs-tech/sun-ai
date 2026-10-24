@@ -123,14 +123,17 @@ impl Previews {
         let err_log = log
             .try_clone()
             .map_err(|e| Error::Unavailable(e.to_string()))?;
-        let mut child = Command::new("sh")
-            .arg("-c")
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
             .arg(&command)
             .current_dir(dir)
             .env("PORT", port.to_string())
             .env("HOST", "127.0.0.1")
             .env("BROWSER", "none")
-            .env("SUN_PREVIEW_BASE", &request.base_path)
+            .env("SUN_PREVIEW_BASE", &request.base_path);
+        // The repo's own dev server: none of the host's `SUN_*` variables.
+        sun_core::scrub_kernel_env(cmd.as_std_mut());
+        let mut child = cmd
             .process_group(0)
             .stdin(Stdio::null())
             .stdout(log)

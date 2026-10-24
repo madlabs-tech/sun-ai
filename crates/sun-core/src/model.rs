@@ -2089,6 +2089,20 @@ pub struct WorkspaceMember {
     pub created_at: Timestamp,
 }
 
+/// `host_share` — a host a deployment owner shared with a group: its
+/// members may attach the host where they manage runtimes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostShare {
+    /// The host.
+    pub host_id: HostId,
+    /// The group.
+    pub group_id: crate::GroupId,
+    /// Who shared it.
+    pub shared_by: Option<MemberId>,
+    /// When.
+    pub created_at: Timestamp,
+}
+
 /// `workspace_invitation` — an emailed invitation into one workspace with a
 /// role. The link token is stored as `sha256(token)` only (never here).
 /// Pending until accepted, declined or past `expires_at`; at most one
