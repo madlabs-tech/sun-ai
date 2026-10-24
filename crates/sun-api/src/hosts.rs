@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::entitlement::within_plan;
 use crate::error::{ApiError, ApiResult};
-use crate::workspace_access::{InWorkspace, listed_workspace, named_workspace, visible};
+use crate::workspace_access::{InWorkspace, listed, listed_workspace, named_workspace};
 use crate::{Api, auth, wire};
 use sun_core::entitlement::Quota;
 
@@ -938,7 +938,7 @@ pub(crate) async fn list_hosts(
         attached.push(workspaces);
     }
     // A shared host runs other workspaces' sessions too: their run and task
-    // ids are not this caller's to see.
+    // ids are not this caller's to see, nor a deleted one's.
     let (runs, tasks): (Vec<RunId>, Vec<TaskId>) = {
         let state = api.hosts.state();
         (
@@ -953,13 +953,13 @@ pub(crate) async fn list_hosts(
     };
     let mut hidden_runs = std::collections::HashSet::new();
     for run in runs {
-        if !visible(&api, &caller, OnWorkspace::Run(run)).await? {
+        if !listed(&api, &caller, OnWorkspace::Run(run)).await? {
             hidden_runs.insert(run);
         }
     }
     let mut hidden_tasks = std::collections::HashSet::new();
     for task in tasks {
-        if !visible(&api, &caller, OnWorkspace::Task(task)).await? {
+        if !listed(&api, &caller, OnWorkspace::Task(task)).await? {
             hidden_tasks.insert(task);
         }
     }
