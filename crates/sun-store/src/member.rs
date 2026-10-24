@@ -59,6 +59,7 @@ pub trait MemberRepo {
     /// Links an invited member to an OIDC identity.
     async fn link_identity(&mut self, id: MemberId, issuer: &str, subject: &str) -> Result<()>;
     /// Sets the (normalized) email; one another member has is `InvalidInput`.
+    /// A different address than before is not verified until proven again.
     async fn set_member_email(&mut self, id: MemberId, email: &str) -> Result<()>;
     /// The member's Argon2id PHC string, if they set a password.
     async fn password_hash(&mut self, id: MemberId) -> Result<Option<String>>;
@@ -526,11 +527,17 @@ impl MemberRepo for Tx {
 
     async fn set_member_email(&mut self, id: MemberId, email: &str) -> Result<()> {
         email_free(self, email, Some(id)).await?;
-        sqlx::query("UPDATE member SET email = $1 WHERE id = $2")
-            .bind(email)
-            .bind(id.to_string())
-            .execute(self.conn())
-            .await?;
+        // A new address is not proven yet: a verified domain must not carry
+        // over to an inbox nobody showed they own.
+        sqlx::query(
+            "UPDATE member SET email = $1, email_verified_at = CASE \
+                 WHEN lower(email) = lower($1) THEN email_verified_at ELSE NULL END \
+             WHERE id = $2",
+        )
+        .bind(email)
+        .bind(id.to_string())
+        .execute(self.conn())
+        .await?;
         Ok(())
     }
 
