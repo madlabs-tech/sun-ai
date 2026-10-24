@@ -78,6 +78,7 @@ pub mod editor_grant;
 pub mod entitlement;
 mod error;
 mod event;
+pub mod group;
 pub mod host_protocol;
 mod id;
 mod link;

@@ -108,6 +108,8 @@ ulid_id!(
     PullRequestId,
     /// `editor_grant.id` — one editor capability granted in a workspace.
     EditorGrantId,
+    /// `member_group.id` — a deployment-wide set of people.
+    GroupId,
 );
 
 impl WorkspaceId {
