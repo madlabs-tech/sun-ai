@@ -21,6 +21,7 @@ mod editor_grants;
 mod editor_matrix;
 mod entitlement;
 mod features;
+mod groups;
 mod isolation;
 mod knowledge;
 mod marketplace;

@@ -215,9 +215,23 @@ async fn groups_become_workspace_roles_on_a_copy_of_an_old_database() {
 
     let upgraded = data.join("sun.db");
     for table in ["user_group", "member_group", "workspace_group"] {
-        assert!(!has_table(&upgraded, table).await, "{table} dropped");
         assert!(has_table(&old.join("sun.db"), table).await, "original kept");
     }
+    for table in ["user_group", "workspace_group"] {
+        assert!(!has_table(&upgraded, table).await, "{table} dropped");
+    }
+    // `member_group` came back in BLO-192 as a set of people, not the old
+    // join table.
+    let url = format!("sqlite://{}", upgraded.display());
+    let mut conn = SqliteConnection::connect(&url).await.unwrap();
+    let old_column: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pragma_table_info('member_group') WHERE name = 'group_id'",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(old_column, 0, "old member_group dropped");
+    conn.close().await.unwrap();
     assert!(!has_table(&old.join("sun.db"), "workspace_member").await);
     // The backup taken before migrating is the old schema: restoring it is
     // the rollback.

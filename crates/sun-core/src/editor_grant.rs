@@ -4,18 +4,22 @@
 //! `sun-api` enforces them on every editor and terminal route.
 //!
 //! - Deployment owners and a workspace's owners hold every capability,
-//!   always: implicit, never stored, never revoked.
+//!   always: implicit, never stored, never revoked. The one exception is
+//!   the [`TerminalPolicy`]: under `groups`, a workspace owner outside the
+//!   listed groups has no `terminal` (a deployment owner always does).
 //! - Everyone else holds what a grant gives them: to all members, to a role
-//!   (that role and those above it, as approval `role:` keys), or to one
-//!   member; for the whole workspace or one repo.
+//!   (that role and those above it, as approval `role:` keys), to a group
+//!   ([`crate::group`]) or to one member; for the whole workspace or one
+//!   repo.
 //! - `editor.write` implies `editor.read`; `terminal` is never implied (it
 //!   is arbitrary code execution on the host).
 //! - A viewer holds `editor.read` at most, whatever was granted.
 
 use serde::{Deserialize, Serialize};
 
+use crate::group::TerminalPolicy;
 use crate::model::Role;
-use crate::{EditorGrantId, Error, MemberId, RepoId, Result, Timestamp, WorkspaceId};
+use crate::{EditorGrantId, Error, GroupId, MemberId, RepoId, Result, Timestamp, WorkspaceId};
 
 string_enum! {
     /// One thing the editor lets someone do on a repo.
@@ -29,10 +33,9 @@ string_enum! {
     }
 }
 
-/// Who a grant is for: `{"subject_type": "all" | "role" | "member",
-/// "subject_id": <role key | member id>}` (`editor_grant.subject_type`,
-/// `subject_id`). A `group` subject is a new variant here and a new
-/// `subject_type` value; the table takes it as is.
+/// Who a grant is for: `{"subject_type": "all" | "role" | "group" |
+/// "member", "subject_id": <role key | group id | member id>}`
+/// (`editor_grant.subject_type`, `subject_id`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "subject_type",
@@ -44,6 +47,8 @@ pub enum GrantSubject {
     All,
     /// Members with this role or one above it.
     Role(Role),
+    /// The members of a group ([`crate::group::is_member`]).
+    Group(GroupId),
     /// One member.
     Member(MemberId),
 }
@@ -54,6 +59,7 @@ impl GrantSubject {
         match self {
             Self::All => ("all", None),
             Self::Role(role) => ("role", Some(role.as_str().to_owned())),
+            Self::Group(id) => ("group", Some(id.to_string())),
             Self::Member(id) => ("member", Some(id.to_string())),
         }
     }
@@ -63,16 +69,19 @@ impl GrantSubject {
         match (subject_type, subject_id) {
             ("all", None) => Ok(Self::All),
             ("role", Some(role)) => Ok(Self::Role(role.parse()?)),
+            ("group", Some(id)) => Ok(Self::Group(id.parse()?)),
             ("member", Some(id)) => Ok(Self::Member(id.parse()?)),
             (kind, _) => Err(Error::InvalidInput(format!("grant subject `{kind}`"))),
         }
     }
 
-    /// True when it names someone who is `member` with `role` there.
-    fn covers(self, member: Option<MemberId>, role: Role) -> bool {
+    /// True when it names someone who is `member` with `role` there and in
+    /// `groups`.
+    fn covers(self, member: Option<MemberId>, role: Role, groups: &[GroupId]) -> bool {
         match self {
             Self::All => true,
             Self::Role(granted) => role.covers(granted),
+            Self::Group(id) => groups.contains(&id),
             Self::Member(id) => member == Some(id),
         }
     }
@@ -111,28 +120,37 @@ pub fn check_viewer_cap(role: Role, capability: EditorCapability) -> Result<()> 
 }
 
 /// What someone holds on `repo`: every capability for a deployment owner
-/// (`is_owner`) or the workspace's owner; nothing for a non-member (`role`
-/// `None`); else what the `grants` of the workspace give `member` with
-/// `role` there on `repo`, with write implying read and capped at read for
-/// a viewer. In [`EditorCapability::ALL`] order.
+/// (`is_owner`); nothing for a non-member (`role` `None`); every capability
+/// for the workspace's owner, else what the `grants` of the workspace give
+/// `member` with `role` there and in `groups` ([`crate::group`]) on `repo`,
+/// with write implying read and capped at read for a viewer; and
+/// `terminal` only when the `terminal` policy allows it too. In
+/// [`EditorCapability::ALL`] order.
 pub fn capabilities_of(
     is_owner: bool,
     member: Option<MemberId>,
     role: Option<Role>,
+    groups: &[GroupId],
+    terminal: &TerminalPolicy,
     repo: RepoId,
     grants: &[EditorGrant],
 ) -> Vec<EditorCapability> {
-    if is_owner || role == Some(Role::Owner) {
+    if is_owner {
         return EditorCapability::ALL.to_vec();
     }
     let Some(role) = role else {
         return Vec::new();
     };
-    let held: Vec<EditorCapability> = grants
-        .iter()
-        .filter(|g| g.repo_id.is_none_or(|r| r == repo) && g.subject.covers(member, role))
-        .map(|g| g.capability)
-        .collect();
+    let held: Vec<EditorCapability> = match role {
+        Role::Owner => EditorCapability::ALL.to_vec(),
+        _ => grants
+            .iter()
+            .filter(|g| {
+                g.repo_id.is_none_or(|r| r == repo) && g.subject.covers(member, role, groups)
+            })
+            .map(|g| g.capability)
+            .collect(),
+    };
     EditorCapability::ALL
         .iter()
         .copied()
@@ -143,12 +161,14 @@ pub fn capabilities_of(
             other => held.contains(other),
         })
         .filter(|cap| check_viewer_cap(role, *cap).is_ok())
+        .filter(|cap| *cap != EditorCapability::Terminal || terminal.allows(false, groups))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::group::TerminalMode;
     use EditorCapability::{Read, Terminal, Write};
 
     fn grant(subject: GrantSubject, capability: EditorCapability) -> EditorGrant {
@@ -167,20 +187,61 @@ mod tests {
     fn owners_hold_everything_without_a_grant_and_others_nothing() {
         let (ana, repo) = (Some(MemberId::generate()), RepoId::generate());
         let all = vec![Read, Write, Terminal];
-        assert_eq!(capabilities_of(true, None, None, repo, &[]), all);
         assert_eq!(
-            capabilities_of(true, ana, Some(Role::Viewer), repo, &[]),
+            capabilities_of(true, None, None, &[], &TerminalPolicy::default(), repo, &[]),
             all
         );
         assert_eq!(
-            capabilities_of(false, ana, Some(Role::Owner), repo, &[]),
+            capabilities_of(
+                true,
+                ana,
+                Some(Role::Viewer),
+                &[],
+                &TerminalPolicy::default(),
+                repo,
+                &[]
+            ),
+            all
+        );
+        assert_eq!(
+            capabilities_of(
+                false,
+                ana,
+                Some(Role::Owner),
+                &[],
+                &TerminalPolicy::default(),
+                repo,
+                &[]
+            ),
             all
         );
         for role in [Role::Admin, Role::Member, Role::Viewer] {
-            assert!(capabilities_of(false, ana, Some(role), repo, &[]).is_empty());
+            assert!(
+                capabilities_of(
+                    false,
+                    ana,
+                    Some(role),
+                    &[],
+                    &TerminalPolicy::default(),
+                    repo,
+                    &[]
+                )
+                .is_empty()
+            );
         }
         let everyone = [grant(GrantSubject::All, Terminal)];
-        assert!(capabilities_of(false, ana, None, repo, &everyone).is_empty());
+        assert!(
+            capabilities_of(
+                false,
+                ana,
+                None,
+                &[],
+                &TerminalPolicy::default(),
+                repo,
+                &everyone
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -191,7 +252,15 @@ mod tests {
             RepoId::generate(),
         );
         let of = |member, role, grants: &[EditorGrant]| {
-            capabilities_of(false, Some(member), Some(role), repo, grants)
+            capabilities_of(
+                false,
+                Some(member),
+                Some(role),
+                &[],
+                &TerminalPolicy::default(),
+                repo,
+                grants,
+            )
         };
         let to_all = [grant(GrantSubject::All, Read)];
         assert_eq!(of(ana, Role::Member, &to_all), vec![Read]);
@@ -219,7 +288,17 @@ mod tests {
             ..grant(GrantSubject::Member(ana), Write)
         };
         let grants = [scoped, grant(GrantSubject::All, Read)];
-        let on = |repo| capabilities_of(false, Some(ana), Some(Role::Member), repo, &grants);
+        let on = |repo| {
+            capabilities_of(
+                false,
+                Some(ana),
+                Some(Role::Member),
+                &[],
+                &TerminalPolicy::default(),
+                repo,
+                &grants,
+            )
+        };
         assert_eq!(on(here), vec![Read, Write]);
         assert_eq!(on(there), vec![Read]);
     }
@@ -231,7 +310,15 @@ mod tests {
             grant(GrantSubject::All, Write),
             grant(GrantSubject::Member(ana), Terminal),
         ];
-        let held = capabilities_of(false, Some(ana), Some(Role::Viewer), repo, &grants);
+        let held = capabilities_of(
+            false,
+            Some(ana),
+            Some(Role::Viewer),
+            &[],
+            &TerminalPolicy::default(),
+            repo,
+            &grants,
+        );
         assert_eq!(held, vec![Read]);
         assert!(check_viewer_cap(Role::Viewer, Read).is_ok());
         assert!(check_viewer_cap(Role::Viewer, Write).is_err());
@@ -244,11 +331,85 @@ mod tests {
         let (ana, repo) = (MemberId::generate(), RepoId::generate());
         let mut grants = vec![grant(GrantSubject::Member(ana), Write)];
         let of = |grants: &[EditorGrant]| {
-            capabilities_of(false, Some(ana), Some(Role::Member), repo, grants)
+            capabilities_of(
+                false,
+                Some(ana),
+                Some(Role::Member),
+                &[],
+                &TerminalPolicy::default(),
+                repo,
+                grants,
+            )
         };
         assert_eq!(of(&grants), vec![Read, Write]);
         grants.clear();
         assert!(of(&grants).is_empty());
+    }
+
+    #[test]
+    fn a_group_grant_covers_its_members_only() {
+        let (ana, repo, team) = (
+            MemberId::generate(),
+            RepoId::generate(),
+            GroupId::generate(),
+        );
+        let grants = [grant(GrantSubject::Group(team), Write)];
+        let policy = TerminalPolicy::default();
+        let of = |groups: &[GroupId]| {
+            capabilities_of(
+                false,
+                Some(ana),
+                Some(Role::Member),
+                groups,
+                &policy,
+                repo,
+                &grants,
+            )
+        };
+        assert_eq!(of(&[team]), vec![Read, Write]);
+        assert!(of(&[GroupId::generate()]).is_empty());
+        assert!(
+            of(&[]).is_empty(),
+            "left the group: gone on the next resolution"
+        );
+    }
+
+    #[test]
+    fn the_groups_terminal_policy_refuses_workspace_owners_outside_its_groups() {
+        let (ana, repo, team) = (
+            MemberId::generate(),
+            RepoId::generate(),
+            GroupId::generate(),
+        );
+        let policy = TerminalPolicy {
+            mode: TerminalMode::Groups,
+            groups: vec![team],
+        };
+        let grants = [grant(GrantSubject::All, Terminal)];
+        let of = |is_owner, role, groups: &[GroupId]| {
+            capabilities_of(is_owner, Some(ana), role, groups, &policy, repo, &grants)
+        };
+        // A public sign-up owns their own workspace: no terminal.
+        assert_eq!(of(false, Some(Role::Owner), &[]), vec![Read, Write]);
+        assert_eq!(
+            of(false, Some(Role::Owner), &[team]),
+            vec![Read, Write, Terminal]
+        );
+        // A team member needs the grant as well as the group.
+        assert_eq!(of(false, Some(Role::Member), &[team]), vec![Terminal]);
+        assert!(of(false, Some(Role::Member), &[]).is_empty());
+        let ungranted = capabilities_of(
+            false,
+            Some(ana),
+            Some(Role::Member),
+            &[team],
+            &policy,
+            repo,
+            &[],
+        );
+        assert!(ungranted.is_empty());
+        // The deployment owner always passes.
+        assert_eq!(of(true, None, &[]), vec![Read, Write, Terminal]);
     }
 
     #[test]
@@ -257,6 +418,7 @@ mod tests {
         for subject in [
             GrantSubject::All,
             GrantSubject::Role(Role::Viewer),
+            GrantSubject::Group(GroupId::generate()),
             GrantSubject::Member(ana),
         ] {
             let (kind, id) = subject.to_columns();

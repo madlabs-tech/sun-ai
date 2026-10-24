@@ -5,9 +5,9 @@
 //! Every editor and terminal handler calls [`require`] first, after
 //! [`crate::workspace_access::guard`] (a workspace the caller can't see is
 //! already 404). It resolves the caller's capabilities on every call (their
-//! role is read per request, the grants in one query), never caches them, so
-//! a revoke applies to the next request: a repo of another workspace is 404,
-//! a missing capability 403.
+//! role, groups and the terminal policy are read per request, the grants in
+//! one query), never caches them, so a revoke applies to the next request: a
+//! repo of another workspace is 404, a missing capability 403.
 //!
 //! - `GET /workspaces/{id}/editor/grants`, `POST` it and `DELETE
 //!   /workspaces/{id}/editor/grants/{grant}`: `edit_members` there (owners
@@ -43,10 +43,13 @@ pub(crate) async fn capabilities(
         return Err(hidden());
     }
     let grants = api.engine.editor_grants_on(workspace, repo).await?;
+    let (groups, terminal) = api.engine.terminal_access(caller.member_id).await?;
     Ok(capabilities_of(
         caller.is_owner,
         caller.member_id,
         role,
+        &groups,
+        &terminal,
         repo,
         &grants,
     ))
@@ -146,9 +149,9 @@ pub(crate) async fn list(
 pub(crate) struct NewGrant {
     /// The one repo it applies to; none: every repo of the workspace.
     repo_id: Option<String>,
-    /// `all`, `role` or `member`.
+    /// `all`, `role`, `group` or `member`.
     subject_type: String,
-    /// The role key or member id; none for `all`.
+    /// The role key, group id or member id; none for `all`.
     subject_id: Option<String>,
     /// `editor.read`, `editor.write` or `terminal`.
     capability: String,
@@ -173,7 +176,8 @@ pub(crate) async fn create(
     let subject = GrantSubject::from_columns(&input.subject_type, input.subject_id.as_deref())
         .map_err(|_| {
             ApiError::invalid(
-                "Grant to `all`, a `role` (its key in `subject_id`) or a `member` (their id).",
+                "Grant to `all`, a `role` (its key in `subject_id`), a `group` or a `member` \
+                 (their id).",
             )
         })?;
     let capability = input.capability.parse().map_err(|_| {

@@ -51,6 +51,7 @@ mod entitlement;
 mod error;
 mod evals;
 mod features;
+mod groups;
 mod hosts;
 mod knowledge;
 mod marketplace;

@@ -332,8 +332,8 @@ pub(crate) fn router(api: Api) -> Router {
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::ManageSettings,
         ])));
-    // The deployment itself, for deployment owners only: its accounts, mail,
-    // sign-in, security, audit, the kernel's own resources and sessions,
+    // The deployment itself, for deployment owners only: its accounts, groups,
+    // mail, sign-in, security, audit, the kernel's own resources and sessions,
     // mods, ecosystem and mod secrets, limits, dismissed catalog suggestions,
     // usage and marketplace.
     let deployment = Router::new()
@@ -395,6 +395,23 @@ pub(crate) fn router(api: Api) -> Router {
             "/settings/bypass",
             get(crate::bypass::get_policy).put(crate::bypass::put_policy),
         )
+        .route(
+            "/settings/terminal",
+            get(crate::groups::get_policy).put(crate::groups::put_policy),
+        )
+        .route(
+            "/groups",
+            get(crate::groups::list).post(crate::groups::create),
+        )
+        .route(
+            "/groups/{id}",
+            patch(crate::groups::update).delete(crate::groups::remove),
+        )
+        .route(
+            "/groups/{id}/members/{member}",
+            post(crate::groups::add_member).delete(crate::groups::remove_member),
+        )
+        .route("/groups/{id}/preview", get(crate::groups::preview))
         .route("/settings/sso", get(auth::list_sso))
         .route(
             "/settings/sso/{id}",
@@ -454,6 +471,8 @@ pub(crate) fn router(api: Api) -> Router {
         // guard keeps everyone else out).
         .route("/workspaces/{id}/members", get(auth::workspace_members))
         .route("/workspaces/{id}/leave", post(auth::leave_workspace))
+        // Any member reads their own groups.
+        .route("/groups/mine", get(crate::groups::mine))
         // Any member reads their own editor capabilities on a repo.
         .route(
             "/workspaces/{id}/repos/{repo_id}/editor/me",
