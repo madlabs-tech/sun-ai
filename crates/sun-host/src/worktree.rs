@@ -3,13 +3,15 @@
 //! task folder.
 //!
 //! Layout under the host's data dir: `repos/<escaped url>.git` (bare clones,
-//! shared by every task of a repo) and `work/<task_id>` (one directory per task,
-//! reused by every session of the task, so a hand-off continues in place).
+//! shared by every task of a repo), `work/<task_id>` (one directory per task,
+//! reused by every session of the task, so a hand-off continues in place) and
+//! `editor/<repo_id>/<member_id>` (a member's long-lived editor worktree, cut
+//! from the same clone; task removal never touches it).
 
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Component, Path, PathBuf};
 
-use sun_core::host_protocol::{SessionFile, Worktree};
+use sun_core::host_protocol::{EditorTree, SessionFile, Worktree};
 use sun_core::redact::redact;
 use sun_core::{Error, Result, TaskId};
 use tokio::process::Command;
@@ -21,6 +23,7 @@ use crate::buffer::{io, write_file};
 pub struct Worktrees {
     repos: PathBuf,
     work: PathBuf,
+    editor: PathBuf,
     // ponytail: one lock for all git work (clone/fetch/worktree add are not
     // safe to race on one bare repo); per-repo locks if prepare gets hot.
     git_lock: Mutex<()>,
@@ -30,12 +33,14 @@ impl Worktrees {
     /// Worktrees under `data_dir`.
     pub fn new(data_dir: &Path) -> Result<Self> {
         let (repos, work) = (data_dir.join("repos"), data_dir.join("work"));
-        for dir in [&repos, &work] {
+        let editor = data_dir.join("editor");
+        for dir in [&repos, &work, &editor] {
             std::fs::create_dir_all(dir).map_err(io(dir))?;
         }
         Ok(Self {
             repos,
             work: work.canonicalize().map_err(io(&work))?,
+            editor: editor.canonicalize().map_err(io(&editor))?,
             git_lock: Mutex::new(()),
         })
     }
@@ -74,6 +79,40 @@ impl Worktrees {
             }
         }
         Ok(path)
+    }
+
+    /// `editor.open`: the member's editor worktree of the repo, made on first
+    /// open on `sun/editor/<member_id>/<repo_id>` (the repo id keeps two
+    /// repos of one URL from wanting the same branch), cut from `base`.
+    /// Returns its canonical path.
+    pub async fn prepare_editor(
+        &self,
+        tree: &EditorTree,
+        url: &str,
+        base: &Option<String>,
+    ) -> Result<PathBuf> {
+        let _guard = self.git_lock.lock().await;
+        let path = self.editor_path(tree);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(io(parent))?;
+        }
+        let branch = format!("sun/editor/{}/{}", tree.member_id, tree.repo_id);
+        self.add_worktree(url, base, &branch, &path).await?;
+        path.canonicalize().map_err(io(&path))
+    }
+
+    /// The canonical root of an opened editor worktree; `NotFound` before
+    /// `editor.open`.
+    pub fn editor_root(&self, tree: &EditorTree) -> Result<PathBuf> {
+        self.editor_path(tree)
+            .canonicalize()
+            .map_err(|_| Error::NotFound("editor worktree; open the editor first".into()))
+    }
+
+    fn editor_path(&self, tree: &EditorTree) -> PathBuf {
+        self.editor
+            .join(tree.repo_id.to_string())
+            .join(tree.member_id.to_string())
     }
 
     /// The worktree of `url` at `path` on `branch`, unless `path` exists.
@@ -309,7 +348,7 @@ fn no_symlink(root: &Path, relative: &Path) -> Result<()> {
 }
 
 /// `git -C <dir>`, never prompting for credentials.
-fn git(dir: &Path) -> Command {
+pub(crate) fn git(dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)
@@ -319,7 +358,7 @@ fn git(dir: &Path) -> Command {
 }
 
 /// Runs a git command and returns its stdout.
-async fn run(cmd: &mut Command) -> Result<String> {
+pub(crate) async fn run(cmd: &mut Command) -> Result<String> {
     let output = cmd
         .output()
         .await
