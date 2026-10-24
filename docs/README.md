@@ -2,9 +2,10 @@
 
 Sun is one Rust binary, `sun`. It runs the agent CLIs you already have (Claude Code, Codex, OpenCode) through versioned workflows. The engine, not the agent, decides when a task is done.
 
-This page shows the parts and how they talk. Two more pages go one level deeper:
+This page shows the parts and how they talk. These pages go one level deeper:
 - [Task lifecycle](task-lifecycle.md): how one task runs, from create to done.
 - [Deployment](deployment.md): the ways to run it.
+- [ADR: repo editor](adr-editor.md): editor worktrees, file frames, path confinement, the terminal transport.
 
 The crate table, the dependency rule and the project layout are [below](#crates). Every command: [CLI reference](cli.md).
 
