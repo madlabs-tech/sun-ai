@@ -86,6 +86,8 @@
 //!   `UPDATE`/`DELETE`). Write the audit row in the same `Tx` as the change.
 //!   [`LoginRepo`]: sign-in sessions and one-time login links, stored as
 //!   `sha256(token)` only.
+//! - **Editor grants** ([`EditorGrantRepo`]): the editor capabilities given
+//!   in a workspace; owners' implicit ones are never stored.
 //! - **Hosts** ([`HostRepo`]): enrolled hosts with their raw capabilities
 //!   report, and `host_runtime`, one row per `(host, tool)` projected from
 //!   that report on every `hello` / `capabilities` write (a tool gone from a
@@ -103,6 +105,7 @@ mod artifact;
 mod blob;
 mod correction;
 mod credential;
+mod editor_grant;
 mod error;
 mod eval;
 mod event_query;
@@ -141,6 +144,7 @@ pub use artifact::{ArtifactRepo, RepoRepo};
 pub use blob::BlobStore;
 pub use correction::CorrectionRepo;
 pub use credential::CredentialRepo;
+pub use editor_grant::EditorGrantRepo;
 pub use error::{Result, StoreError};
 pub use eval::EvalRepo;
 pub use event_query::{COMPACTED, EventQuery, KEPT_KINDS};

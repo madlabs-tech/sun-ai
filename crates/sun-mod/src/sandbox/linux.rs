@@ -18,14 +18,14 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::mpsc;
 
 use serde::{Deserialize, Serialize};
 use sun_core::{Error, Result};
 
-use super::{PROXY_VARS, Sandbox, system_read_paths};
+use super::{PROXY_VARS, Sandbox, resolve, system_read_paths};
 
 /// Device files every mod may use.
 const DEVICES: [&str; 5] = [
@@ -47,20 +47,6 @@ struct Policy {
     proxy_port: u16,
 }
 
-/// Where the dynamic loader and shared libraries live: execve opens the ELF
-/// interpreter with exec access, so these keep execute rights.
-// ponytail: /usr/lib also holds helper binaries (git-core, ...); list loader
-// files one by one if that ever matters.
-const LIB_DIRS: [&str; 7] = [
-    "/lib",
-    "/lib64",
-    "/lib32",
-    "/usr/lib",
-    "/usr/lib64",
-    "/usr/lib32",
-    "/nix/store",
-];
-
 /// `sun-mod-sandbox <policy> -- <program> <args..>`.
 pub(super) fn wrap(
     sandbox: &Sandbox,
@@ -75,9 +61,15 @@ pub(super) fn wrap(
     write.push(sandbox.data_dir.clone());
     write.extend(sandbox.paths.iter().cloned());
     let exec = sandbox.processes.as_ref().map(|processes| {
-        let libs = LIB_DIRS.iter().map(PathBuf::from);
-        let mut exec: Vec<PathBuf> = extra_read.iter().cloned().chain(libs).collect();
+        let mut exec: Vec<PathBuf> = extra_read.to_vec();
         exec.extend(processes.iter().cloned());
+        // execve opens a dynamic program's ELF interpreter with exec access:
+        // grant those loader files, not the lib dirs holding them (/usr/lib
+        // holds helper binaries, and on Ubuntu >= 26.04 every coreutil).
+        let started = resolve(&program.to_string_lossy());
+        let programs = exec.iter().cloned().chain(started);
+        let loaders: Vec<PathBuf> = programs.filter_map(|p| elf_interpreter(&p)).collect();
+        exec.extend(loaders);
         exec
     });
     let policy = Policy {
@@ -90,6 +82,58 @@ pub(super) fn wrap(
     let mut wrapped: Vec<OsString> = vec![policy.into(), "--".into(), program.into()];
     wrapped.extend(args.iter().map(OsString::from));
     Ok((sandbox.launcher.clone(), wrapped))
+}
+
+/// The ELF interpreter (`PT_INTERP`, the dynamic loader) `program` names;
+/// `None` for a static binary, a script, or anything that isn't ELF.
+fn elf_interpreter(program: &Path) -> Option<PathBuf> {
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::ffi::OsStrExt;
+    const PT_INTERP: u64 = 3;
+    // Native byte order: a foreign-endian binary can't run here anyway.
+    let uint = |b: &[u8]| -> Option<u64> {
+        Some(match b.len() {
+            2 => u16::from_ne_bytes(b.try_into().ok()?).into(),
+            4 => u32::from_ne_bytes(b.try_into().ok()?).into(),
+            8 => u64::from_ne_bytes(b.try_into().ok()?),
+            _ => return None,
+        })
+    };
+    let mut file = std::fs::File::open(program).ok()?;
+    let mut head = [0u8; 64];
+    file.read_exact(&mut head).ok()?;
+    if !head.starts_with(b"\x7fELF") {
+        return None;
+    }
+    // (e_phoff, e_phentsize, e_phnum, p_offset, p_filesz) offsets per class.
+    let (phoff, phentsize, phnum, offset, filesz) = match head[4] {
+        1 => (0x1c..0x20, 0x2a..0x2c, 0x2c..0x2e, 4..8, 16..20),
+        2 => (0x20..0x28, 0x36..0x38, 0x38..0x3a, 8..16, 32..40),
+        _ => return None,
+    };
+    let (phoff, phentsize) = (uint(&head[phoff])?, uint(&head[phentsize])?);
+    let entry = usize::try_from(phentsize)
+        .ok()
+        .filter(|&n| n >= filesz.end)?;
+    let mut ph = vec![0u8; entry.min(64)];
+    for i in 0..uint(&head[phnum])?.min(256) {
+        file.seek(SeekFrom::Start(
+            phoff.checked_add(i.checked_mul(phentsize)?)?,
+        ))
+        .ok()?;
+        file.read_exact(&mut ph).ok()?;
+        if uint(&ph[..4])? != PT_INTERP {
+            continue;
+        }
+        let len = uint(&ph[filesz.clone()])?;
+        let mut path = vec![0u8; usize::try_from(len.min(4096)).ok()?];
+        file.seek(SeekFrom::Start(uint(&ph[offset.clone()])?))
+            .ok()?;
+        file.read_exact(&mut path).ok()?;
+        let path = path.split(|&b| b == 0).next()?;
+        return Some(PathBuf::from(std::ffi::OsStr::from_bytes(path)));
+    }
+    None
 }
 
 /// Entry point of the `sun-mod-sandbox` binary. Exits with the mod's status,

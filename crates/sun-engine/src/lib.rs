@@ -47,6 +47,8 @@
 //! - `triggers`: mod triggers start tasks per workflow `on:`,
 //!   alerts and review corrections; run hooks feed `observe` mods the log.
 //! - `query`: the read **Facade** the API uses (it may not reach the store).
+//! - `editor_grants`: who holds which editor capability in a workspace, and
+//!   the audit rows of what the editor does.
 //! - `conversation`: an agent's final message as its comment, and comment-woken
 //!   runs that pick the conversation up.
 
@@ -63,6 +65,7 @@ mod credentials;
 mod data_touched;
 mod device;
 mod dry_run;
+mod editor_grants;
 mod eval;
 mod executor;
 mod gates;

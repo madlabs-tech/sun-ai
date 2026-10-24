@@ -102,7 +102,10 @@ export type AuditAction =
   | 'policy_change'
   | 'trigger_failed'
   | 'workspace_change'
-  | 'agent_change';
+  | 'agent_change'
+  | 'editor_grant'
+  | 'editor_file'
+  | 'terminal';
 
 export interface AuditEntry {
   id: string;

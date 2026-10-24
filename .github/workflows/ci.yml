@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    # pinned: sun-mod sandbox fails on 26.04, see BLO-194
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # rustup on the runner installs the toolchain pinned in rust-toolchain.toml.
@@ -23,8 +24,19 @@ jobs:
       - run: cargo test --locked
       - run: bash scripts/check-deps.sh
 
+  # The mod sandbox on Ubuntu 26.04, whose coreutils are one multicall
+  # binary under /usr/lib (BLO-194). Stays when `rust` moves to 26.04.
+  sandbox-ubuntu-26:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run: cargo test --locked -p sun-mod --test it sandbox
+
   web:
-    runs-on: ubuntu-latest
+    # pinned: sun-mod sandbox fails on 26.04, see BLO-194
+    runs-on: ubuntu-24.04
     permissions: { contents: read }
     defaults: { run: { working-directory: web } }
     steps:

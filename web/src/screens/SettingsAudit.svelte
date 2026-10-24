@@ -19,6 +19,9 @@
     trigger_failed: ['triangle-alert', 'Trigger failed:'],
     workspace_change: ['kanban', 'Changed workspace'],
     agent_change: ['bot', 'Changed agent'],
+    editor_grant: ['shield-check', 'Changed editor access of'],
+    editor_file: ['file-text', 'Changed file in'],
+    terminal: ['terminal', 'Used a terminal on'],
   };
 
   const audit = auth.list_audit();
