@@ -1,7 +1,8 @@
 # Footprint gate: builds the release binary with the UI, measures
 # binary size and idle RSS of `sun serve --with-host`, fails over budget and
 # publishes the numbers (job summary + footprint.json artifact).
-# Called by release.yml (cargo-dist `global-artifacts-jobs`) and by hand.
+# Called by release.yml (cargo-dist `global-artifacts-jobs`), on PRs to main
+# (so a tag never finds an over-budget binary first) and by hand.
 name: Footprint
 
 on:
@@ -10,6 +11,8 @@ on:
       plan:
         required: false
         type: string
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
