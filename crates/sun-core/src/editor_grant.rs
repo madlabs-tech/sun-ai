@@ -11,8 +11,9 @@
 //!   (that role and those above it, as approval `role:` keys), to a group
 //!   ([`crate::group`]) or to one member; for the whole workspace or one
 //!   repo.
-//! - `editor.write` implies `editor.read`; `terminal` is never implied (it
-//!   is arbitrary code execution on the host).
+//! - `editor.write` and `terminal` imply `editor.read` (a shell reads every
+//!   file anyway); `terminal` is never implied (it is arbitrary code
+//!   execution on the host).
 //! - A viewer holds `editor.read` at most, whatever was granted.
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +29,8 @@ string_enum! {
         Read => "editor.read",
         /// Write, create, rename and delete files (implies [`Self::Read`]).
         Write => "editor.write",
-        /// Open a terminal in the editor worktree. Never implied.
+        /// Open a terminal in the editor worktree (implies [`Self::Read`]).
+        /// Never implied.
         Terminal => "terminal",
     }
 }
@@ -123,8 +125,8 @@ pub fn check_viewer_cap(role: Role, capability: EditorCapability) -> Result<()> 
 /// (`is_owner`); nothing for a non-member (`role` `None`); every capability
 /// for the workspace's owner, else what the `grants` of the workspace give
 /// `member` with `role` there and in `groups` ([`crate::group`]) on `repo`,
-/// with write implying read and capped at read for a viewer; and
-/// `terminal` only when the `terminal` policy allows it too. In
+/// capped at read for a viewer; `terminal` only when the `terminal` policy
+/// allows it too; and read when write or that terminal is held. In
 /// [`EditorCapability::ALL`] order.
 pub fn capabilities_of(
     is_owner: bool,
@@ -151,17 +153,22 @@ pub fn capabilities_of(
             .map(|g| g.capability)
             .collect(),
     };
+    let shell = held.contains(&EditorCapability::Terminal)
+        && check_viewer_cap(role, EditorCapability::Terminal).is_ok()
+        && terminal.allows(false, groups);
     EditorCapability::ALL
         .iter()
         .copied()
         .filter(|cap| match cap {
             EditorCapability::Read => {
-                held.contains(&EditorCapability::Read) || held.contains(&EditorCapability::Write)
+                held.contains(&EditorCapability::Read)
+                    || held.contains(&EditorCapability::Write)
+                    || shell
             }
-            other => held.contains(other),
+            EditorCapability::Write => held.contains(&EditorCapability::Write),
+            EditorCapability::Terminal => shell,
         })
         .filter(|cap| check_viewer_cap(role, *cap).is_ok())
-        .filter(|cap| *cap != EditorCapability::Terminal || terminal.allows(false, groups))
         .collect()
 }
 
@@ -245,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn grants_to_all_a_role_or_a_member_resolve_with_write_implying_read_only() {
+    fn grants_to_all_a_role_or_a_member_resolve_with_write_and_terminal_implying_read() {
         let (ana, bob, repo) = (
             MemberId::generate(),
             MemberId::generate(),
@@ -276,7 +283,7 @@ mod tests {
         assert!(of(ana, Role::Viewer, &to_members).is_empty(), "below");
 
         let to_ana = [grant(GrantSubject::Member(ana), Terminal)];
-        assert_eq!(of(ana, Role::Member, &to_ana), vec![Terminal], "no read");
+        assert_eq!(of(ana, Role::Member, &to_ana), vec![Read, Terminal]);
         assert!(of(bob, Role::Member, &to_ana).is_empty());
     }
 
@@ -396,7 +403,7 @@ mod tests {
             vec![Read, Write, Terminal]
         );
         // A team member needs the grant as well as the group.
-        assert_eq!(of(false, Some(Role::Member), &[team]), vec![Terminal]);
+        assert_eq!(of(false, Some(Role::Member), &[team]), vec![Read, Terminal]);
         assert!(of(false, Some(Role::Member), &[]).is_empty());
         let ungranted = capabilities_of(
             false,
@@ -410,6 +417,45 @@ mod tests {
         assert!(ungranted.is_empty());
         // The deployment owner always passes.
         assert_eq!(of(true, None, &[]), vec![Read, Write, Terminal]);
+    }
+
+    #[test]
+    fn terminal_implies_read_but_read_and_write_never_imply_terminal() {
+        let (ana, repo, team) = (
+            MemberId::generate(),
+            RepoId::generate(),
+            GroupId::generate(),
+        );
+        let groups_only = TerminalPolicy {
+            mode: TerminalMode::Groups,
+            groups: vec![team],
+        };
+        let of = |role, groups: &[GroupId], policy: &TerminalPolicy, grants: &[EditorGrant]| {
+            capabilities_of(false, Some(ana), Some(role), groups, policy, repo, grants)
+        };
+        let open = TerminalPolicy::default();
+        let shell = [grant(GrantSubject::Group(team), Terminal)];
+        assert_eq!(
+            of(Role::Member, &[team], &open, &shell),
+            vec![Read, Terminal]
+        );
+        assert_eq!(
+            of(Role::Member, &[team], &groups_only, &shell),
+            vec![Read, Terminal]
+        );
+        // No terminal held, no read from it: outside the policy's groups, or a viewer.
+        let to_all = [grant(GrantSubject::All, Terminal)];
+        assert!(of(Role::Member, &[], &groups_only, &to_all).is_empty());
+        assert!(of(Role::Viewer, &[], &open, &to_all).is_empty());
+        for cap in [Read, Write] {
+            let held = of(
+                Role::Member,
+                &[team],
+                &open,
+                &[grant(GrantSubject::All, cap)],
+            );
+            assert!(!held.contains(&Terminal), "{cap} implies no terminal");
+        }
     }
 
     #[test]

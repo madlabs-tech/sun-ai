@@ -14,8 +14,8 @@ use sun_core::model::Role;
 
 use crate::common::{self, kernel};
 use crate::editor_grants::member_id;
-use crate::terminal::{Screen, World, opened, read_until, refused, world_with};
-use crate::workspaces::{call_as, member_token, member_token_in};
+use crate::terminal::{World, opened, refused, world_with};
+use crate::workspaces::{call, call_as, member_token, member_token_in};
 
 const GRANTS: &str = "/api/v1/workspaces/00000000000000000000000001/editor/grants";
 
@@ -199,30 +199,53 @@ async fn every_editor_route_and_the_terminal_answer_each_kind_of_caller() {
     assert_eq!(table.len(), callers.len() * routes(&w).len());
 }
 
+/// BLO-201: `terminal` implies `editor.read`, so a group granted only
+/// `terminal` opens the editor and the terminal; under `mode=groups` the
+/// terminal still needs a policy group.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_terminal_only_grant_passes_the_capability_check_but_has_no_worktree() {
-    // Through the API (the Settings page always adds read): `terminal`
-    // alone. The connect is allowed; the host has no worktree to open it in.
+async fn a_terminal_only_group_grant_opens_the_editor_and_the_terminal() {
     let w = world_with(kernel().await, Duration::from_secs(1)).await;
-    let owner = member_token(&w.k.store, "olive", Role::Owner).await;
-    w.open_editor(&owner).await;
-    let token = member_token(&w.k.store, "tia", Role::Member).await;
-    grant(&w, "tia", "terminal").await;
-    let open = format!("{}/editor/open?host_id={}", w.base, w.k.host);
-    let (status, _) = call_as(&w.k.app, &token, "POST", &open, None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    let mut ws = w.connect(&token, "").await.unwrap();
-    let mut screen = Screen::default();
-    read_until(&mut ws, &mut screen, |s| !s.controls.is_empty()).await;
-    assert_eq!(screen.controls[0]["kind"], "error", "{:?}", screen.controls);
-    assert!(
-        screen.controls[0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("open the editor first"),
-        "{:?}",
-        screen.controls
+    let app = &w.k.app;
+    let member = member_token(&w.k.store, "tom", Role::Member).await;
+    let tom = member_id(&w.k.store, "tom").await;
+    let make_group = |name: &str| {
+        let (app, body) = (app.clone(), json!({ "name": name }));
+        async move {
+            let (status, group) = call(&app, "POST", "/api/v1/groups", Some(body)).await;
+            assert_eq!(status, StatusCode::CREATED, "{group}");
+            group["id"].as_str().unwrap().to_owned()
+        }
+    };
+    let (shell, other) = (make_group("Shell").await, make_group("Other").await);
+    let join = format!("/api/v1/groups/{shell}/members/{tom}");
+    assert!(call(app, "POST", &join, None).await.0.is_success());
+    let grant = json!({ "subject_type": "group", "subject_id": shell, "capability": "terminal" });
+    let (status, made) = call(app, "POST", GRANTS, Some(grant)).await;
+    assert_eq!(status, StatusCode::CREATED, "{made}");
+
+    let me = format!("{}/editor/me", w.base);
+    let (_, held) = call_as(app, &member, "GET", &me, None).await;
+    assert_eq!(
+        held["capabilities"],
+        json!(["editor.read", "terminal"]),
+        "{held}"
     );
+    w.open_editor(&member).await;
+    let mut ws = w.connect(&member, "").await.unwrap();
+    opened(&mut ws).await;
+    drop(ws);
+
+    let policy = "/api/v1/settings/terminal";
+    let only = |group: &str| Some(json!({ "mode": "groups", "groups": [group] }));
+    assert!(call(app, "PUT", policy, only(&other)).await.0.is_success());
+    assert_eq!(refused(w.connect(&member, "").await), StatusCode::FORBIDDEN);
+    // No terminal, so no read from it either.
+    let open = format!("{}/editor/open?host_id={}", w.base, w.k.host);
+    let (status, _) = call_as(app, &member, "POST", &open, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(call(app, "PUT", policy, only(&shell)).await.0.is_success());
+    let mut ws = w.connect(&member, "").await.unwrap();
+    opened(&mut ws).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

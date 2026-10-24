@@ -1,7 +1,7 @@
 <!-- Settings → <workspace> → Editor access (owners and admins: `edit_members`): who may read, write and open a
      terminal in the repo editor, on every repository or one, for everyone, a role, a group (deployment owners pick one) or a member. Workspace owners hold all three always: not a grant,
-     so it can't be revoked. Write includes read; terminal is its own grant, never implied, because it is a shell
-     on the host. One grant per capability; a revoke applies from the holder's next request. -->
+     so it can't be revoked. Write and terminal include read (a shell reads every file anyway); terminal is its own grant,
+     never implied, because it is a shell on the host. One grant per capability; a revoke applies from the holder's next request. -->
 <script lang="ts">
   import { Badge, Button, Checkbox, Dialog, Icon, Select } from '@hryer/madlabs-design-system/svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
@@ -17,7 +17,7 @@
   const CAPABILITIES: { value: EditorCapability; label: string; description: string }[] = [
     { value: 'editor.read', label: 'Read', description: 'Browse, open and quick-open files.' },
     { value: 'editor.write', label: 'Write', description: 'Save, create, rename and delete files. Includes Read.' },
-    { value: 'terminal', label: 'Terminal', description: 'Open a shell in the repository’s worktree on the host.' },
+    { value: 'terminal', label: 'Terminal', description: 'Open a shell in the repository’s worktree on the host. Includes Read.' },
   ];
   const label_of = (capability: EditorCapability) => CAPABILITIES.find((c) => c.value === capability)?.label ?? capability;
   const ROLE_OPTIONS = (['admin', 'member', 'viewer'] as const).map((r) => ({ value: r, label: `${ROLE_LABEL[r]}s and above` }));

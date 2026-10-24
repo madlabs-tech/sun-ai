@@ -266,12 +266,28 @@ pub(crate) struct InWorkspace {
 /// True when the caller sees where `thing` lives; true when it doesn't
 /// exist (the handler answers that 404).
 pub(crate) async fn visible(api: &Api, caller: &Caller, thing: OnWorkspace<'_>) -> ApiResult<bool> {
+    sees(api, caller, thing, true).await
+}
+
+/// True when the caller sees where a listed `thing` lives. Unlike
+/// [`visible`], one that no longer exists is hidden from all but deployment
+/// owners: its workspace is gone, so it is no member's to see.
+pub(crate) async fn listed(api: &Api, caller: &Caller, thing: OnWorkspace<'_>) -> ApiResult<bool> {
+    sees(api, caller, thing, false).await
+}
+
+async fn sees(
+    api: &Api,
+    caller: &Caller,
+    thing: OnWorkspace<'_>,
+    missing: bool,
+) -> ApiResult<bool> {
     if caller.workspaces.is_none() {
         return Ok(true);
     }
     match api.engine.reach(thing).await {
         Ok(reach) => Ok(reach.visible(|b| caller.sees(b))),
-        Err(Error::NotFound(_)) => Ok(true),
+        Err(Error::NotFound(_)) => Ok(missing),
         Err(e) => Err(e.into()),
     }
 }
