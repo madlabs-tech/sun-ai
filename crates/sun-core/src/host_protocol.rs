@@ -18,7 +18,7 @@ use crate::{
 
 /// Protocol version sent in [`HostFrame::Hello`]. The kernel rejects a major it
 /// does not speak.
-pub const HOST_PROTOCOL_VERSION: &str = "2.2";
+pub const HOST_PROTOCOL_VERSION: &str = "2.3";
 
 /// File in the repo root that declares the design-canvas preview: the
 /// first line is the dev server command (run by the host), each later line a
@@ -428,6 +428,75 @@ pub enum KernelFrame {
         /// The entry, relative to the worktree root.
         path: String,
     },
+    /// Open a terminal (protocol 2.3): the host user's shell on a PTY in
+    /// the member's editor worktree (opened with `editor.open`). The host
+    /// then dials `GET /host/pty` and sends [`PtyHello`]; after it, binary
+    /// messages are PTY bytes both ways and text messages a [`PtyControl`].
+    /// Closing that socket kills the shell's session. Reply:
+    /// [`ReplyBody::Done`] once the socket is up; `invalid_input` past
+    /// [`MAX_PTYS`] of the member's.
+    #[serde(rename = "pty.open")]
+    PtyOpen {
+        /// Request id.
+        id: u64,
+        /// Names the terminal on [`PtyHello`]; chosen by the kernel, 1–64
+        /// ASCII letters and digits.
+        pty_id: String,
+        /// Whose worktree of which repo.
+        tree: EditorTree,
+        /// Width in characters, 1–1000.
+        cols: u16,
+        /// Height in characters, 1–1000.
+        rows: u16,
+    },
+}
+
+/// Most terminals one member has open on one host.
+pub const MAX_PTYS: usize = 5;
+
+/// Largest PTY window side, in characters.
+pub const MAX_PTY_SIDE: u16 = 1000;
+
+/// First (text) message of a `GET /host/pty` socket.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtyHello {
+    /// The host's id from enrolment.
+    pub host_id: HostId,
+    /// The host's secret key from enrolment.
+    pub host_key: String,
+    /// The terminal, from [`KernelFrame::PtyOpen`].
+    pub pty_id: String,
+}
+
+/// A text message on a terminal socket; binary messages are the PTY's bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PtyControl {
+    /// Kernel → host: the window changed (1–[`MAX_PTY_SIDE`] each).
+    Resize {
+        /// Width in characters.
+        cols: u16,
+        /// Height in characters.
+        rows: u16,
+    },
+    /// Host → kernel, last before close: the shell exited.
+    Exit {
+        /// Its exit code; `None` when a signal ended it.
+        code: Option<i32>,
+    },
+}
+
+impl PtyControl {
+    /// `Err` unless both sides of a window are 1–[`MAX_PTY_SIDE`].
+    pub fn check_size(cols: u16, rows: u16) -> crate::Result<()> {
+        let fits = |side: u16| (1..=MAX_PTY_SIDE).contains(&side);
+        match fits(cols) && fits(rows) {
+            true => Ok(()),
+            false => Err(Error::InvalidInput(format!(
+                "a terminal is 1 to {MAX_PTY_SIDE} columns and rows, not {cols}x{rows}"
+            ))),
+        }
+    }
 }
 
 /// Largest file the editor reads or writes, in bytes (2 MiB).
@@ -1004,7 +1073,7 @@ pub enum ReplyBody {
     },
     /// `session.send`, `session.stop`, `worktree.write`, `device.input`,
     /// `preview.start`, `preview.stop`, `fs.create`, `fs.rename`,
-    /// `fs.delete`: done.
+    /// `fs.delete`, `pty.open`: done.
     Done,
     /// `probe`.
     Alive {
@@ -1288,6 +1357,47 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn pty_frames_are_tagged_and_checked() {
+        let tree = EditorTree {
+            repo_id: RepoId::generate(),
+            member_id: MemberId::generate(),
+        };
+        let open = KernelFrame::PtyOpen {
+            id: 4,
+            pty_id: "01ABC".into(),
+            tree,
+            cols: 80,
+            rows: 24,
+        };
+        let json = serde_json::to_value(&open).unwrap();
+        assert_eq!(json["type"], "pty.open");
+        assert_eq!(serde_json::from_value::<KernelFrame>(json).unwrap(), open);
+        let resize: PtyControl =
+            serde_json::from_str(r#"{"kind":"resize","cols":100,"rows":30}"#).unwrap();
+        assert_eq!(
+            resize,
+            PtyControl::Resize {
+                cols: 100,
+                rows: 30
+            }
+        );
+        let exit = serde_json::to_string(&PtyControl::Exit { code: Some(3) }).unwrap();
+        assert_eq!(exit, r#"{"kind":"exit","code":3}"#);
+        for bad in [
+            r#"{"kind":"resize","cols":100}"#,
+            r#"{"kind":"resize","cols":1,"rows":1,"x":1}"#,
+            r#"{"kind":"resize","cols":70000,"rows":1}"#,
+            r#"{"kind":"kill"}"#,
+        ] {
+            assert!(serde_json::from_str::<PtyControl>(bad).is_err(), "{bad}");
+        }
+        assert!(PtyControl::check_size(1, MAX_PTY_SIDE).is_ok());
+        for (cols, rows) in [(0, 24), (80, 0), (MAX_PTY_SIDE + 1, 24)] {
+            assert!(PtyControl::check_size(cols, rows).is_err());
+        }
     }
 
     #[test]
