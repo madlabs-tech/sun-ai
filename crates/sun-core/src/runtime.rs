@@ -617,6 +617,30 @@ fn plain_name(value: &str, extra: &str) -> bool {
 /// of their binary when it is set, so the CLI never runs on the host.
 pub const EXEC_SHIMS_ENV: &str = "SUN_EXEC_SHIMS";
 
+/// The `SUN_*` variables in this process's own environment. A host never
+/// hands them on to what it starts (agent sessions, terminals, execs,
+/// previews): under `sun serve --with-host` that environment is the
+/// kernel's, with `SUN_MASTER_KEY`, `SUN_CLOUD_TOKEN` and the like.
+pub fn inherited_kernel_env() -> Vec<std::ffi::OsString> {
+    std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.to_str().is_some_and(|n| n.starts_with("SUN_")))
+        .collect()
+}
+
+/// Removes [`inherited_kernel_env`] from what `cmd` inherits, keeping the
+/// `SUN_*` variables `cmd` sets itself (a session's `SUN_MCP_TOKEN`, ...),
+/// in whatever order they were set.
+pub fn scrub_kernel_env(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    let own: Vec<std::ffi::OsString> = cmd.get_envs().map(|(name, _)| name.to_owned()).collect();
+    for name in inherited_kernel_env() {
+        if !own.contains(&name) {
+            cmd.env_remove(name);
+        }
+    }
+    cmd
+}
+
 /// File in the ecosystem skill store (`<data>/skills/`) mapping a skill to
 /// the runtime adapter ids that get it (`{"tdd": ["claude-code"]}`); a skill
 /// it doesn't list goes to every runtime. `sun-catalog` writes it, the

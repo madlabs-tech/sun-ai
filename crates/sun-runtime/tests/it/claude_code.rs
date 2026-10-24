@@ -243,6 +243,7 @@ case "$SUN_MODE" in
     echo '{"type":"result","is_error":false,"result":"one"}'
     echo '{"type":"result","is_error":false,"result":"two"}' ;;
   secret) echo "{\"type\":\"result\",\"is_error\":false,\"result\":\"key is $API_TOKEN\"}" ;;
+  env) env > "$SUN_OUT.env"; cat "$SUN_FIXTURE" ;;
   *) cat "$SUN_FIXTURE" ;;
 esac
 exit "${SUN_EXIT:-0}"
@@ -628,5 +629,61 @@ async fn every_permission_mode_reaches_the_cli() {
             args.contains(&format!("--permission-mode {flag} ")),
             "{mode}: {args}"
         );
+    }
+}
+
+/// Set in the child process [`a_session_never_sees_the_hosts_sun_env`] starts.
+const CHILD: &str = "SCRUB_CHILD";
+
+/// The child's half: a session whose CLI writes `env` to `out.env`, printed.
+#[tokio::test]
+async fn env_child() {
+    if std::env::var_os(CHILD).is_none() {
+        return;
+    }
+    let dir = sandbox("env");
+    let adapter = ClaudeCode::new(dir.join("claude"));
+    let fixture = format!("{}/normal.jsonl", fixtures());
+    let spec = spec(&dir, &[("SUN_FIXTURE", &fixture), ("SUN_MODE", "env")]);
+    let handle = adapter.start(spec).await.unwrap();
+    collect(adapter.events(&handle)).await;
+    let env = std::fs::read_to_string(dir.join("out.env")).unwrap();
+    println!("ENV<<<{env}>>>ENV");
+}
+
+/// Under `sun serve --with-host` the host's environment is the kernel's: a
+/// session's CLI gets none of its `SUN_*` variables (`SUN_MASTER_KEY`), only
+/// the ones its spec sets, and everything else as before.
+#[test]
+fn a_session_never_sees_the_hosts_sun_env() {
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "claude_code::env_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, "1")
+        .env("SUN_MASTER_KEY", "kernel-master-key")
+        .env("SUN_CLOUD_TOKEN", "kernel-cloud-token")
+        .env("PLAIN_VAR", "kept")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_, rest) = stdout.split_once("ENV<<<").expect("the child printed env");
+    let (env, _) = rest.split_once(">>>ENV").unwrap();
+    assert!(env.contains("PLAIN_VAR=kept"), "{env}");
+    assert!(
+        env.contains("SUN_MODE=env"),
+        "the spec's own SUN_ vars stay: {env}"
+    );
+    for secret in ["SUN_MASTER_KEY", "kernel-master-key", "kernel-cloud-token"] {
+        assert!(!env.contains(secret), "the session sees {secret}: {env}");
     }
 }

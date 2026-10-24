@@ -6,7 +6,9 @@
 //! The shell runs as the host's service user (`sun` on Linux installs) with
 //! that user's files, network and environment: a terminal is the host.
 //! Its environment is the host's own, as task sessions get it (so `claude`
-//! is on `PATH` the same way), plus `TERM=xterm-256color`. When the socket
+//! is on `PATH` the same way), minus the host's `SUN_*` variables (under
+//! `sun serve --with-host` the kernel's, `SUN_MASTER_KEY` among them), plus
+//! `TERM=xterm-256color`. When the socket
 //! closes, or the kernel goes silent for [`HostConfig::liveness`], the
 //! shell's whole session is killed; when the shell exits, its session goes
 //! too and the exit code is the socket's last message. Nothing typed or
@@ -115,13 +117,20 @@ impl Host {
     }
 }
 
-/// The shell on a new PTY of `cols`×`rows`, in `cwd`, leading its own session.
+/// The shell on a new PTY of `cols`×`rows`, in `cwd`, leading its own
+/// session, without the host's own `SUN_*` variables
+/// ([`sun_core::inherited_kernel_env`]).
 fn spawn(cwd: &Path, cols: u16, rows: u16) -> Result<(pty_process::Pty, tokio::process::Child)> {
     let failed = |e: pty_process::Error| Error::Unavailable(format!("terminal: {e}"));
     let (pty, pts) = pty_process::open().map_err(failed)?;
     pty.resize(pty_process::Size::new(rows, cols))
         .map_err(failed)?;
-    let child = pty_process::Command::new(shell())
+    let command = sun_core::inherited_kernel_env()
+        .into_iter()
+        .fold(pty_process::Command::new(shell()), |cmd, name| {
+            cmd.env_remove(name)
+        });
+    let child = command
         .current_dir(cwd)
         .env("TERM", "xterm-256color")
         .env("COLORTERM", "truecolor")
@@ -257,4 +266,84 @@ async fn kill_session(sid: Option<u32>) {
         .stderr(Stdio::null())
         .status()
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Set in the child process [`with_kernel_env`] starts.
+    const CHILD: &str = "SCRUB_CHILD";
+
+    /// Runs this binary's test `name` again in a child process whose own
+    /// environment holds kernel secrets, as `sun serve --with-host`'s does,
+    /// and a plain variable; the child's stdout.
+    fn with_kernel_env(name: &str) -> String {
+        let exe = std::env::current_exe().expect("test binary");
+        let out = std::process::Command::new(exe)
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .env("SUN_MASTER_KEY", "kernel-master-key")
+            .env("SUN_CLOUD_TOKEN", "kernel-cloud-token")
+            .env("PLAIN_VAR", "kept")
+            .output()
+            .expect("the child test runs");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            out.status.success(),
+            "{stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout
+    }
+
+    /// The child's half: `env` in a terminal and in an exec, printed.
+    #[tokio::test]
+    async fn env_child() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        let cwd = std::env::temp_dir();
+        let (mut pty, mut child) = spawn(&cwd, 200, 50).expect("a terminal");
+        pty.write_all(b"env; exit\n").await.expect("typed");
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        // Linux answers EIO once the shell is gone.
+        while let Ok(Ok(n @ 1..)) =
+            tokio::time::timeout(Duration::from_secs(10), pty.read(&mut chunk)).await
+        {
+            seen.extend_from_slice(&chunk[..n]);
+        }
+        let _ = child.wait().await;
+        println!("PTY<<<{}>>>PTY", String::from_utf8_lossy(&seen));
+        let request = sun_core::host_protocol::ExecRequest {
+            cwd,
+            command: "env".into(),
+            env: [("SUN_GIVEN".to_owned(), "explicit".to_owned())].into(),
+            timeout_s: 10,
+        };
+        let exec = crate::process::exec(&request).await.expect("exec");
+        println!("EXEC<<<{}>>>EXEC", exec.output);
+    }
+
+    #[test]
+    fn terminals_and_execs_never_see_the_kernel_env() {
+        let out = with_kernel_env("terminal::tests::env_child");
+        let part = |tag: &str| {
+            let (_, rest) = out.split_once(&format!("{tag}<<<")).expect(tag);
+            let (seen, _) = rest.split_once(&format!(">>>{tag}")).expect(tag);
+            seen.to_owned()
+        };
+        for (tag, seen) in [("PTY", part("PTY")), ("EXEC", part("EXEC"))] {
+            assert!(
+                seen.contains("PLAIN_VAR=kept"),
+                "{tag} inherits the rest: {seen}"
+            );
+            for secret in ["SUN_MASTER_KEY", "kernel-master-key", "kernel-cloud-token"] {
+                assert!(!seen.contains(secret), "{tag} shows {secret}: {seen}");
+            }
+        }
+        // Its own `SUN_*` (redacted in the output, being a secret) stays.
+        assert!(part("EXEC").contains("SUN_GIVEN="), "{out}");
+    }
 }

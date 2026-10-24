@@ -188,7 +188,8 @@ impl Process {
     /// Spawns `cmd` and starts reading it. `first_input` (one line, without
     /// the newline) is written to stdin; with `None` stdin is closed. Either
     /// way the session starts with one open turn. `secrets` are redacted from
-    /// every event.
+    /// every event. The host's own `SUN_*` variables are not passed on
+    /// ([`sun_core::scrub_kernel_env`]).
     pub async fn spawn(
         cli: &'static str,
         mut cmd: Command,
@@ -196,6 +197,7 @@ impl Process {
         first_input: Option<String>,
         secrets: Vec<String>,
     ) -> Result<Self> {
+        sun_core::scrub_kernel_env(cmd.as_std_mut());
         cmd.stdin(if first_input.is_some() {
             std::process::Stdio::piped()
         } else {
