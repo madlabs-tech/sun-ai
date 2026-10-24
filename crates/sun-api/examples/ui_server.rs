@@ -3,6 +3,9 @@
 //!
 //! Real store (temp dir), engine, queue and API, the embedded UI at `/`, token
 //! `test-token`, and one approval-only workflow so a task needs no host.
+//! For the editor (`web/tests/editor.real.spec.ts`): a second host,
+//! `editor-box`, that a real `sun-host` serves (`box` never connects), and
+//! the repo `fixture` in Main (a local git repo, see [`fixture_repo`]).
 //! `cargo run -p sun-api --example ui_server` (address: `SUN_UI_ADDR`, default
 //! `127.0.0.1:7799`).
 #![allow(clippy::unwrap_used, clippy::expect_used)] // test helper
@@ -12,12 +15,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sun_api::{Api, ApiConfig, HostHub};
 use sun_core::entitlement::{Entitlement, EntitlementProvider, EntitlementStatus, Plan};
 use sun_core::model::Host;
 use sun_core::{HostId, ModCall, ModLink, Result, WorkspaceId};
 use sun_engine::{Engine, EngineConfig, Principal, Queue, QueueConfig, Slot, WatchdogConfig};
-use sun_store::{HostRepo, Store, WorkspaceItem, WorkspaceRepo};
+use sun_store::{HostRepo, RepoRepo, Store, WorkspaceItem, WorkspaceRepo};
 
 const WORKFLOW: &str = "
 name: review-by-a-person
@@ -71,6 +75,29 @@ async fn main() {
     tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(host))
         .await
         .unwrap();
+    let editor_host = HostId::generate();
+    tx.insert_host(&Host {
+        id: editor_host,
+        name: "editor-box".into(),
+        capabilities: json!({}),
+        enrolled_by: None,
+    })
+    .await
+    .unwrap();
+    tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(editor_host))
+        .await
+        .unwrap();
+    tx.insert_repo(&sun_core::model::Repo {
+        id: sun_core::RepoId::generate(),
+        workspace_id: WorkspaceId::MAIN,
+        url: fixture_repo(&dir.path().join("fixture")),
+        default_branch: "main".into(),
+        gate_config: json!({}),
+        description: "Editor fixture".into(),
+        hook_id: None,
+    })
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
 
     let hosts = HostHub::default();
@@ -127,6 +154,50 @@ async fn main() {
     engine.set_own_password(owner.id, &hash).await.unwrap();
     let app = sun_api::router(api);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let editor =
+        sun_host::Host::open(sun_host::HostConfig::new(dir.path().join("host")), vec![]).unwrap();
+    let host_key: String = Sha256::digest(format!("host-secret:{editor_host}").as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    tokio::spawn(editor.run(sun_host::Credentials {
+        kernel_url: format!("ws://{addr}/host"),
+        host_id: editor_host,
+        host_key,
+    }));
     println!("sun-api ui_server on http://{addr}/ (sign in as me@example.com / test-token)");
     axum::serve(listener, app).await.unwrap();
+}
+
+/// A git repo at `dir` on `main` → its path: `README.md`, `src/greet.ts`,
+/// `escape.txt` (a symlink out of the repo, which the host refuses) and
+/// `near_limit.txt` (2 MiB exactly: one more byte can't be saved).
+fn fixture_repo(dir: &std::path::Path) -> String {
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("README.md"), "# Fixture repo\n").unwrap();
+    std::fs::write(
+        dir.join("src/greet.ts"),
+        "export const greet = (name: string) => `Hello, ${name}`;\n",
+    )
+    .unwrap();
+    // An existing target (a missing one would be a 404, not the 422 the spec expects).
+    let outside = dir.with_file_name("outside.txt");
+    std::fs::write(&outside, "outside\n").unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("escape.txt")).unwrap();
+    let line = format!("{}\n", "a".repeat(1023));
+    std::fs::write(dir.join("near_limit.txt"), line.repeat(2 * 1024)).unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["add", "."],
+        &["commit", "-q", "-m", "fixture"],
+    ] {
+        let ok = std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(ok.success(), "git {args:?}");
+    }
+    dir.to_str().unwrap().to_owned()
 }
