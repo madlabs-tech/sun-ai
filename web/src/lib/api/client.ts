@@ -120,6 +120,8 @@ export class ApiFailure extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /** The whole reply, for errors that carry more than `error` (a save conflict's `current`). */
+    readonly data: unknown = null,
   ) {
     super(message);
   }
@@ -147,6 +149,7 @@ export async function request<T>(method: string, path: string, body?: unknown, h
       error?.code ?? 'http_error',
       error?.message ??
         (status === 404 ? 'This kernel can’t do that yet. Update sun.' : `The kernel answered ${status}. Check that sun is running.`),
+      data,
     );
   }
   return data as T;

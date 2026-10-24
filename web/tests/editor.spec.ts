@@ -1,6 +1,6 @@
 // The repo editor (#/editor/<repo_id>) against the in-memory API: open it from Settings → Code, browse the
 // lazily loaded tree, edit and save a file that is still there after a reload, create and delete files, a
-// save conflict, the 2 MB / binary notices, and a viewer who may only read.
+// save conflict (changed or deleted), a save over 2 MB, the 2 MB / binary notices, and a viewer who may only read.
 import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 
 const API_REPO = '01JAR000100000000000000000';
@@ -116,6 +116,58 @@ test('a file changed on disk since it was opened asks to reload or overwrite', a
   await page.reload();
   await entry(page, 'README.md').click();
   await expect(code(page)).toContainText('Mine. Theirs. # Sample repo');
+});
+
+/** Someone deletes README.md in another tab. */
+async function delete_elsewhere(context: BrowserContext) {
+  const other = await context.newPage();
+  await open(other);
+  await other.getByRole('button', { name: 'Actions for README.md' }).click();
+  await other.getByRole('menuitem', { name: 'Delete' }).click();
+  await dialog(other, 'Delete file?').getByRole('button', { name: 'Delete' }).click();
+  await expect(entry(other, 'README.md')).toHaveCount(0);
+  await other.close();
+}
+
+test('a file deleted on disk since it was opened offers to recreate it or close the tab', async ({ page, context }) => {
+  await open(page);
+  await entry(page, 'README.md').click();
+  await expect(code(page)).toContainText('# Sample repo');
+  const deleted = dialog(page, 'The file was deleted');
+
+  await delete_elsewhere(context);
+  await code(page).click();
+  await page.keyboard.press('ControlOrMeta+Home');
+  await page.keyboard.type('Mine. ');
+  await page.keyboard.press('ControlOrMeta+s');
+  await expect(deleted).toContainText('README.md was deleted since you opened it.');
+  await deleted.getByRole('button', { name: 'Recreate' }).click();
+  await expect(deleted).toHaveCount(0);
+  await expect(tab(page, 'README.md').getByRole('img', { name: 'Unsaved changes' })).toHaveCount(0);
+  await page.reload();
+  await entry(page, 'README.md').click();
+  await expect(code(page)).toContainText('Mine. # Sample repo');
+
+  await delete_elsewhere(context);
+  await code(page).click();
+  await page.keyboard.type('Again. ');
+  await page.keyboard.press('ControlOrMeta+s');
+  await deleted.getByRole('button', { name: 'Close tab' }).click();
+  await expect(deleted).toHaveCount(0);
+  await expect(tab(page, 'README.md')).toHaveCount(0);
+});
+
+test('a save over 2 MiB is a toast saying so, and the edit is kept', async ({ page }) => {
+  await open(page);
+  await entry(page, 'README.md').click();
+  await expect(code(page)).toContainText('# Sample repo');
+  await code(page).click();
+  await page.keyboard.press('ControlOrMeta+a');
+  await page.keyboard.insertText('a'.repeat(2 * 1024 * 1024 + 1));
+  await page.keyboard.press('ControlOrMeta+s');
+  const toast = page.locator('.sun-toasts').getByRole('status').filter({ hasText: 'Couldn’t save README.md' });
+  await expect(toast).toContainText('This file is over 2 MB, too large to save here.');
+  await expect(tab(page, 'README.md').getByRole('img', { name: 'Unsaved changes' })).toBeVisible();
 });
 
 test('files over 2 MB and binary files show a read-only notice', async ({ page }) => {

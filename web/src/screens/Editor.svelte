@@ -1,8 +1,8 @@
 <!-- Repo editor (#/editor/<repo_id>): the caller's worktree of a workspace repo on one of its online hosts.
      The file tree loads one level per expand; files open in CodeMirror tabs (a dot marks unsaved ones) and
      ⌘S / Ctrl+S saves. A save sends the hash the file was read with, so a file changed on disk since asks to
-     reload or overwrite. Files over 2 MB and binary files show a notice instead. With more than one online
-     host a picker shows; the last host per repo is remembered. Without `editor.write` (`GET …/editor/me`)
+     reload or overwrite, and one deleted since to recreate it or close the tab. Files over 2 MB and binary
+     files show a notice instead. With more than one online host a picker shows; the last host per repo is remembered. Without `editor.write` (`GET …/editor/me`)
      it is a viewer: no save, create, rename or delete, and a Read-only badge. With `terminal`, Ctrl+` (or the
      Terminal button) toggles the bottom terminal panel. ⌘/Ctrl+P opens quick open, ⌘/Ctrl+Shift+P its commands. -->
 <script lang="ts">
@@ -145,8 +145,8 @@
 
   const doc_of = (tab: Tab) => (tab.path === active && view ? view.state.doc : (tab.state as EditorState).doc);
 
-  /** The path of the tab whose save hit a file changed on disk. */
-  let conflict = $state('');
+  /** The tab whose save hit a file changed (or deleted: the 409's `current` is null) on disk. */
+  let conflict = $state<{ path: string; deleted: boolean } | null>(null);
   async function save(tab: Tab, overwrite = false) {
     if (!can_write || !tab.state) return;
     const doc = doc_of(tab);
@@ -155,15 +155,18 @@
       Object.assign(tab.file, stat);
       tab.saved = doc;
       tab.dirty = !doc_of(tab).eq(doc);
-      conflict = '';
+      conflict = null;
     } catch (e) {
-      if (e instanceof ApiFailure && e.code === 'conflict') conflict = tab.path;
+      if (e instanceof ApiFailure && e.code === 'conflict')
+        conflict = { path: tab.path, deleted: (e.data as { current?: unknown } | null)?.current === null };
+      // The kernel's body limit answers 413 in plain text, with no message of its own.
+      else if (e instanceof ApiFailure && e.status === 413) toast('danger', `Couldn’t save ${tab.path}`, 'This file is over 2 MB, too large to save here.');
       else toast('danger', `Couldn’t save ${tab.path}`, error_text(e));
     }
   }
 
   async function reload(tab: Tab) {
-    conflict = '';
+    conflict = null;
     try {
       const [file, language] = await fetch_file(tab.path);
       tab.file = file;
@@ -433,10 +436,19 @@
   <QuickOpen query={palette} paths={index} {commands} onopen={open_file} onclose={() => (palette = null)} />
 {/if}
 
-{#if conflict}
-  {@const tab = tabs.find((t) => t.path === conflict)}
-  <Dialog open onclose={() => (conflict = '')} title="The file changed on disk">
-    <p class="note">{conflict} changed since you opened it. Reload it and lose your edits, or overwrite it with yours.</p>
+{#if conflict?.deleted}
+  {@const tab = tabs.find((t) => t.path === conflict?.path)}
+  <Dialog open onclose={() => (conflict = null)} title="The file was deleted">
+    <p class="note">{conflict.path} was deleted since you opened it. Recreate it with your edits, or close the tab and lose them.</p>
+    {#snippet footer()}
+      <Button variant="secondary" onclick={() => { if (tab) close(tab, true); conflict = null; }}>Close tab</Button>
+      <Button variant="ice" onclick={() => tab && save(tab, true)}>Recreate</Button>
+    {/snippet}
+  </Dialog>
+{:else if conflict}
+  {@const tab = tabs.find((t) => t.path === conflict?.path)}
+  <Dialog open onclose={() => (conflict = null)} title="The file changed on disk">
+    <p class="note">{conflict.path} changed since you opened it. Reload it and lose your edits, or overwrite it with yours.</p>
     {#snippet footer()}
       <Button variant="secondary" onclick={() => tab && reload(tab)}>Reload</Button>
       <Button variant="danger" onclick={() => tab && save(tab, true)}>Overwrite</Button>
