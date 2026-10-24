@@ -267,15 +267,21 @@ test('a viewer without a grant gets 403 and a read-only page that says why', asy
 
   const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
   const { at } = await sign_in(page, who);
+  // The kernel refuses the viewer's editor calls.
   expect((await page.request.post(at('open'), { data: {} })).status()).toBe(403);
-  // The page reads `editor/me` first, so it never asks to open the worktree.
-  const opens: string[] = [];
-  page.on('request', (r) => r.url().includes('/editor/open?') && opens.push(r.url()));
+  expect((await page.request.get(at('tree'))).status()).toBe(403);
+  // The page reads `editor/me` first, so it never asks the kernel for anything else of the editor.
+  const editor_calls: string[] = [];
+  page.on('request', (r) => {
+    if (r.url().includes('/editor/') && !r.url().includes('/editor/me')) editor_calls.push(`${r.method()} ${r.url()}`);
+  });
   await open_editor(page, repo);
   await expect(page.getByText('Read-only')).toBeVisible();
   await expect(page.getByRole('alert')).toHaveText('You don’t have access to this repository’s editor. Ask a workspace owner or admin to grant it.');
   await expect(tree(page)).toHaveCount(0);
-  expect(opens).toEqual([]);
+  await expect(page.getByRole('button', { name: 'Save' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Terminal', exact: true })).toHaveCount(0);
+  expect(editor_calls).toEqual([]);
   await page.context().close();
   await owner.dispose();
 });

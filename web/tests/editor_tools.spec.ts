@@ -118,14 +118,17 @@ test('⌘/Ctrl+P finds a file by part of its name; Enter opens it', async ({ pag
   await expect(page.getByRole('tab', { name: 'greet.ts' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.locator('.cm-content')).toContainText('export const greet');
 
-  // Arrow keys move; Escape closes.
+  // Arrow keys move; Escape closes. The keys go to the palette's input, not the file just opened.
   await page.keyboard.press('ControlOrMeta+p');
+  await expect(palette.getByRole('combobox', { name: 'File name' })).toBeFocused();
   await page.keyboard.type('ts');
+  await expect(palette.getByRole('combobox', { name: 'File name' })).toHaveValue('ts');
   await expect(palette.getByRole('option').nth(1)).toBeVisible();
   await page.keyboard.press('ArrowDown');
   await expect(palette.getByRole('option').nth(1)).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('Escape');
   await expect(palette).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'greet.ts' }).getByRole('img', { name: 'Unsaved changes' })).toHaveCount(0);
 });
 
 test('⌘/Ctrl+Shift+P lists commands; a typed > does the same', async ({ page }) => {
