@@ -77,7 +77,8 @@ pub(crate) struct EditorEvent<'a> {
     /// `file.write`, `file.create`, `file.rename`, `file.delete`,
     /// `terminal.open` or `terminal.close`.
     pub(crate) action: &'static str,
-    /// Repo-relative; a rename's is `<from> -> <to>`; empty for a terminal.
+    /// Repo-relative; a rename's is `<from> -> <to>`; empty for a
+    /// terminal's open, `after <N>s` for its close.
     pub(crate) path: &'a str,
 }
 

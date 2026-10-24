@@ -12,7 +12,7 @@ use sun_store::MemberRepo;
 use crate::common::{kernel, local_repo};
 use crate::workspaces::{call, call_as, member_token_in};
 
-async fn member_id(store: &sun_store::Store, name: &str) -> String {
+pub(crate) async fn member_id(store: &sun_store::Store, name: &str) -> String {
     let mut read = store.read().await.unwrap();
     let email = format!("{name}@corp.io");
     read.member_by_email(&email)
