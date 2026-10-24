@@ -595,7 +595,8 @@ pub(crate) async fn sign_out(State(api): State<Api>, headers: HeaderMap) -> ApiR
 /// (`memberships`), whether they are a deployment owner (`is_owner`) and
 /// proved their email (`email_verified`), the role view they picked, and
 /// what they must do first (`needs_email`, `must_set_password`,
-/// `must_enroll_two_step`). For the token holder, `needs_email` asks
+/// `must_enroll_two_step`), and whether the bypass and terminal policies let
+/// them (`can_bypass`, `can_terminal`; a terminal also needs its grant). For the token holder, `needs_email` asks
 /// onboarding for the owner's email.
 pub(crate) async fn me(
     State(api): State<Api>,
@@ -615,6 +616,7 @@ pub(crate) async fn me(
         "must_enroll_two_step": caller.must_enroll_two_step,
         "view_role": view_role,
         "can_bypass": crate::bypass::can_bypass(&api, &caller).await?,
+        "can_terminal": crate::groups::can_terminal(&api, &caller).await?,
     })))
 }
 
