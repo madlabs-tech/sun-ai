@@ -3746,7 +3746,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sun-api"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "argon2",
  "async-trait",
@@ -3786,7 +3786,7 @@ dependencies = [
 
 [[package]]
 name = "sun-catalog"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "rust-embed",
  "serde",
@@ -3799,7 +3799,7 @@ dependencies = [
 
 [[package]]
 name = "sun-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "sun-context"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3861,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "sun-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3875,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "sun-engine"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3900,7 +3900,7 @@ dependencies = [
 
 [[package]]
 name = "sun-host"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -3921,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "sun-mod"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "ed25519-dalek 3.0.0",
@@ -3946,7 +3946,7 @@ dependencies = [
 
 [[package]]
 name = "sun-mod-sdk"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -3955,7 +3955,7 @@ dependencies = [
 
 [[package]]
 name = "sun-runtime"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3971,7 +3971,7 @@ dependencies = [
 
 [[package]]
 name = "sun-store"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "chacha20poly1305",
@@ -3991,7 +3991,7 @@ dependencies = [
 
 [[package]]
 name = "sun-workflow"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde-saphyr",
