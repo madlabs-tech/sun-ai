@@ -234,8 +234,11 @@ pub(crate) fn delete(root: &Path, relative: &str) -> Result<()> {
     .map_err(fs_error(relative))
 }
 
-/// The plain parts of `relative`: no root, prefix, `..` or `.git`.
+/// The plain parts of `relative`: no root, prefix, `..`, `.git` or NUL.
 fn lexical(relative: &str) -> Result<Vec<&std::ffi::OsStr>> {
+    if relative.contains('\0') {
+        return Err(Error::InvalidInput("a path can't hold a NUL".into()));
+    }
     let mut parts = Vec::new();
     for part in Path::new(relative).components() {
         match part {
@@ -253,11 +256,34 @@ fn lexical(relative: &str) -> Result<Vec<&std::ffi::OsStr>> {
 
 /// `relative` canonicalized (symlinks followed), which must exist and be
 /// under `root` and outside `.git`.
+///
+/// A path that doesn't resolve is judged by its longest part that does,
+/// and a dangling symlink on the way counts as outside: so every path
+/// behind a symlink out of the root fails the same, whether or not
+/// something exists there, and the host's disk can't be probed.
 fn existing(root: &Path, relative: &str) -> Result<PathBuf> {
     let joined = lexical(relative)?
         .into_iter()
         .fold(root.to_path_buf(), |p, part| p.join(part));
-    let canonical = joined.canonicalize().map_err(fs_error(relative))?;
+    match joined.canonicalize() {
+        Ok(canonical) => confined(root, canonical, relative),
+        Err(e) => {
+            for ancestor in joined.ancestors() {
+                if let Ok(canonical) = ancestor.canonicalize() {
+                    confined(root, canonical, relative)?;
+                    break;
+                }
+                if ancestor.is_symlink() {
+                    return Err(outside(relative));
+                }
+            }
+            Err(fs_error(relative)(e))
+        }
+    }
+}
+
+/// `canonical` if it is under `root` and outside `.git`.
+fn confined(root: &Path, canonical: PathBuf, relative: &str) -> Result<PathBuf> {
     let inside = canonical
         .strip_prefix(root)
         .map_err(|_| outside(relative))?;
@@ -444,6 +470,65 @@ mod tests {
             ]
         );
         assert!(entries[1].collapsed && !entries[0].collapsed);
+    }
+
+    #[test]
+    fn a_symlink_out_does_not_reveal_what_exists_outside() {
+        let (_dir, root, outside) = setup();
+        symlink(&outside, root.join("out_dir")).unwrap();
+        symlink(outside.join("missing"), root.join("dangling")).unwrap();
+        symlink("nowhere", root.join("src/dangling_in")).unwrap();
+        for path in [
+            "out_dir/secret",
+            "out_dir/missing",
+            "out_dir/missing/deeper",
+            "out_dir/secret/not_a_dir",
+            "dangling",
+            "dangling/deeper",
+            "src/dangling_in",
+        ] {
+            assert!(invalid(read(&root, path)), "read {path}");
+            assert!(invalid(list(&root, path)), "list {path}");
+            assert!(invalid(write(&root, path, "x", None)), "write {path}");
+            let path_new = format!("{path}/new");
+            assert!(
+                invalid(create(&root, &path_new, FsKind::File)),
+                "create {path_new}"
+            );
+        }
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+        // A missing path inside the root is still just missing.
+        assert!(matches!(
+            read(&root, "src/missing"),
+            Err(Error::NotFound(_))
+        ));
+        assert!(matches!(
+            list(&root, "nope/deeper"),
+            Err(Error::NotFound(_))
+        ));
+        // And a dangling link itself can still be deleted.
+        delete(&root, "dangling").unwrap();
+    }
+
+    #[test]
+    fn a_nul_in_a_path_is_refused_everywhere() {
+        let (_dir, root, _outside) = setup();
+        let before = std::fs::read_dir(&root).unwrap().count();
+        for bad in ["src/main.rs\0", "\0", "src\0/x"] {
+            assert!(invalid(read(&root, bad)), "read {bad:?}");
+            assert!(invalid(list(&root, bad)), "list {bad:?}");
+            assert!(invalid(write(&root, bad, "x", None)), "write {bad:?}");
+            let hash = "0".repeat(64);
+            assert!(
+                invalid(write(&root, bad, "x", Some(&hash))),
+                "conditional write {bad:?}"
+            );
+            assert!(invalid(create(&root, bad, FsKind::File)), "create {bad:?}");
+            assert!(invalid(delete(&root, bad)), "delete {bad:?}");
+            assert!(invalid(rename(&root, "src/main.rs", bad)), "rename {bad:?}");
+        }
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), before);
+        assert!(root.join("src/main.rs").is_file());
     }
 
     #[test]
