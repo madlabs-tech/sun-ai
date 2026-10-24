@@ -74,6 +74,7 @@ macro_rules! string_enum {
 }
 
 mod chain;
+pub mod editor_grant;
 pub mod entitlement;
 mod error;
 mod event;

@@ -298,6 +298,15 @@ pub(crate) fn router(api: Api) -> Router {
             "/workspaces/{id}/members/{member}",
             put(auth::set_workspace_role).delete(auth::remove_workspace_member),
         )
+        // Who may use the editor on its repos: owners and admins.
+        .route(
+            "/workspaces/{id}/editor/grants",
+            get(crate::editor_access::list).post(crate::editor_access::create),
+        )
+        .route(
+            "/workspaces/{id}/editor/grants/{grant}",
+            delete(crate::editor_access::revoke),
+        )
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::EditMembers,
         ])));
@@ -445,6 +454,11 @@ pub(crate) fn router(api: Api) -> Router {
         // guard keeps everyone else out).
         .route("/workspaces/{id}/members", get(auth::workspace_members))
         .route("/workspaces/{id}/leave", post(auth::leave_workspace))
+        // Any member reads their own editor capabilities on a repo.
+        .route(
+            "/workspaces/{id}/repos/{repo_id}/editor/me",
+            get(crate::editor_access::mine),
+        )
         // The caller's own invitations.
         .route("/me/invitations", get(auth::my_invitations))
         .route("/invitations/{id}/accept", post(auth::accept_invitation))

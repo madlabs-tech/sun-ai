@@ -106,6 +106,8 @@ ulid_id!(
     AgentId,
     /// `pull_request.id` — a pull request mirrored from a git host.
     PullRequestId,
+    /// `editor_grant.id` — one editor capability granted in a workspace.
+    EditorGrantId,
 );
 
 impl WorkspaceId {

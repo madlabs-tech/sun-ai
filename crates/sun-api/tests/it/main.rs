@@ -16,6 +16,7 @@ mod credentials;
 mod device;
 mod direct_chats;
 mod editor;
+mod editor_grants;
 mod entitlement;
 mod features;
 mod isolation;
