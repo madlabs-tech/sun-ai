@@ -52,6 +52,7 @@ mod error;
 mod evals;
 mod features;
 mod groups;
+mod host_shares;
 mod hosts;
 mod knowledge;
 mod marketplace;

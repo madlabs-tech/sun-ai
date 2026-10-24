@@ -38,6 +38,7 @@ mod pull_requests;
 mod roles;
 mod route_matrix;
 mod runtimes_stage2;
+mod shared_hosts;
 mod task_lifecycle;
 mod tenancy;
 mod terminal;

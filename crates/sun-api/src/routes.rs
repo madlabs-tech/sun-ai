@@ -191,6 +191,7 @@ pub(crate) fn router(api: Api) -> Router {
             "/workspaces/{id}/hosts/{host}/reprobe",
             post(crate::hosts::reprobe_host),
         )
+        .route("/hosts/attachable", get(crate::host_shares::attachable))
         .route_layer(middleware::from_fn(auth::require(&[
             Permission::ManageRuntimes,
         ])));
@@ -333,9 +334,9 @@ pub(crate) fn router(api: Api) -> Router {
             Permission::ManageSettings,
         ])));
     // The deployment itself, for deployment owners only: its accounts, groups,
-    // mail, sign-in, security, audit, the kernel's own resources and sessions,
-    // mods, ecosystem and mod secrets, limits, dismissed catalog suggestions,
-    // usage and marketplace.
+    // mail, sign-in, security, audit, host shares, the kernel's own resources
+    // and sessions, mods, ecosystem and mod secrets, limits, dismissed catalog
+    // suggestions, usage and marketplace.
     let deployment = Router::new()
         .route(
             "/members",
@@ -351,6 +352,11 @@ pub(crate) fn router(api: Api) -> Router {
         .route("/members/{id}/activate", post(auth::activate_member))
         .route("/members/{id}/owner", put(auth::set_owner))
         .route("/kernel", get(crate::hosts::kernel))
+        .route("/hosts/{id}/shares", get(crate::host_shares::list))
+        .route(
+            "/hosts/{id}/shares/{group}",
+            put(crate::host_shares::put).delete(crate::host_shares::delete),
+        )
         .route("/sessions/{id}/kill", post(crate::hosts::kill_session))
         .route("/marketplace/listings", get(crate::marketplace::listings))
         .route(
