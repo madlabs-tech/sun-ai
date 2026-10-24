@@ -10,7 +10,8 @@ permissions:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    # pinned: sun-mod sandbox fails on 26.04, see BLO-194
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       # rustup on the runner installs the toolchain pinned in rust-toolchain.toml.
@@ -24,7 +25,8 @@ jobs:
       - run: bash scripts/check-deps.sh
 
   web:
-    runs-on: ubuntu-latest
+    # pinned: sun-mod sandbox fails on 26.04, see BLO-194
+    runs-on: ubuntu-24.04
     permissions: { contents: read }
     defaults: { run: { working-directory: web } }
     steps:
