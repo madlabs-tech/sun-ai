@@ -315,14 +315,15 @@ fn serve_with_host_runs_the_default_workflow_to_done() {
     // The catalog is wired (without it `/catalog` answers 503).
     assert!(api.get("/catalog").unwrap()["entries"].is_array());
 
-    // The in-process host enrolled itself and came online over loopback.
+    // The in-process host enrolled itself and came online over loopback,
+    // recorded as the kernel's own (sharing it needs a confirmation).
     wait_for("the local host", || {
         let hosts = api.get("/hosts").unwrap();
         hosts
             .as_array()
             .unwrap()
             .iter()
-            .any(|h| h["status"] == "online")
+            .any(|h| h["status"] == "online" && h["kernel"] == true)
             .then_some(hosts)
     });
 

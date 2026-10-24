@@ -484,7 +484,9 @@ fn write_address(data_dir: &Path, addr: SocketAddr) -> Result<()> {
 /// The fallback host: the queue places each run on a ready online host and
 /// uses this one only while no host has reported the runtime yet.
 /// `--with-host`: the local host, enrolled on first boot by writing its
-/// credentials (`host/host.json`) directly. Otherwise the oldest enrolled host.
+/// credentials (`host/host.json`) directly, and recorded as the kernel's own
+/// (`kernel_setting` [`sun_engine::KERNEL_HOST`]) so sharing it needs an
+/// explicit confirmation. Otherwise the oldest enrolled host.
 async fn placement_host(
     store: &Store,
     data_dir: &Path,
@@ -503,6 +505,11 @@ async fn placement_host(
             && credentials.host_key
                 == sun_api::host_key_for(&secrets.host_secret, credentials.host_id)
         {
+            if with_host {
+                let mut tx = store.begin().await?;
+                mark_kernel_host(&mut tx, credentials.host_id).await?;
+                tx.commit().await?;
+            }
             return Ok(credentials.host_id);
         }
     }
@@ -527,6 +534,7 @@ async fn placement_host(
     // owner attaches it to other workspaces (`PUT /workspaces/{id}/hosts/{host}`).
     tx.link(WorkspaceId::MAIN, WorkspaceItem::Host(host.id))
         .await?;
+    mark_kernel_host(&mut tx, host.id).await?;
     tx.commit().await?;
     let credentials = sun_host::Credentials {
         kernel_url: String::new(),
@@ -538,6 +546,13 @@ async fn placement_host(
         &serde_json::to_vec_pretty(&credentials)?,
     )?;
     Ok(host.id)
+}
+
+/// Records `host` as the one running inside the kernel.
+async fn mark_kernel_host(tx: &mut sun_store::Tx, host: HostId) -> Result<()> {
+    let id = serde_json::to_value(host)?;
+    tx.put_setting(sun_engine::KERNEL_HOST, &id).await?;
+    Ok(())
 }
 
 /// `SUN_TRUSTED_KEYS`: comma-separated hex keys a signed bundled package
