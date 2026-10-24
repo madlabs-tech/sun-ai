@@ -33,6 +33,11 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, "conflict", message)
     }
 
+    /// What the UI shows.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     pub(crate) fn unauthorized() -> Self {
         Self::new(
             StatusCode::UNAUTHORIZED,

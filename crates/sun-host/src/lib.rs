@@ -3,8 +3,8 @@
 //! **Responsibility:** runs agent sessions on a machine: worktrees, exec
 //! environments, processes and resource accounting, plus device verify on
 //! simulators and emulators, design-canvas dev servers on loopback
-//! (`preview.*`), and path-confined file operations in editor worktrees
-//! (`editor.open`, `fs.*`). Dials out to the kernel
+//! (`preview.*`), path-confined file operations in editor worktrees
+//! (`editor.open`, `fs.*`) and terminals in them (`pty.open`). Dials out to the kernel
 //! over WebSocket; the wire format is `sun_core::host_protocol`.
 //!
 //! **Contract:**
@@ -31,6 +31,7 @@ mod exec_env;
 mod host;
 mod preview;
 mod process;
+mod terminal;
 mod worktree;
 
 pub use connection::{Credentials, HostStatus, enroll, leave, status};

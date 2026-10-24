@@ -17,6 +17,9 @@
 //!
 //! Every call passes [`editor_access::require`] first (one call site:
 //! [`target`]); writes are recorded with [`editor_access::record`].
+//!
+//! `GET /workspaces/{id}/repos/{repo_id}/terminal` (a WebSocket) is
+//! [`crate::terminal`]'s; it passes [`target`] with `terminal` too.
 
 use std::time::Duration;
 
@@ -58,6 +61,10 @@ pub(crate) fn routes() -> Router<Api> {
                 .delete(delete),
         )
         .route(&format!("{BASE}/rename"), post(rename))
+        .route(
+            "/workspaces/{id}/repos/{repo_id}/terminal",
+            get(crate::terminal::connect),
+        )
 }
 
 /// `?host_id=&path=`.
@@ -82,16 +89,16 @@ pub(crate) struct Rename {
 }
 
 /// What a call acts on, once the caller may.
-struct Target {
-    workspace: WorkspaceId,
-    repo: Repo,
-    host: HostId,
-    tree: EditorTree,
+pub(crate) struct Target {
+    pub(crate) workspace: WorkspaceId,
+    pub(crate) repo: Repo,
+    pub(crate) host: HostId,
+    pub(crate) tree: EditorTree,
 }
 
 /// Checks the caller holds `cap`, then finds the repo on the workspace, the
 /// host attached to it and the caller's worktree; 404 for either missing.
-async fn target(
+pub(crate) async fn target(
     api: &Api,
     caller: &Caller,
     (workspace, repo): &(String, String),

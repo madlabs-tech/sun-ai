@@ -76,7 +76,7 @@ pub(crate) async fn live(
 
 /// Cross-site WebSocket hijacking guard: a browser `Origin` must be this
 /// host (the session cookie is `SameSite=Strict` too).
-fn same_origin(headers: &HeaderMap) -> ApiResult<()> {
+pub(crate) fn same_origin(headers: &HeaderMap) -> ApiResult<()> {
     let Some(origin) = headers.get(header::ORIGIN) else {
         return Ok(()); // not a browser
     };
@@ -92,7 +92,7 @@ fn same_origin(headers: &HeaderMap) -> ApiResult<()> {
         Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "forbidden",
-            "The device view only opens from Sun's own page.",
+            "This socket only opens from Sun's own page.",
         ))
     }
 }
@@ -270,7 +270,7 @@ async fn input(
 }
 
 /// The plain message of an error, without its kind prefix.
-fn message_of(error: &Error) -> String {
+pub(crate) fn message_of(error: &Error) -> String {
     match error {
         Error::InvalidInput(m) | Error::NotFound(m) | Error::Unavailable(m) => m.clone(),
         Error::Refused { message, .. } => message.clone(),

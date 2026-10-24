@@ -10,7 +10,9 @@
 FROM alpine:3.21
 # procps-ng: the kernel reads its own RSS/CPU with `ps -o rss=,%cpu= -p`, which
 # BusyBox's ps lacks (the Hosts page then shows `? RAM · ?% CPU`).
-RUN apk add --no-cache ca-certificates procps-ng \
+# tini: `sun` is not PID 1, so the orphans of a killed terminal or session
+# (reparented to PID 1) are reaped instead of piling up as zombies.
+RUN apk add --no-cache ca-certificates procps-ng tini \
 	&& adduser -D -u 1000 -h /var/lib/sun sun
 # The kernel looks for the mod sandbox launcher next to its own executable.
 COPY sun sun-mod-sandbox /usr/local/bin/
@@ -21,7 +23,7 @@ VOLUME /var/lib/sun
 EXPOSE 7700
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s \
 	CMD wget -q --spider http://127.0.0.1:7700/healthz || exit 1
-ENTRYPOINT ["sun", "serve"]
+ENTRYPOINT ["/sbin/tini", "--", "sun", "serve"]
 # The VPS profile (same as packaging/systemd/sun.service): no emulators on the
 # kernel box; device verify runs on a runtime host elsewhere.
 CMD ["--listen", "0.0.0.0:7700", "--with-host", "--no-devices"]

@@ -12,11 +12,12 @@ use sun_core::host_protocol::{
     RuntimeCapability, SessionStats,
 };
 use sun_core::{
-    Error, ExecEnvSpec, HostCtx, HostId, Result, RuntimeAdapter, SessionHandle, SessionId,
-    SessionSpec, Steer, StopMode, SunEvent,
+    Error, ExecEnvSpec, HostCtx, HostId, MemberId, Result, RuntimeAdapter, SessionHandle,
+    SessionId, SessionSpec, Steer, StopMode, SunEvent,
 };
 
 use crate::buffer::{self, Buffer};
+use crate::connection::Credentials;
 use crate::device::{DeviceConfig, Devices};
 use crate::editor;
 use crate::exec_env::{self, ExecEnv};
@@ -105,12 +106,16 @@ pub struct Host {
     pub(crate) config: HostConfig,
     adapters: BTreeMap<String, Arc<dyn RuntimeAdapter>>,
     pub(crate) buffer: Buffer,
-    worktrees: Worktrees,
+    pub(crate) worktrees: Worktrees,
     devices: Devices,
     previews: Previews,
     sessions: Mutex<HashMap<SessionId, Live>>,
     /// This host's id, once [`Host::run`] knows it (for readiness checks).
     pub(crate) host_id: OnceLock<HostId>,
+    /// Where and as whom terminals dial back, once [`Host::run`] knows it.
+    pub(crate) credentials: OnceLock<Credentials>,
+    /// Open terminals: `pty_id` → the member's (for [`sun_core::host_protocol::MAX_PTYS`]).
+    ptys: Mutex<HashMap<String, MemberId>>,
     /// The capabilities last reported on this connection; held while a
     /// probe runs, so reports never go out of order.
     reported: tokio::sync::Mutex<Option<Capabilities>>,
@@ -144,6 +149,8 @@ impl Host {
                 .collect(),
             sessions: Mutex::new(HashMap::new()),
             host_id: OnceLock::new(),
+            credentials: OnceLock::new(),
+            ptys: Mutex::new(HashMap::new()),
             reported: tokio::sync::Mutex::new(None),
             config,
         }))
@@ -151,6 +158,10 @@ impl Host {
 
     fn sessions(&self) -> MutexGuard<'_, HashMap<SessionId, Live>> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn ptys(&self) -> MutexGuard<'_, HashMap<String, MemberId>> {
+        self.ptys.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// What this host can run. Every adapter is probed at once.
@@ -244,7 +255,8 @@ impl Host {
             | KernelFrame::FsWrite { id, .. }
             | KernelFrame::FsCreate { id, .. }
             | KernelFrame::FsRename { id, .. }
-            | KernelFrame::FsDelete { id, .. } => *id,
+            | KernelFrame::FsDelete { id, .. }
+            | KernelFrame::PtyOpen { id, .. } => *id,
         };
         let host = Arc::clone(self);
         tokio::spawn(async move {
@@ -411,6 +423,16 @@ impl Host {
             }
             KernelFrame::FsDelete { tree, path, .. } => {
                 editor::delete(&self.worktrees.editor_root(&tree)?, &path)?;
+                ReplyBody::Done
+            }
+            KernelFrame::PtyOpen {
+                pty_id,
+                tree,
+                cols,
+                rows,
+                ..
+            } => {
+                self.open_pty(pty_id, tree, cols, rows).await?;
                 ReplyBody::Done
             }
             KernelFrame::Ack { .. }

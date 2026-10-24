@@ -40,7 +40,7 @@ use crate::{Api, auth, wire};
 use sun_core::entitlement::Quota;
 
 /// A host must send its first frame within this.
-const FIRST_FRAME: Duration = Duration::from_secs(10);
+pub(crate) const FIRST_FRAME: Duration = Duration::from_secs(10);
 /// Default wait for a reply.
 pub(crate) const REPLY: Duration = Duration::from_secs(60);
 /// `worktree.prepare` (and `editor.open`) may clone a repo.
@@ -105,7 +105,7 @@ struct Conn {
     generation: u64,
     out: mpsc::UnboundedSender<KernelFrame>,
     /// The host's protocol minor: 1+ speaks `reprobe` and `capabilities`,
-    /// 2+ `editor.open` and `fs.*`.
+    /// 2+ `editor.open` and `fs.*`, 3+ `pty.open`.
     minor: u32,
 }
 
@@ -267,10 +267,38 @@ impl HostHub {
         wait: Duration,
         frame: impl FnOnce(u64) -> KernelFrame,
     ) -> Result<ReplyBody> {
-        if self.state().conns.get(&host).is_some_and(|c| c.minor < 2) {
-            return Err(Error::Unavailable(
-                "this host's sun is too old for the editor; update it".into(),
-            ));
+        self.request_since(2, "the editor", host, wait, frame).await
+    }
+
+    /// [`Self::request`] for `pty.open`; `Unavailable` at once when the
+    /// host's sun predates terminals (protocol 2.3).
+    pub(crate) async fn terminal_request(
+        &self,
+        host: HostId,
+        wait: Duration,
+        frame: impl FnOnce(u64) -> KernelFrame,
+    ) -> Result<ReplyBody> {
+        self.request_since(3, "the terminal", host, wait, frame)
+            .await
+    }
+
+    async fn request_since(
+        &self,
+        minor: u32,
+        feature: &str,
+        host: HostId,
+        wait: Duration,
+        frame: impl FnOnce(u64) -> KernelFrame,
+    ) -> Result<ReplyBody> {
+        if self
+            .state()
+            .conns
+            .get(&host)
+            .is_some_and(|c| c.minor < minor)
+        {
+            return Err(Error::Unavailable(format!(
+                "this host's sun is too old for {feature}; update it"
+            )));
         }
         self.request(host, wait, frame).await
     }
@@ -681,7 +709,7 @@ async fn connection(api: Api, socket: WebSocket) {
 }
 
 /// `host_id` is enrolled here and `host_key` is its key.
-async fn authentic(api: &Api, host_id: HostId, host_key: &str) -> bool {
+pub(crate) async fn authentic(api: &Api, host_id: HostId, host_key: &str) -> bool {
     let key = host_key_for(&api.config.host_secret, host_id);
     api.engine.host(host_id).await.is_ok() && auth::same(host_key.as_bytes(), key.as_bytes())
 }

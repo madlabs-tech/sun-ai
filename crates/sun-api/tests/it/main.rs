@@ -38,6 +38,7 @@ mod route_matrix;
 mod runtimes_stage2;
 mod task_lifecycle;
 mod tenancy;
+mod terminal;
 mod vcs;
 mod workspace_profile;
 mod workspaces;

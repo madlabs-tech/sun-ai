@@ -66,6 +66,7 @@ mod runtime_list;
 mod secrets;
 mod sse;
 mod tasks;
+mod terminal;
 mod ui;
 mod vcs;
 mod webhooks;
@@ -154,6 +155,8 @@ pub struct Api {
     /// How often host connections are pinged, and the silence after which
     /// one is dropped (`with_host_liveness`).
     host_liveness: (std::time::Duration, std::time::Duration),
+    terminals: terminal::Terminals,
+    terminal_grace: std::time::Duration,
 }
 
 impl Api {
@@ -186,6 +189,8 @@ impl Api {
             mail_url: None,
             signup: Arc::default(),
             host_liveness: (hosts::PING_EVERY, hosts::LIVENESS),
+            terminals: terminal::Terminals::default(),
+            terminal_grace: terminal::GRACE,
         }
     }
 
@@ -275,8 +280,16 @@ impl Api {
         self
     }
 
+    /// How long a terminal whose browser left waits for it to reattach
+    /// (default 30 s); tests shorten it.
+    pub fn with_terminal_grace(mut self, grace: std::time::Duration) -> Self {
+        self.terminal_grace = grace;
+        self
+    }
+
     /// Pings host connections every `ping_every` and drops one silent for
-    /// `liveness` (default 10 s / 30 s); tests shorten both.
+    /// `liveness` (default 10 s / 30 s); tests shorten both. Terminal
+    /// sockets use the same.
     pub fn with_host_liveness(
         mut self,
         ping_every: std::time::Duration,
@@ -340,6 +353,7 @@ pub fn router(api: Api) -> Router {
     hosts::mark_started();
     let routed = routes::router(api.clone())
         .merge(hosts::router(api.clone()))
+        .merge(terminal::router(api.clone()))
         .merge(mcp::router(api.clone()))
         .merge(preview::router(api.clone()))
         // Liveness for supervisors (Sun Cloud): the store is open.
