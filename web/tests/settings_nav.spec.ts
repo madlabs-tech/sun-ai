@@ -8,7 +8,7 @@ const settings_nav = (page: Page) => page.getByRole('navigation', { name: 'Setti
 const page_head = (page: Page, title: string) => page.getByRole('heading', { name: title, exact: true }).locator('..');
 
 // Every entry for the deployment owner, in nav order (General and Members are the workspace's, Overview the deployment's).
-const ALL = ['Account', 'Support', 'General', 'Members', 'Code', 'Secrets', 'Plan & billing', 'Overview', 'Users', 'Audit log', 'Sign-in & 2-step', 'Bypass permissions', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
+const ALL = ['Account', 'Support', 'General', 'Members', 'Code', 'Editor access', 'Secrets', 'Plan & billing', 'Overview', 'Users', 'Audit log', 'Sign-in & 2-step', 'Bypass permissions', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
 /** The deployment's pages: nobody but its owners sees them. */
 const DEPLOYMENT = ['Overview', 'Users', 'Audit log', 'Sign-in & 2-step', 'Bypass permissions', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
 
@@ -74,6 +74,7 @@ test('360 px: the list, then a page with a back link, then the list again', asyn
 
 const IDS: Record<string, string> = {
   Code: 'code',
+  'Editor access': 'editor',
   Overview: 'overview',
   Users: 'users',
   'Audit log': 'audit',
@@ -87,10 +88,10 @@ const IDS: Record<string, string> = {
 };
 const without = (...hidden: string[]) => ALL.filter((l) => !hidden.includes(l));
 
-// Code needs edit_workspace and Secrets manage_secrets (an admin); the Deployment group needs a deployment owner.
+// Code needs edit_workspace, Editor access edit_members and Secrets manage_secrets (an admin); the Deployment group needs a deployment owner.
 const ROLES: [who: string, query: string, visible: string[]][] = [
-  ['a viewer', '&mock_role=viewer', without('Code', 'Secrets', ...DEPLOYMENT)],
-  ['a member', '&mock_role=member', without('Code', 'Secrets', ...DEPLOYMENT)],
+  ['a viewer', '&mock_role=viewer', without('Code', 'Editor access', 'Secrets', ...DEPLOYMENT)],
+  ['a member', '&mock_role=member', without('Code', 'Editor access', 'Secrets', ...DEPLOYMENT)],
   ['a workspace admin', '&mock_role=admin', without(...DEPLOYMENT)],
   ['a workspace admin with knowledge off', '&mock_role=admin&features_off=knowledge', without(...DEPLOYMENT)],
 ];

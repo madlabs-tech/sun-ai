@@ -128,6 +128,10 @@ test('files over 2 MB and binary files show a read-only notice', async ({ page }
 });
 
 test('a viewer reads only: no save, create, rename or delete, and a Read-only badge', async ({ page }) => {
+  // The mock keeps editor grants in localStorage (mock_editor.ts): viewers granted read.
+  await page.addInitScript(() =>
+    localStorage.setItem('sun_mock_editor_grants', JSON.stringify([{ id: 'g1', workspace_id: '00000000000000000000000001', repo_id: null, subject_type: 'role', subject_id: 'viewer', capability: 'editor.read' }])),
+  );
   await open(page, '&mock_role=viewer');
   await expect(page.getByText('Read-only')).toBeVisible();
   await entry(page, 'README.md').click();

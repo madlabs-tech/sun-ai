@@ -1,5 +1,5 @@
 <!-- Settings shell: a sub-nav ("My Account": Account and Support, then a group named after the open workspace: its General, Members
-     Code, Secrets and Plan & billing, then "Deployment": Overview and the deployment's own pages with Security / Agents sub-headings, for
+     Code, Editor access, Secrets and Plan & billing, then "Deployment": Overview and the deployment's own pages with Security / Agents sub-headings, for
      deployment owners only) and one page per entry at #/settings/<id>. Pages the signed-in person can't use are hidden;
      an unknown or hidden id opens the first visible page. Phones (< 768 px): #/settings is the list, a page has a
      back link to it. The section components own their cards; this file only picks and frames them. -->
@@ -23,6 +23,7 @@
   import SettingsEmbeddings from './SettingsEmbeddings.svelte';
   import SettingsWorkspace from './SettingsWorkspace.svelte';
   import SettingsCode from './SettingsCode.svelte';
+  import SettingsEditor from './SettingsEditor.svelte';
   import SettingsAccounts from './SettingsAccounts.svelte';
   import { can, current_workspace, feature_on, is_owner, workspace_of } from '../lib/app_state.svelte';
   import { href, route } from '../lib/router.svelte';
@@ -44,8 +45,8 @@
   /** The deployment's own settings: its owners only (the kernel answers 403 to anyone else). */
   const owner = is_owner;
   const workspace = $derived(workspace_of(current_workspace()));
-  /** The open workspace's pages: only with a workspace, and `edit_workspace` for all but General. */
-  const in_workspace = (permission?: 'edit_workspace' | 'manage_secrets') => () => !!workspace && (!permission || can(permission));
+  /** The open workspace's pages: only with a workspace, and the permission a page needs. */
+  const in_workspace = (permission?: 'edit_workspace' | 'edit_members' | 'manage_secrets') => () => !!workspace && (!permission || can(permission));
 
   const PAGES: SettingsPage[] = [
     { id: 'account', label: 'Account', icon: 'user', group: 'account', show: always, parts: [SettingsAccount] },
@@ -54,6 +55,7 @@
     { id: 'workspace', label: 'General', icon: 'settings', group: 'workspace', show: in_workspace(), parts: [SettingsWorkspace] },
     { id: 'members', label: 'Members', icon: 'users', group: 'workspace', show: in_workspace(), parts: [Members] },
     { id: 'code', label: 'Code', icon: 'git-branch', group: 'workspace', show: in_workspace('edit_workspace'), parts: [SettingsCode] },
+    { id: 'editor', label: 'Editor access', icon: 'file-code', group: 'workspace', show: in_workspace('edit_members'), parts: [SettingsEditor] },
     { id: 'secrets', label: 'Secrets', icon: 'key-round', group: 'workspace', show: in_workspace('manage_secrets'), parts: [SettingsSecrets], get props() { return { workspace: current_workspace() }; } },
     // With Sun Cloud billing the page also checks out, manages and buys seats.
     { id: 'plan', get label() { return feature_on('billing') ? 'Plan & billing' : 'Plan'; }, icon: 'shield-check', group: 'workspace', show: in_workspace(), parts: [SettingsPlan] },

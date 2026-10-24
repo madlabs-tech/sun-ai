@@ -1,11 +1,14 @@
 // The repo editor for the mock (crates/sun-api/src/editor.rs): one sample worktree per repo, kept in
 // localStorage so a saved edit survives a reload like the host's worktree does. Every host shows the
-// same worktree. `?mock_role=viewer` may only read.
-import type { EditorCapability, FsEntry, FsFile, FsStat } from './types';
+// same worktree. Editor grants (crates/sun-api/src/editor_access.rs) are kept there too, so a grant made as the
+// owner holds for `?mock_role=<admin|member|viewer>` (signed in as someone else) on the next page.
+import type { EditorCapability, EditorGrant, FsEntry, FsFile, FsStat } from './types';
 import { MockError, REPOS, not_found } from './mock';
+import { covers, type Role } from '../role';
 
 const MAX_FILE = 2 * 1024 * 1024;
 const STORE = 'sun_mock_editor';
+const GRANTS = 'sun_mock_editor_grants';
 
 /** Path → a file's text, `null` for a directory, or the byte size of a file too large to hold. */
 type Tree = Record<string, string | null | number>;
@@ -67,12 +70,56 @@ function checked(path: string): string {
   return path;
 }
 
-function capabilities(): EditorCapability[] {
-  return new URLSearchParams(location.search).get('mock_role') === 'viewer' ? ['editor.read'] : ['editor.read', 'editor.write', 'terminal'];
+const mock_role = () => (new URLSearchParams(location.search).get('mock_role') ?? 'owner') as Role;
+const grants = (): EditorGrant[] => JSON.parse(localStorage.getItem(GRANTS) ?? '[]') as EditorGrant[];
+
+/** Like `capabilities_of`: owners hold everything; anyone else what grants give them, write implying read and a
+ *  viewer capped at read. The mock signs in as `m_me`. */
+function capabilities(repo_id = ''): EditorCapability[] {
+  const role = mock_role();
+  if (role === 'owner') return ['editor.read', 'editor.write', 'terminal'];
+  const held = grants()
+    .filter((g) => (!g.repo_id || g.repo_id === repo_id) && (g.subject_type === 'all' || (g.subject_type === 'role' ? covers(role, g.subject_id) : g.subject_id === 'm_me')))
+    .map((g) => g.capability);
+  const all: EditorCapability[] = held.includes('editor.write') ? ['editor.read', ...held] : held;
+  return (['editor.read', 'editor.write', 'terminal'] as const).filter((c) => all.includes(c) && (role !== 'viewer' || c === 'editor.read'));
 }
 
-function need_write() {
-  if (!capabilities().includes('editor.write'))
+let grant_seq = 0;
+/** `/workspaces/:id/editor/grants[/:grant]`: owners and admins (`edit_members`). */
+export function grants_route(method: string, parts: string[], input: Record<string, string | null>): unknown {
+  const workspace = parts[1];
+  if (mock_role() !== 'owner' && mock_role() !== 'admin') throw fail(403, 'forbidden', 'You need `edit_members` here.');
+  const list = grants();
+  const keep = (next: EditorGrant[]) => localStorage.setItem(GRANTS, JSON.stringify(next));
+  if (method === 'GET') return list.filter((g) => g.workspace_id === workspace);
+  if (method === 'DELETE') {
+    if (!list.some((g) => g.id === parts[4])) throw not_found(`grant ${parts[4]}`);
+    keep(list.filter((g) => g.id !== parts[4]));
+    return null;
+  }
+  const { subject_type, subject_id = null, capability, repo_id = null } = input;
+  if (subject_type === 'role' && subject_id === 'viewer' && capability !== 'editor.read')
+    throw invalid(`Viewers can be granted \`editor.read\` only, not \`${capability}\`.`);
+  const same = (g: EditorGrant) =>
+    g.workspace_id === workspace && g.repo_id === repo_id && g.subject_type === subject_type && (g.subject_type === 'all' || g.subject_id === subject_id) && g.capability === capability;
+  if (list.some(same)) throw invalid('That grant already exists.');
+  const grant = {
+    id: `01JEG${String(Date.now()).slice(-8)}${String(++grant_seq).padStart(13, '0')}`,
+    workspace_id: workspace,
+    repo_id,
+    subject_type,
+    ...(subject_type === 'all' ? {} : { subject_id }),
+    capability,
+    granted_by: 'm_me',
+    created_at: new Date().toISOString(),
+  } as EditorGrant;
+  keep([...list, grant]);
+  return grant;
+}
+
+function need_write(repo_id: string) {
+  if (!capabilities(repo_id).includes('editor.write'))
     throw fail(403, 'forbidden', "You don't have `editor.write` on this repository. Ask a workspace owner or admin to grant it.");
 }
 
@@ -80,7 +127,7 @@ function need_write() {
 export function editor_route(method: string, parts: string[], params: URLSearchParams, body: unknown, headers: Record<string, string> = {}): unknown {
   const [, workspace, , repo_id, , what] = parts;
   if (!REPOS.some((r) => r.id === repo_id && r.workspace_id === workspace)) throw not_found(`repo ${repo_id}`);
-  if (what === 'me') return { capabilities: capabilities() };
+  if (what === 'me') return { capabilities: capabilities(repo_id) };
   if (!params.get('host_id')) throw invalid('Pass ?host_id=<host id>.');
   const tree = (trees[repo_id] ??= seed());
   const path = checked(params.get('path') ?? '');
@@ -90,6 +137,10 @@ export function editor_route(method: string, parts: string[], params: URLSearchP
   switch (`${method} ${what}`) {
     case 'POST open':
       return { root: `/home/sun/editor/${repo_id}` };
+    case 'GET index': {
+      const paths = Object.entries(tree).filter(([, value]) => value !== null).map(([p]) => p).sort();
+      return { paths, truncated: false };
+    }
     case 'GET tree': {
       if (!is_dir(path)) throw invalid(`\`${path}\` is not a directory.`);
       const entries: FsEntry[] = Object.entries(tree)
@@ -109,7 +160,7 @@ export function editor_route(method: string, parts: string[], params: URLSearchP
       return file_of(value);
     }
     case 'PUT file': {
-      need_write();
+      need_write(repo_id);
       const text = String(body ?? '');
       if (new Blob([text]).size > MAX_FILE) throw fail(413, 'too_large', 'The editor saves files of at most 2 MiB.');
       if (is_dir(path)) throw invalid(`\`${path}\` is a directory.`);
@@ -125,7 +176,7 @@ export function editor_route(method: string, parts: string[], params: URLSearchP
       return stat_of(text);
     }
     case 'POST file': {
-      need_write();
+      need_write(repo_id);
       if (!path) throw invalid('Name the new file or folder.');
       if (tree[path] !== undefined) throw invalid(`\`${path}\` already exists.`);
       if (!is_dir(parent_of(path))) throw invalid(`\`${parent_of(path)}\` is not a directory.`);
@@ -134,14 +185,14 @@ export function editor_route(method: string, parts: string[], params: URLSearchP
       return null;
     }
     case 'DELETE file': {
-      need_write();
+      need_write(repo_id);
       if (!path || tree[path] === undefined) throw not_found(`file ${path}`);
       for (const p of Object.keys(tree)) if (under(p, path)) delete tree[p];
       save();
       return null;
     }
     case 'POST rename': {
-      need_write();
+      need_write(repo_id);
       const [from, to] = [checked(input.from ?? ''), checked(input.to ?? '')];
       if (!from || tree[from] === undefined) throw not_found(`file ${from}`);
       if (!to || tree[to] !== undefined) throw invalid(`\`${to}\` already exists.`);
