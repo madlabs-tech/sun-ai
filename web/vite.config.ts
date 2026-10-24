@@ -1,5 +1,5 @@
 /// <reference types="node" />
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { defineConfig, type Plugin } from 'vite';
@@ -29,20 +29,43 @@ function self_host(): Plugin {
   };
 }
 
-/** Pre-compress text assets; sun-api serves `<file>.gz` when the browser accepts gzip. */
+/** Text types worth compressing, by extension. */
+const TEXT_TYPES: Record<string, string> = {
+  html: 'text/html; charset=utf-8',
+  js: 'text/javascript',
+  css: 'text/css',
+  svg: 'image/svg+xml',
+  json: 'application/json',
+  txt: 'text/plain',
+};
+
+/** Pre-compress text assets to `<file>.gz` and drop the raw file, so the binary embeds one copy
+ *  (40 MB budget, scripts/footprint.sh). sun-api decompresses for clients without gzip.
+ *  `vite preview` (the mock Playwright run) serves the `.gz` the same way. */
 function gzip_assets(): Plugin {
   let out_dir = 'dist';
   return {
     name: 'sun-gzip',
-    apply: 'build',
     configResolved: (c) => void (out_dir = c.build.outDir),
     closeBundle() {
       for (const name of readdirSync(out_dir, { recursive: true }) as string[]) {
-        if (!/\.(html|js|css|svg|json|txt)$/.test(name)) continue;
+        if (!(name.split('.').pop()! in TEXT_TYPES)) continue;
         const path = join(out_dir, name);
         const raw = readFileSync(path);
-        if (raw.length > 1024) writeFileSync(path + '.gz', gzipSync(raw, { level: 9 }));
+        if (raw.length <= 1024) continue;
+        writeFileSync(path + '.gz', gzipSync(raw, { level: 9 }));
+        unlinkSync(path);
       }
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const url_path = decodeURIComponent((req.url ?? '/').split('?')[0]);
+        const path = join(out_dir, url_path === '/' ? 'index.html' : url_path);
+        if (url_path.includes('..') || existsSync(path) || !existsSync(path + '.gz')) return next();
+        res.setHeader('Content-Type', TEXT_TYPES[path.split('.').pop()!] ?? 'application/octet-stream');
+        res.setHeader('Content-Encoding', 'gzip');
+        res.end(readFileSync(path + '.gz'));
+      });
     },
   };
 }
