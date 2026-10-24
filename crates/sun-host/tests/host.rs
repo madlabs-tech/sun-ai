@@ -672,6 +672,160 @@ async fn repo_worktree_is_a_git_worktree_off_a_cached_bare_clone() {
     running.abort();
 }
 
+/// A member's editor worktree: made on first `editor.open` off the repo's
+/// cached clone, on its own branch, reached only through `fs.*` frames, and
+/// left alone when a task of the same repo is removed.
+#[tokio::test]
+async fn editor_worktree_is_opened_once_and_survives_task_removal() {
+    use sun_core::host_protocol::{EditorTree, FsKind};
+    use sun_core::{MemberId, RepoId};
+    let root = temp_dir("editor");
+    let origin = root.join("origin");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    std::fs::create_dir_all(&origin).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]);
+    std::fs::write(origin.join("README.md"), "hi").unwrap();
+    git(&origin, &["add", "."]);
+    git(&origin, &["commit", "-q", "-m", "init"]);
+
+    let (listener, url) = listen().await;
+    let host = Host::open(HostConfig::new(root.join("data")), vec![]).unwrap();
+    let running = tokio::spawn(Arc::clone(&host).run(Credentials {
+        kernel_url: url,
+        host_id: HostId::generate(),
+        host_key: "key-1".into(),
+    }));
+    let mut kernel = Kernel::accept(&listener).await;
+    kernel.recv(false).await; // hello
+
+    let tree = EditorTree {
+        repo_id: RepoId::generate(),
+        member_id: MemberId::generate(),
+    };
+    // Nothing until it is opened.
+    let early = kernel
+        .request(|id| KernelFrame::FsList {
+            id,
+            tree,
+            path: String::new(),
+        })
+        .await;
+    assert!(matches!(early, ReplyBody::Error { ref code, .. } if code == "not_found"));
+    let open = |id| KernelFrame::EditorOpen {
+        id,
+        tree,
+        url: origin.display().to_string(),
+        base: Some("main".into()),
+    };
+    let ReplyBody::Worktree { path } = kernel.request(open).await else {
+        panic!()
+    };
+    let expected = root
+        .join("data/editor")
+        .join(tree.repo_id.to_string())
+        .join(tree.member_id.to_string());
+    assert_eq!(path, expected.canonicalize().unwrap());
+    assert_eq!(
+        git(&path, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        format!("sun/editor/{}/{}", tree.member_id, tree.repo_id)
+    );
+
+    let ReplyBody::File { file } = kernel
+        .request(|id| KernelFrame::FsRead {
+            id,
+            tree,
+            path: "README.md".into(),
+        })
+        .await
+    else {
+        panic!()
+    };
+    assert_eq!(file.content.as_deref(), Some("hi"));
+    let saved = kernel
+        .request(|id| KernelFrame::FsWrite {
+            id,
+            tree,
+            path: "README.md".into(),
+            content: "edited".into(),
+            expected_hash: file.hash.clone(),
+        })
+        .await;
+    assert!(matches!(saved, ReplyBody::Stat { .. }), "{saved:?}");
+    let stale = kernel
+        .request(|id| KernelFrame::FsWrite {
+            id,
+            tree,
+            path: "README.md".into(),
+            content: "clobber".into(),
+            expected_hash: file.hash.clone(),
+        })
+        .await;
+    assert!(matches!(stale, ReplyBody::Conflict { current: Some(_) }));
+    let created = kernel
+        .request(|id| KernelFrame::FsCreate {
+            id,
+            tree,
+            path: "docs".into(),
+            kind: FsKind::Dir,
+        })
+        .await;
+    assert_eq!(created, ReplyBody::Done);
+    let escape = kernel
+        .request(|id| KernelFrame::FsRead {
+            id,
+            tree,
+            path: "../../../repos".into(),
+        })
+        .await;
+    assert!(matches!(escape, ReplyBody::Error { ref code, .. } if code == "invalid_input"));
+
+    // A second open keeps the edits; removing a task of the same repo
+    // (which prunes the clone's worktrees) leaves the editor alone.
+    assert_eq!(
+        kernel.request(open).await,
+        ReplyBody::Worktree { path: path.clone() }
+    );
+    let task_id = TaskId::generate();
+    let task = Worktree::Repo {
+        task_id,
+        url: origin.display().to_string(),
+        base: None,
+        branch: format!("sun/SUN-1-{task_id}"),
+    };
+    let prepared = kernel
+        .request(|id| KernelFrame::WorktreePrepare { id, worktree: task })
+        .await;
+    assert!(
+        matches!(prepared, ReplyBody::Worktree { .. }),
+        "{prepared:?}"
+    );
+    let removed = kernel
+        .request(|id| KernelFrame::WorktreeRemove { id, task_id })
+        .await;
+    assert_eq!(removed, ReplyBody::Done);
+    assert_eq!(
+        std::fs::read_to_string(path.join("README.md")).unwrap(),
+        "edited"
+    );
+    assert!(path.join("docs").is_dir());
+    assert_eq!(git(&path, &["status", "--porcelain"]), "M README.md");
+    running.abort();
+}
+
 /// A `vm` session's env outlives the session so the step's gates run in it:
 /// the next session in the same worktree releases it, otherwise it is
 /// deleted after `env_linger` unused. A fake `limactl` logs its argv and runs

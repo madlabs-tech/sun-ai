@@ -58,8 +58,6 @@ pub(crate) use sun_core::editor_grant::EditorCapability as Capability;
 /// The guard of every editor and terminal route: `Ok` when `caller` holds
 /// `cap` on `repo` of `workspace`, 403 when they don't, 404 as
 /// [`capabilities`].
-// ponytail: unused until the editor routes (BLO-186) land on `main`.
-#[allow(dead_code)]
 pub(crate) async fn require(
     api: &Api,
     caller: &Caller,
@@ -72,7 +70,6 @@ pub(crate) async fn require(
 
 /// One audited editor action. Metadata only, never file contents or
 /// keystrokes.
-#[allow(dead_code)]
 pub(crate) struct EditorEvent<'a> {
     pub(crate) workspace: WorkspaceId,
     pub(crate) repo: RepoId,
@@ -86,7 +83,6 @@ pub(crate) struct EditorEvent<'a> {
 
 /// Records `event` as `caller` in the audit log, after the host confirmed
 /// it: `editor_file` for files, `terminal` for terminals.
-#[allow(dead_code)]
 pub(crate) async fn record(api: &Api, caller: &Caller, event: EditorEvent<'_>) -> ApiResult<()> {
     let action = match event.action.starts_with("terminal.") {
         true => AuditAction::Terminal,

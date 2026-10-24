@@ -483,6 +483,8 @@ pub(crate) fn router(api: Api) -> Router {
         )
         .route("/me/two_step/challenge", post(auth::my_two_step_challenge))
         .route("/me/two_step/{id}", delete(auth::remove_my_two_step))
+        // A repo's editor: `editor_access` decides who, per capability.
+        .merge(crate::editor::routes())
         // Plans and wallets: each handler checks the person and their role.
         .merge(crate::billing::routes())
         // Support from people at Sun: any signed-in person; Sun Cloud says

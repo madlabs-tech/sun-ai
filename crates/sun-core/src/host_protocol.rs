@@ -12,13 +12,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    EffortCatalog, Error, HostEvent, HostId, PermissionMode, Readiness, SessionHandle, SessionId,
-    SessionSpec, StopMode, TaskId,
+    EffortCatalog, Error, HostEvent, HostId, MemberId, PermissionMode, Readiness, RepoId,
+    SessionHandle, SessionId, SessionSpec, StopMode, TaskId,
 };
 
 /// Protocol version sent in [`HostFrame::Hello`]. The kernel rejects a major it
 /// does not speak.
-pub const HOST_PROTOCOL_VERSION: &str = "2.1";
+pub const HOST_PROTOCOL_VERSION: &str = "2.2";
 
 /// File in the repo root that declares the design-canvas preview: the
 /// first line is the dev server command (run by the host), each later line a
@@ -332,6 +332,171 @@ pub enum KernelFrame {
         /// Request id.
         id: u64,
     },
+    /// Make sure a member's editor worktree of a repo exists (protocol 2.2):
+    /// `<data>/editor/<repo_id>/<member_id>` on branch
+    /// `sun/editor/<member_id>/<repo_id>`, cut from `base`. Idempotent; never
+    /// refreshed once made. Reply: [`ReplyBody::Worktree`].
+    #[serde(rename = "editor.open")]
+    EditorOpen {
+        /// Request id.
+        id: u64,
+        /// Whose worktree of which repo.
+        tree: EditorTree,
+        /// Clone URL (https, ssh or a local path).
+        url: String,
+        /// Branch to start from; `None` = the remote's default branch.
+        base: Option<String>,
+    },
+    /// One directory level of an editor worktree. Reply: [`ReplyBody::Entries`].
+    #[serde(rename = "fs.list")]
+    FsList {
+        /// Request id.
+        id: u64,
+        /// The worktree (opened with `editor.open`).
+        tree: EditorTree,
+        /// A directory relative to the worktree root; `""` is the root.
+        path: String,
+    },
+    /// Every file of an editor worktree git doesn't ignore, for quick open.
+    /// Reply: [`ReplyBody::Index`].
+    #[serde(rename = "fs.index")]
+    FsIndex {
+        /// Request id.
+        id: u64,
+        /// The worktree.
+        tree: EditorTree,
+    },
+    /// A file of an editor worktree. Reply: [`ReplyBody::File`].
+    #[serde(rename = "fs.read")]
+    FsRead {
+        /// Request id.
+        id: u64,
+        /// The worktree.
+        tree: EditorTree,
+        /// The file, relative to the worktree root.
+        path: String,
+    },
+    /// Writes a text file (created when missing). Reply: [`ReplyBody::Stat`],
+    /// or [`ReplyBody::Conflict`] when `expected_hash` no longer matches.
+    #[serde(rename = "fs.write")]
+    FsWrite {
+        /// Request id.
+        id: u64,
+        /// The worktree.
+        tree: EditorTree,
+        /// The file, relative to the worktree root.
+        path: String,
+        /// The whole new content, at most [`MAX_EDITOR_FILE`] bytes.
+        content: String,
+        /// [`FsStat::hash`] of the content the edit started from; `None`
+        /// overwrites whatever is there.
+        expected_hash: Option<String>,
+    },
+    /// Creates an empty file or a directory; its parent must exist and it
+    /// must not. Reply: [`ReplyBody::Done`].
+    #[serde(rename = "fs.create")]
+    FsCreate {
+        /// Request id.
+        id: u64,
+        /// The worktree.
+        tree: EditorTree,
+        /// The new entry, relative to the worktree root.
+        path: String,
+        /// `file` or `dir`.
+        kind: FsKind,
+    },
+    /// Moves an entry; `to` must not exist. Reply: [`ReplyBody::Done`].
+    #[serde(rename = "fs.rename")]
+    FsRename {
+        /// Request id.
+        id: u64,
+        /// The worktree.
+        tree: EditorTree,
+        /// The entry, relative to the worktree root.
+        from: String,
+        /// Its new path, relative to the worktree root.
+        to: String,
+    },
+    /// Deletes a file, a symlink (not its target) or a directory with
+    /// everything in it. Reply: [`ReplyBody::Done`].
+    #[serde(rename = "fs.delete")]
+    FsDelete {
+        /// Request id.
+        id: u64,
+        /// The worktree.
+        tree: EditorTree,
+        /// The entry, relative to the worktree root.
+        path: String,
+    },
+}
+
+/// Largest file the editor reads or writes, in bytes (2 MiB).
+pub const MAX_EDITOR_FILE: u64 = 2 * 1024 * 1024;
+
+/// Most entries one `fs.list` or `fs.index` returns.
+pub const MAX_EDITOR_ENTRIES: usize = 50_000;
+
+/// A member's editor worktree of a repo on a host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditorTree {
+    /// The repo.
+    pub repo_id: RepoId,
+    /// The member editing it.
+    pub member_id: MemberId,
+}
+
+string_enum! {
+    /// What a directory entry is ([`FsEntry`], [`KernelFrame::FsCreate`]).
+    pub enum FsKind {
+        /// A regular file.
+        File => "file",
+        /// A directory.
+        Dir => "dir",
+        /// A symlink (not followed in a listing).
+        Symlink => "symlink",
+    }
+}
+
+/// One entry of an `fs.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsEntry {
+    /// File name (entries whose name isn't UTF-8 are left out).
+    pub name: String,
+    /// What it is.
+    pub kind: FsKind,
+    /// Bytes, for a file; 0 otherwise.
+    pub size: u64,
+    /// `.git` or `node_modules`: shown closed and left out of `fs.index`;
+    /// `.git` can't be opened at all.
+    pub collapsed: bool,
+}
+
+/// A file's version: what an `fs.write` precondition compares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsStat {
+    /// Bytes.
+    pub size: u64,
+    /// Last modified, Unix milliseconds.
+    pub mtime_ms: u64,
+    /// SHA-256 of the content, lowercase hex.
+    pub hash: String,
+}
+
+/// An `fs.read` answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsFile {
+    /// Bytes.
+    pub size: u64,
+    /// Last modified, Unix milliseconds.
+    pub mtime_ms: u64,
+    /// SHA-256 of the content (lowercase hex); `None` when too large.
+    pub hash: Option<String>,
+    /// Larger than [`MAX_EDITOR_FILE`]: no content.
+    pub too_large: bool,
+    /// Has a NUL byte or isn't UTF-8: no content.
+    pub binary: bool,
+    /// The text, when neither too large nor binary.
+    pub content: Option<String>,
 }
 
 string_enum! {
@@ -827,7 +992,7 @@ pub struct DiskUse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReplyBody {
-    /// `worktree.prepare`: the host path of the working directory.
+    /// `worktree.prepare`, `editor.open`: the host path of the working directory.
     Worktree {
         /// Absolute path on the host.
         path: PathBuf,
@@ -838,7 +1003,8 @@ pub enum ReplyBody {
         handle: SessionHandle,
     },
     /// `session.send`, `session.stop`, `worktree.write`, `device.input`,
-    /// `preview.start`, `preview.stop`: done.
+    /// `preview.start`, `preview.stop`, `fs.create`, `fs.rename`,
+    /// `fs.delete`: done.
     Done,
     /// `probe`.
     Alive {
@@ -875,6 +1041,35 @@ pub enum ReplyBody {
         /// The PNG bytes (base64 on the wire).
         #[serde(with = "base64_bytes")]
         png: Vec<u8>,
+    },
+    /// `fs.list`.
+    Entries {
+        /// Directories first, then files, each by name.
+        entries: Vec<FsEntry>,
+        /// More than [`MAX_EDITOR_ENTRIES`]: the rest are left out.
+        truncated: bool,
+    },
+    /// `fs.index`.
+    Index {
+        /// Paths relative to the worktree root, `/`-separated, sorted.
+        paths: Vec<String>,
+        /// More than [`MAX_EDITOR_ENTRIES`]: the rest are left out.
+        truncated: bool,
+    },
+    /// `fs.read`.
+    File {
+        /// The file.
+        file: FsFile,
+    },
+    /// `fs.write`: written; the new version.
+    Stat {
+        /// The file now.
+        stat: FsStat,
+    },
+    /// `fs.write`: not written, the file changed since `expected_hash`.
+    Conflict {
+        /// The file now; `None` when it was deleted.
+        current: Option<FsStat>,
     },
     /// Any request failed.
     Error {

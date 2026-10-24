@@ -18,6 +18,7 @@ use sun_core::{
 
 use crate::buffer::{self, Buffer};
 use crate::device::{DeviceConfig, Devices};
+use crate::editor;
 use crate::exec_env::{self, ExecEnv};
 use crate::preview::Previews;
 use crate::process;
@@ -235,7 +236,15 @@ impl Host {
             | KernelFrame::PreviewHttp { id, .. }
             | KernelFrame::PreviewScreenshot { id, .. }
             | KernelFrame::PreviewStop { id, .. }
-            | KernelFrame::Reprobe { id } => *id,
+            | KernelFrame::Reprobe { id }
+            | KernelFrame::EditorOpen { id, .. }
+            | KernelFrame::FsList { id, .. }
+            | KernelFrame::FsIndex { id, .. }
+            | KernelFrame::FsRead { id, .. }
+            | KernelFrame::FsWrite { id, .. }
+            | KernelFrame::FsCreate { id, .. }
+            | KernelFrame::FsRename { id, .. }
+            | KernelFrame::FsDelete { id, .. } => *id,
         };
         let host = Arc::clone(self);
         tokio::spawn(async move {
@@ -359,6 +368,50 @@ impl Host {
                 ReplyBody::Device {
                     result: self.devices.flow(&scratch, &request).await?,
                 }
+            }
+            KernelFrame::EditorOpen {
+                tree, url, base, ..
+            } => ReplyBody::Worktree {
+                path: self.worktrees.prepare_editor(&tree, &url, &base).await?,
+            },
+            KernelFrame::FsList { tree, path, .. } => {
+                let root = self.worktrees.editor_root(&tree)?;
+                let (entries, truncated) = editor::list(&root, &path)?;
+                ReplyBody::Entries { entries, truncated }
+            }
+            KernelFrame::FsIndex { tree, .. } => {
+                let root = self.worktrees.editor_root(&tree)?;
+                let (paths, truncated) = editor::index(&root).await?;
+                ReplyBody::Index { paths, truncated }
+            }
+            KernelFrame::FsRead { tree, path, .. } => ReplyBody::File {
+                file: editor::read(&self.worktrees.editor_root(&tree)?, &path)?,
+            },
+            KernelFrame::FsWrite {
+                tree,
+                path,
+                content,
+                expected_hash,
+                ..
+            } => editor::write(
+                &self.worktrees.editor_root(&tree)?,
+                &path,
+                &content,
+                expected_hash.as_deref(),
+            )?,
+            KernelFrame::FsCreate {
+                tree, path, kind, ..
+            } => {
+                editor::create(&self.worktrees.editor_root(&tree)?, &path, kind)?;
+                ReplyBody::Done
+            }
+            KernelFrame::FsRename { tree, from, to, .. } => {
+                editor::rename(&self.worktrees.editor_root(&tree)?, &from, &to)?;
+                ReplyBody::Done
+            }
+            KernelFrame::FsDelete { tree, path, .. } => {
+                editor::delete(&self.worktrees.editor_root(&tree)?, &path)?;
+                ReplyBody::Done
             }
             KernelFrame::Ack { .. }
             | KernelFrame::Enrolled { .. }

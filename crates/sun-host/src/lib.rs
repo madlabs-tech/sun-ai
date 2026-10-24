@@ -2,8 +2,9 @@
 //!
 //! **Responsibility:** runs agent sessions on a machine: worktrees, exec
 //! environments, processes and resource accounting, plus device verify on
-//! simulators and emulators, and design-canvas dev servers on loopback
-//! (`preview.*`). Dials out to the kernel
+//! simulators and emulators, design-canvas dev servers on loopback
+//! (`preview.*`), and path-confined file operations in editor worktrees
+//! (`editor.open`, `fs.*`). Dials out to the kernel
 //! over WebSocket; the wire format is `sun_core::host_protocol`.
 //!
 //! **Contract:**
@@ -18,12 +19,14 @@
 //! `Host::open(HostConfig::new(data_dir), adapters)?.run(Credentials::load(data_dir)?)`.
 //! On-disk layout under the data dir: `host.json` (credentials), `buffer/`
 //! (unacked events), `repos/` (bare clones), `work/<task_id>` (task dirs),
+//! `editor/<repo_id>/<member_id>` (members' editor worktrees, `fs.*`),
 //! `tmp/<session_id>` (each session's `TMPDIR`), `skills/` (installed skills,
 //! copied into each session's native skills folder).
 
 mod buffer;
 mod connection;
 mod device;
+mod editor;
 mod exec_env;
 mod host;
 mod preview;
