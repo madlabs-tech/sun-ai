@@ -188,6 +188,7 @@ impl Host {
     /// `reprobe_every`.
     pub async fn run(self: Arc<Self>, credentials: Credentials) {
         let _ = self.host_id.set(credentials.host_id);
+        let _ = self.credentials.set(credentials.clone());
         let reprobe = async {
             let mut tick = tokio::time::interval(self.config.reprobe_every);
             tick.tick().await; // `hello` just probed

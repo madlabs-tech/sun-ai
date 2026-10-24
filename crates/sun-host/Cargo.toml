@@ -19,6 +19,8 @@ serde_json.workspace = true
 sha2 = "0.10.9"
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+# Terminals (`pty.open`): openpty + setsid, which need `unsafe` this workspace forbids.
+pty-process = { version = "=0.5.3", features = ["async"] }
 
 [dev-dependencies]
 futures-core.workspace = true
