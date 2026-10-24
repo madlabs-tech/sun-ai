@@ -58,11 +58,8 @@
   const results = $derived<(Command | string)[]>(
     in_commands ? ranked(commands, (c) => c.label, query.slice(1)) : ranked(files ?? [], (p) => p, query),
   );
+  // Reset on typing only: the index can arrive after an arrow key moved the selection.
   let selected = $state(0);
-  $effect(() => {
-    void results;
-    selected = 0;
-  });
 
   function pick(item: Command | string | undefined) {
     if (item === undefined) return;
@@ -98,6 +95,7 @@
     spellcheck="false"
     iconLeft={in_commands ? 'command' : 'search'}
     bind:value={query}
+    oninput={() => (selected = 0)}
     onkeydown={keydown}
     {@attach (input: HTMLInputElement) => input.focus()}
   />

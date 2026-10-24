@@ -121,6 +121,7 @@ test('⌘/Ctrl+P finds a file by part of its name; Enter opens it', async ({ pag
   // Arrow keys move; Escape closes.
   await page.keyboard.press('ControlOrMeta+p');
   await page.keyboard.type('ts');
+  await expect(palette.getByRole('option').nth(1)).toBeVisible();
   await page.keyboard.press('ArrowDown');
   await expect(palette.getByRole('option').nth(1)).toHaveAttribute('aria-selected', 'true');
   await page.keyboard.press('Escape');
