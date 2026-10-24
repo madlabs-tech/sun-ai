@@ -39,6 +39,7 @@ mod runtimes_stage2;
 mod task_lifecycle;
 mod tenancy;
 mod terminal;
+mod terminal_abuse;
 mod vcs;
 mod workspace_profile;
 mod workspaces;
