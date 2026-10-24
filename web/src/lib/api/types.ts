@@ -2,6 +2,8 @@
 // snake_case on the wire and in code. Mirror of the sun-core domain types; when
 // sun-core lands, these must match its serde output field for field.
 
+import type { Role } from '../role';
+
 export type Ulid = string;
 /** RFC 3339 UTC timestamp */
 export type Timestamp = string;
@@ -417,6 +419,20 @@ export interface Repo {
 
 /** What the caller may do in a repo's editor (`GET …/editor/me`). */
 export type EditorCapability = 'editor.read' | 'editor.write' | 'terminal';
+
+/** Who an editor grant is for: every member, a role and those above it, or one member. */
+export type GrantSubject = { subject_type: 'all' } | { subject_type: 'role'; subject_id: Role } | { subject_type: 'member'; subject_id: Ulid };
+
+/** `GET /workspaces/:id/editor/grants`: one capability for a subject, on every repo (`repo_id` null) or one.
+ *  Workspace owners hold everything implicitly and never appear here. */
+export type EditorGrant = GrantSubject & {
+  id: Ulid;
+  workspace_id: Ulid;
+  repo_id: Ulid | null;
+  capability: EditorCapability;
+  granted_by: Ulid | null;
+  created_at: string;
+};
 
 /** One entry of `GET …/editor/tree`: directories first, then by name. */
 export interface FsEntry {

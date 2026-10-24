@@ -76,6 +76,8 @@ import type { OnLimit, OutboxItem, Resolution,
   TaskPullRequests,
   Repo,
   EditorCapability,
+  EditorGrant,
+  GrantSubject,
   FsEntry,
   FsFile,
   FsStat,
@@ -239,6 +241,15 @@ export const api = {
   /** A file, or a whole directory. */
   editor_delete: (at: EditorAt, path: string) => request<null>('DELETE', editor_path(at, 'file', path)),
   editor_rename: (at: EditorAt, from: string, to: string) => request<null>('POST', editor_path(at, 'rename'), { from, to }),
+  /** Every file git doesn't ignore, for quick open. */
+  editor_index: (at: EditorAt) => request<{ paths: string[]; truncated: boolean }>('GET', editor_path(at, 'index')),
+  /** `edit_members`: the workspace's editor grants, oldest first. */
+  editor_grants: (workspace: string) => request<EditorGrant[]>('GET', `/workspaces/${id_path(workspace)}/editor/grants`),
+  /** `edit_members`: 422 for a grant that exists, or more than `editor.read` for a viewer. */
+  grant_editor: (workspace: string, grant: GrantSubject & { repo_id: string | null; capability: EditorCapability }) =>
+    request<EditorGrant>('POST', `/workspaces/${id_path(workspace)}/editor/grants`, grant),
+  revoke_editor_grant: (workspace: string, id: string) =>
+    request<null>('DELETE', `/workspaces/${id_path(workspace)}/editor/grants/${id_path(id)}`),
   /** The workspace's git connections and which git apps the operator configured; never a token. */
   list_vcs: (workspace: string) => request<VcsList>('GET', `/workspaces/${id_path(workspace)}/vcs`),
   /** The GitHub App install page to open in a new tab (state-signed, 10 min). GitHub comes back to
@@ -607,6 +618,11 @@ export const watch_events = (run_id: string, after: number, on_event: (e: RunEve
 /** Live task activity: comments, moves and runs (see `watch_log`). */
 export const watch_activity = (task_id: string, after: number, on_entry: (e: TaskActivity) => void, on_closed: () => void) =>
   watch_log(`/tasks/${id_path(task_id)}/activity`, (last) => api.task_activity(task_id, last), after, on_entry, on_closed);
+
+/** The editor terminal socket (crates/sun-api/src/terminal.rs): a new shell sized `cols`×`rows`, or `pty_id` to reattach one. */
+export const terminal_url = (at: EditorAt, params: { cols: string; rows: string } | { pty_id: string }) =>
+  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${BASE}/workspaces/${id_path(at.workspace)}/repos/${id_path(at.repo)}/terminal` +
+  query({ host_id: at.host, ...params });
 
 /** Live device view of a task: state changes, binary payloads (pictures, or H.264 access units
  *  when the state's `mime` is `video/h264`) and failed inputs. Asks for video when `video` (the browser

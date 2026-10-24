@@ -3,7 +3,8 @@
      ⌘S / Ctrl+S saves. A save sends the hash the file was read with, so a file changed on disk since asks to
      reload or overwrite. Files over 2 MB and binary files show a notice instead. With more than one online
      host a picker shows; the last host per repo is remembered. Without `editor.write` (`GET …/editor/me`)
-     it is a viewer: no save, create, rename or delete, and a Read-only badge. -->
+     it is a viewer: no save, create, rename or delete, and a Read-only badge. With `terminal`, Ctrl+` (or the
+     Terminal button) toggles the bottom terminal panel. ⌘/Ctrl+P opens quick open, ⌘/Ctrl+Shift+P its commands. -->
 <script lang="ts">
   import { SvelteSet } from 'svelte/reactivity';
   import { Badge, Button, Dialog, Icon, Input, Select } from '@hryer/madlabs-design-system/svelte';
@@ -18,6 +19,8 @@
   import { repo_name } from '../lib/format';
   import { href } from '../lib/router.svelte';
   import { editor_state, language_of } from '../lib/code_editor';
+  import EditorTerminal from './EditorTerminal.svelte';
+  import QuickOpen, { type Command } from './QuickOpen.svelte';
 
   let { repo_id }: { repo_id: string } = $props();
 
@@ -41,6 +44,7 @@
   let hosts = $state<Host[]>([]);
   let host = $state('');
   let can_write = $state(false);
+  let can_terminal = $state(false);
   let load_error = $state('');
   let opened = $state<Promise<void>>();
   let dirs = $state<Record<string, { entries: FsEntry[]; truncated: boolean }>>({});
@@ -57,8 +61,11 @@
       const [repos, all, me] = await Promise.all([api.list_repos(workspace), api.list_hosts(workspace), api.editor_me(workspace, repo_id)]);
       repo = repos.find((r) => r.id === repo_id);
       if (!repo) return void (load_error = 'This repository isn’t on the workspace. Pick one in Settings → Code.');
+      if (!me.capabilities.includes('editor.read'))
+        return void (load_error = 'You don’t have access to this repository’s editor. Ask a workspace owner or admin to grant it.');
       hosts = all.filter((h) => h.status === 'online');
       can_write = me.capabilities.includes('editor.write');
+      can_terminal = me.capabilities.includes('terminal');
       const remembered = local_get(host_key);
       pick_host(hosts.find((h) => h.id === remembered)?.id ?? hosts[0]?.id ?? '');
     } catch (e) {
@@ -168,11 +175,42 @@
     }
   }
 
-  function keydown(e: KeyboardEvent) {
-    if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key.toLowerCase() !== 's') return;
-    e.preventDefault();
-    if (current) save(current);
+  /** The editor's own keys; the terminal hands them over too. */
+  function shortcut_of(e: KeyboardEvent): 'save' | 'files' | 'commands' | 'terminal' | null {
+    if (e.altKey) return null;
+    if (e.ctrlKey && !e.metaKey && e.code === 'Backquote') return 'terminal';
+    if (!(e.metaKey || e.ctrlKey)) return null;
+    const key = e.key.toLowerCase();
+    return key === 's' ? 'save' : key === 'p' ? (e.shiftKey ? 'commands' : 'files') : null;
   }
+
+  function keydown(e: KeyboardEvent) {
+    const action = shortcut_of(e);
+    if (!action) return;
+    // Stops the browser's print dialog for ⌘/Ctrl+P (Firefox keeps ⌘/Ctrl+Shift+P whatever a page does).
+    e.preventDefault();
+    if (action === 'save') {
+      if (current) save(current);
+    } else if (action === 'terminal') toggle_terminal();
+    else if (host) quick_open(action === 'commands' ? '>' : '');
+  }
+
+  let terminal = $state<EditorTerminal>();
+  const toggle_terminal = () => can_terminal && terminal?.toggle();
+
+  /** Quick open's starting text while it shows. */
+  let palette = $state<string | null>(null);
+  let index = $state<Promise<string[]>>(Promise.resolve([]));
+  function quick_open(query: string) {
+    // Every time: the terminal may have made or removed files since.
+    index = api.editor_index(at()).then((r) => r.paths);
+    palette = query;
+  }
+  const commands = $derived<Command[]>([
+    ...(can_write ? [{ label: 'New file', run: () => new_entry('file', parent_of(active)) }] : []),
+    ...(can_terminal ? [{ label: 'Toggle terminal', run: toggle_terminal }] : []),
+    ...(can_write && current?.state ? [{ label: 'Save', run: () => current && save(current) }] : []),
+  ]);
 
   function beforeunload(e: BeforeUnloadEvent) {
     if (unsaved) e.preventDefault();
@@ -269,6 +307,12 @@
     <!-- A switch closes the tabs: save first. -->
     <Select aria-label="Host" size="sm" value={host} disabled={unsaved} title={unsaved ? 'Save or close your changes to switch hosts' : undefined} options={hosts.map((h) => ({ value: h.id, label: h.name }))} onchange={(e) => pick_host(e.currentTarget.value)} />
   {/if}
+  {#if host}
+    <IconButton icon="search" label="Go to file" shortcut="⌘P" size="sm" aria-keyshortcuts="Meta+P Control+P" onclick={() => quick_open('')} />
+    {#if can_terminal}
+      <Button size="sm" variant="secondary" iconLeft="terminal" aria-keyshortcuts="Control+`" onclick={toggle_terminal}>Terminal</Button>
+    {/if}
+  {/if}
   {#if repo && !can_write}
     <Badge tone="neutral"><Icon name="lock" size={12} /> Read-only</Badge>
   {:else if current?.state}
@@ -328,6 +372,9 @@
         <div class="sun-empty">Pick a file on the left to open it.</div>
       {/if}
       <div class="code" hidden={!current?.state} {@attach mount}></div>
+      {#if can_terminal}
+        {#key host}<EditorTerminal bind:this={terminal} at={at()} ready={opened ?? Promise.resolve()} app_key={(e) => !!shortcut_of(e)} />{/key}
+      {/if}
     </section>
   </div>
 {/if}
@@ -380,6 +427,10 @@
       <Button variant="danger" loading={busy} onclick={() => remove(target.path)}>Delete</Button>
     {/snippet}
   </Dialog>
+{/if}
+
+{#if palette !== null}
+  <QuickOpen query={palette} paths={index} {commands} onopen={open_file} onclose={() => (palette = null)} />
 {/if}
 
 {#if conflict}

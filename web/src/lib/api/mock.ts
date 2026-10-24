@@ -54,7 +54,7 @@ import { billing_route } from './mock_billing';
 import { knowledge_route, link_source } from './mock_knowledge';
 import { memory_route } from './mock_memory';
 import { is_vcs_route, vcs_route } from './mock_vcs';
-import { editor_route } from './mock_editor';
+import { editor_route, grants_route } from './mock_editor';
 import { pull_request_route } from './mock_pull_requests';
 import { agents_naming, agents_route, find_agent } from './mock_agents';
 import { budget_route, has_ecosystem_secret, on_limit_route, settings_route } from './mock_settings';
@@ -1039,6 +1039,7 @@ function route(method: string, full_path: string, body: unknown, headers?: Recor
   if (parts[0] === 'marketplace') return market_route(method, parts, input, params);
   if (parts[0] === 'subscriptions' || parts[0] === 'support') return billing_route(method, parts, input, params);
   if (parts[0] === 'workspaces' && parts[2] === 'repos' && parts[4] === 'editor') return editor_route(method, parts, params, body, headers);
+  if (parts[0] === 'workspaces' && parts[2] === 'editor' && parts[3] === 'grants') return grants_route(method, parts, input as Record<string, string | null>);
   if (is_vcs_route(method, parts)) return vcs_route(method, parts, params, input);
   if (parts[0] === 'tasks' && (parts[2] === 'pull_requests' || parts[2] === 'pr_auto_complete')) return pull_request_route(method, parts, input);
   if (method === 'GET' && path === '/agents') return in_workspace(agents_route(method, parts, input) as Agent[]);
