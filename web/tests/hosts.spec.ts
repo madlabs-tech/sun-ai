@@ -83,7 +83,7 @@ test('hosts: an owner attaches any host to a new workspace and detaches it again
 
   await page.getByRole('button', { name: 'Detach build-box-01' }).click();
   const dialog = page.getByRole('dialog');
-  await expect(dialog).toContainText('Only a deployment owner, or whoever enrolled it, can attach it again.');
+  await expect(dialog).toContainText('Only a deployment owner, whoever enrolled it, or a member of a group it’s shared with can attach it again.');
   await dialog.getByRole('button', { name: 'Detach' }).click();
   await expect(page.getByText('build-box-01 detached')).toBeVisible();
   await expect(others.getByRole('article')).toHaveCount(3);
@@ -101,7 +101,7 @@ test('hosts: a workspace admin attaches only the hosts they enrolled (360 px)', 
 
   await new_workspace_hosts(page, 'Lab');
   const others = page.getByRole('region', { name: 'Hosts you can attach' });
-  await expect(others).toContainText('Hosts you enrolled in your other workspaces.');
+  await expect(others).toContainText('Hosts you enrolled, and hosts shared with a group you’re in.');
   await expect(others.getByRole('article')).toHaveCount(1);
   await page.setViewportSize({ width: 360, height: 740 });
   await expect(others.getByRole('article', { name: 'rina-laptop' })).toContainText('serves Main · enrolled by you');
