@@ -40,6 +40,7 @@ mod route_matrix;
 mod runtimes_stage2;
 mod shared_hosts;
 mod task_lifecycle;
+mod team_access;
 mod tenancy;
 mod terminal;
 mod terminal_abuse;

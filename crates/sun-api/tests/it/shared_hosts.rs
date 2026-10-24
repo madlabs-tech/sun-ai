@@ -22,25 +22,25 @@ use crate::workspaces::call_as;
 
 /// A deployment with the team host (offline), the group "Madlabs team"
 /// (`madlabs.tech`), and three people, each owning a workspace of their own.
-struct Team {
-    k: Kernel,
-    host: HostId,
-    group: GroupId,
+pub(crate) struct Team {
+    pub(crate) k: Kernel,
+    pub(crate) host: HostId,
+    pub(crate) group: GroupId,
     /// Verified `ana@madlabs.tech`: in the group.
-    ana: Person,
+    pub(crate) ana: Person,
     /// Unverified `x@madlabs.tech`: anyone may sign up with that.
-    x: Person,
+    pub(crate) x: Person,
     /// Verified `carl@corp.io`.
-    carl: Person,
+    pub(crate) carl: Person,
 }
 
-struct Person {
-    token: String,
-    workspace: String,
+pub(crate) struct Person {
+    pub(crate) token: String,
+    pub(crate) workspace: String,
 }
 
 /// A session token of a new member with `email`, verified or not.
-async fn person(k: &Kernel, email: &str, verified: bool) -> (String, MemberId) {
+pub(crate) async fn person(k: &Kernel, email: &str, verified: bool) -> (String, MemberId) {
     let token = format!("session-{email}");
     let hash: String = Sha256::digest(token.as_bytes())
         .iter()
@@ -60,7 +60,7 @@ async fn person(k: &Kernel, email: &str, verified: bool) -> (String, MemberId) {
 }
 
 /// A member with `email` and a workspace they own.
-async fn owner_of_a_workspace(k: &Kernel, email: &str, verified: bool) -> Person {
+pub(crate) async fn owner_of_a_workspace(k: &Kernel, email: &str, verified: bool) -> Person {
     let (token, _) = person(k, email, verified).await;
     let body = json!({ "name": format!("ws of {email}") });
     let (status, workspace) =
@@ -70,7 +70,7 @@ async fn owner_of_a_workspace(k: &Kernel, email: &str, verified: bool) -> Person
     Person { token, workspace }
 }
 
-async fn team() -> Team {
+pub(crate) async fn team() -> Team {
     let k = kernel().await;
     let host = HostId::generate();
     let mut tx = k.store.begin().await.unwrap();
@@ -101,20 +101,25 @@ async fn team() -> Team {
 }
 
 impl Team {
-    async fn as_owner(&self, method: &str, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    pub(crate) async fn as_owner(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
         call_as(&self.k.app, TOKEN, method, path, body).await
     }
 
-    fn share(&self) -> String {
+    pub(crate) fn share(&self) -> String {
         format!("/api/v1/hosts/{}/shares/{}", self.host, self.group)
     }
 
-    fn attach(&self, who: &Person) -> String {
+    pub(crate) fn attach(&self, who: &Person) -> String {
         format!("/api/v1/workspaces/{}/hosts/{}", who.workspace, self.host)
     }
 
     /// The ids `GET /hosts/attachable` lists for `who`'s workspace.
-    async fn attachable(&self, who: &Person) -> Vec<Value> {
+    pub(crate) async fn attachable(&self, who: &Person) -> Vec<Value> {
         let path = format!("/api/v1/hosts/attachable?workspace={}", who.workspace);
         let (status, list) = call_as(&self.k.app, &who.token, "GET", &path, None).await;
         assert_eq!(status, StatusCode::OK, "{list}");
@@ -122,7 +127,7 @@ impl Team {
     }
 
     /// The host ids `GET /hosts?workspace=` lists for `who`'s workspace.
-    async fn hosts_of(&self, who: &Person) -> Vec<Value> {
+    pub(crate) async fn hosts_of(&self, who: &Person) -> Vec<Value> {
         let path = format!("/api/v1/hosts?workspace={}", who.workspace);
         let (status, list) = call_as(&self.k.app, &who.token, "GET", &path, None).await;
         assert_eq!(status, StatusCode::OK, "{list}");
@@ -134,7 +139,7 @@ impl Team {
     }
 
     /// The team host online, reporting the `fake` runtime ready.
-    async fn connect(&self) -> Socket {
+    pub(crate) async fn connect(&self) -> Socket {
         let key: String = Sha256::digest(format!("{SECRET}:{}", self.host).as_bytes())
             .iter()
             .map(|b| format!("{b:02x}"))
@@ -143,7 +148,7 @@ impl Team {
     }
 
     /// A new agent task in `who`'s workspace, as them.
-    async fn agent_task(&self, who: &Person) -> TaskId {
+    pub(crate) async fn agent_task(&self, who: &Person) -> TaskId {
         let app = &self.k.app;
         let flow = json!({ "source_yaml": AGENT, "workspace_id": who.workspace });
         let (status, workflow) =
@@ -156,7 +161,7 @@ impl Team {
     }
 
     /// Where the task's run was placed, once it was; `None` after `wait`.
-    async fn placed(&self, task: TaskId, wait: Duration) -> Option<Value> {
+    pub(crate) async fn placed(&self, task: TaskId, wait: Duration) -> Option<Value> {
         let until = tokio::time::Instant::now() + wait;
         while tokio::time::Instant::now() < until {
             let mut tx = self.k.store.read().await.unwrap();

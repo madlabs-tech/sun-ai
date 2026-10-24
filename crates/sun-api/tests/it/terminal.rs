@@ -41,7 +41,7 @@ fn git(cwd: &std::path::Path, args: &[&str]) {
     assert!(ok.success(), "git {args:?}");
 }
 
-async fn world() -> World {
+pub(crate) async fn world() -> World {
     world_with(kernel().await, Duration::from_secs(1)).await
 }
 
