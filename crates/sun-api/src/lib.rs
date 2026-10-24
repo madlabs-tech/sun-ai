@@ -45,6 +45,8 @@ mod chats;
 mod corrections;
 mod credentials;
 mod device;
+mod editor;
+mod editor_access;
 mod entitlement;
 mod error;
 mod evals;

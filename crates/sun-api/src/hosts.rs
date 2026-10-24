@@ -43,8 +43,8 @@ use sun_core::entitlement::Quota;
 const FIRST_FRAME: Duration = Duration::from_secs(10);
 /// Default wait for a reply.
 pub(crate) const REPLY: Duration = Duration::from_secs(60);
-/// `worktree.prepare` may clone a repo.
-const PREPARE: Duration = Duration::from_secs(15 * 60);
+/// `worktree.prepare` (and `editor.open`) may clone a repo.
+pub(crate) const PREPARE: Duration = Duration::from_secs(15 * 60);
 /// A host is shown with a session while its stats are this fresh.
 const STATS_FRESH: Duration = Duration::from_secs(15);
 const TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
@@ -104,8 +104,9 @@ pub(crate) enum Enrols {
 struct Conn {
     generation: u64,
     out: mpsc::UnboundedSender<KernelFrame>,
-    /// The host speaks protocol 2.1+ (`reprobe`, `capabilities`).
-    reprobes: bool,
+    /// The host's protocol minor: 1+ speaks `reprobe` and `capabilities`,
+    /// 2+ `editor.open` and `fs.*`.
+    minor: u32,
 }
 
 impl HostHub {
@@ -125,15 +126,15 @@ impl HostHub {
         let minor = protocol
             .split('.')
             .nth(1)
-            .and_then(|m| m.parse::<u32>().ok());
-        let reprobes = minor.is_some_and(|m| m >= 1);
+            .and_then(|m| m.parse::<u32>().ok())
+            .unwrap_or(0);
         // The newest connection wins; dropping the old sender ends its writer.
         state.conns.insert(
             host,
             Conn {
                 generation,
                 out,
-                reprobes,
+                minor,
             },
         );
         state.last_seen.insert(host, chrono::Utc::now());
@@ -241,7 +242,7 @@ impl HostHub {
     /// Has `host` probe its runtimes again now and waits until it did; a
     /// change arrives (and is stored) before the reply.
     pub(crate) async fn reprobe(&self, host: HostId) -> Result<()> {
-        let reprobes = self.state().conns.get(&host).map(|c| c.reprobes);
+        let reprobes = self.state().conns.get(&host).map(|c| c.minor >= 1);
         match reprobes {
             None => Err(Error::Unavailable(format!("host {host} is offline"))),
             Some(false) => Err(Error::Unavailable(
@@ -256,6 +257,22 @@ impl HostHub {
                 other => Err(unexpected(other)),
             },
         }
+    }
+
+    /// [`Self::request`] for an editor frame; `Unavailable` at once when
+    /// the host's sun predates the editor (protocol 2.2).
+    pub(crate) async fn editor_request(
+        &self,
+        host: HostId,
+        wait: Duration,
+        frame: impl FnOnce(u64) -> KernelFrame,
+    ) -> Result<ReplyBody> {
+        if self.state().conns.get(&host).is_some_and(|c| c.minor < 2) {
+            return Err(Error::Unavailable(
+                "this host's sun is too old for the editor; update it".into(),
+            ));
+        }
+        self.request(host, wait, frame).await
     }
 
     async fn session_request(
