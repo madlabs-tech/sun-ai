@@ -1,7 +1,7 @@
 // Sign-in, sign-up, 2-step, accounts, workspace members and invitations, and the audit log. Mirrors crates/sun-api/src/auth.
 // With ?mock=1 an in-memory fake answers instead of the kernel.
 import { ApiFailure, request, use_mock } from './client';
-import { MAIN_WORKSPACE } from './types';
+import { MAIN_WORKSPACE, type MemberGroup, type TerminalPolicy } from './types';
 import { PERMISSIONS_OF, covers, type Role } from '../role';
 
 /** What a workspace role grants, per verb (`Role::permissions` in sun-core; the table is in lib/role.ts). A
@@ -138,6 +138,8 @@ export interface Me {
   /** They may start “Anything” (bypass) sessions: sun.yaml allows it, and they are an owner or the owner's
    *  bypass policy lets them. Otherwise their sessions run as Edit files. Absent on an older kernel. */
   can_bypass?: boolean;
+  /** The terminal policy lets them open terminals (a terminal also needs its editor grant). Absent on an older kernel. */
+  can_terminal?: boolean;
 }
 
 /** Settings → Security → Bypass permissions: who besides the owners may run “Anything” sessions. */
@@ -281,6 +283,23 @@ export const auth = {
   set_security: (policy: SecurityPolicy) => call<SecurityPolicy>('PUT', '/settings/security', policy),
   get_bypass: () => call<BypassPolicy>('GET', '/settings/bypass'),
   set_bypass: (policy: Pick<BypassPolicy, 'mode' | 'member_ids'>) => call<BypassPolicy>('PUT', '/settings/bypass', policy),
+  /** Deployment owners: every group with its hand-added `member_ids`, by name. 422 for a bad or taken name. */
+  list_groups: () => call<MemberGroup[]>('GET', '/groups'),
+  create_group: (name: string, description: string) => call<MemberGroup>('POST', '/groups', { name, description }),
+  update_group: (id: string, change: Partial<Pick<MemberGroup, 'name' | 'description' | 'domains'>>) =>
+    call<MemberGroup>('PATCH', `/groups/${path_of(id)}`, change),
+  /** Its editor grants go with it and the terminal policy stops listing it. */
+  delete_group: (id: string) => call<null>('DELETE', `/groups/${path_of(id)}`),
+  add_group_member: (id: string, member: string) => call<null>('POST', `/groups/${path_of(id, 'members', member)}`),
+  /** 404 unless they were added by hand. */
+  remove_group_member: (id: string, member: string) => call<null>('DELETE', `/groups/${path_of(id, 'members', member)}`),
+  /** The active members whose verified email is on one of `domains` now. */
+  group_preview: (id: string, domains: string[]) =>
+    call<Member[]>('GET', `/groups/${path_of(id, 'preview')}?${new URLSearchParams({ domains: domains.join(',') })}`),
+  /** Any member: the groups they are in now. */
+  my_groups: () => call<Omit<MemberGroup, 'member_ids'>[]>('GET', '/groups/mine'),
+  get_terminal: () => call<TerminalPolicy>('GET', '/settings/terminal'),
+  set_terminal: (policy: TerminalPolicy) => call<TerminalPolicy>('PUT', '/settings/terminal', policy),
   set_email: (email: string) => call<{ email: string }>('PUT', '/me/email', { email }),
   /** Deployment owner: an account in `workspace_id` as `role`. With `password`, no mail goes out (and SMTP isn't
    *  needed); `must_change` forces a change at first sign-in. */
@@ -338,14 +357,19 @@ const mock_params = new URLSearchParams(location.search);
 // `none`: someone in no workspace yet (onboarding).
 const mock_role = mock_params.get('mock_role') as Role | 'none' | null;
 const me_owner = !mock_role || mock_role === 'owner';
+// `?mock_email=<email>`: the signed-in person's email. `?mock_team=1`: also dee@madlabs.tech (verified) and
+// eli@madlabs.tech (not verified yet), for groups by email domain.
 let members: Member[] = [
-  { ...person('m_me', 's0', 'me'), is_owner: me_owner, email: mock_params.get('owner_email') === '0' ? null : 'me@acme.io' },
+  { ...person('m_me', 's0', 'me'), is_owner: me_owner, email: mock_params.get('owner_email') === '0' ? null : (mock_params.get('mock_email') ?? 'me@acme.io') },
   person('m_ana', 's1', 'ana'),
   person('m_ben', 's2', 'ben'),
   person('m_cho', 's3', 'cho'),
+  ...(mock_params.get('mock_team') === '1'
+    ? [{ ...person('m_dee', 's4', 'dee'), email: 'dee@madlabs.tech' }, { ...person('m_eli', 's5', 'eli'), email: 'eli@madlabs.tech' }]
+    : []),
 ];
-/** Members who proved their email (everyone seeded; a sign-up once its code is used). */
-const verified = new Set(members.map((m) => m.id));
+/** Members who proved their email (everyone seeded but eli; a sign-up once its code is used). */
+const verified = new Set(members.filter((m) => m.id !== 'm_eli').map((m) => m.id));
 const joined = (workspace_id: string, member_id: string, role: Role): Membership => ({ workspace_id, member_id, role, created_at: '2026-10-01T09:00:00Z' });
 let memberships: Membership[] = [
   ...(mock_role === 'none' ? [] : [joined(MAIN_WORKSPACE, 'm_me', me_owner ? 'owner' : (mock_role as Role))]),
@@ -507,6 +531,112 @@ const view_of = (i: MockInvitation): InvitationView => ({
 });
 const pending = (i: MockInvitation) => !i.accepted_at && !i.declined_at && i.expires_at > now();
 const plain = ({ token: _, ...rest }: MockInvitation): Invitation => rest;
+// Groups, the terminal policy and host shares, kept in localStorage like the mock's editor grants, so what an owner
+// sets holds for `?mock_role=…` on the next page.
+const GROUPS_KEY = 'sun_mock_groups';
+interface GroupStore {
+  groups: MemberGroup[];
+  terminal: TerminalPolicy;
+  /** Group ids by host id. */
+  shares: Record<string, string[]>;
+}
+const group_store = (): GroupStore =>
+  JSON.parse(localStorage.getItem(GROUPS_KEY) ?? 'null') ?? { groups: [], terminal: { mode: 'granted', groups: [] }, shares: {} };
+const keep_groups = (store: GroupStore) => localStorage.setItem(GROUPS_KEY, JSON.stringify(store));
+/** Like `domain_matches`: active members whose verified email's domain is one of `domains`. */
+const by_domain = (domains: string[]) =>
+  members.filter((m) => !m.deactivated_at && verified.has(m.id) && domains.includes(m.email?.split('@').pop() ?? ''));
+/** Like `is_member`: added by hand, or by a verified email on one of its domains. */
+const in_group = (g: MemberGroup, id: string) => g.member_ids.includes(id) || by_domain(g.domains).some((m) => m.id === id);
+const my_groups = () => group_store().groups.filter((g) => in_group(g, me_id()));
+/** The groups a host is shared with; with `groups`, saves them instead (only groups that exist). */
+export function mock_host_shares(host_id: string, groups?: string[]): string[] {
+  const store = group_store();
+  if (groups) {
+    if (groups.some((id) => !store.groups.some((g) => g.id === id))) throw not_found();
+    store.shares[host_id] = [...new Set(groups)];
+    keep_groups(store);
+  }
+  return store.shares[host_id] ?? [];
+}
+/** The ids of the signed-in person's groups. */
+export const mock_my_groups = () => my_groups().map((g) => g.id);
+/** Hosts shared with a group the signed-in person is in. */
+export const mock_shared_with_me = () => {
+  const mine = mock_my_groups();
+  return Object.keys(group_store().shares).filter((h) => mock_host_shares(h).some((g) => mine.includes(g)));
+};
+/** Like `TerminalPolicy::allows`. */
+export function mock_can_terminal() {
+  const { terminal } = group_store();
+  return me_state.is_owner || terminal.mode === 'granted' || my_groups().some((g) => terminal.groups.includes(g.id));
+}
+const DOMAIN = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/;
+/** Like `normalize_domains`: lowercase, sorted, no duplicates; 422 names the first bad one. */
+function normalize_domains(list: string[]) {
+  const domains = [...new Set(list.map((d) => d.trim().toLowerCase()))].sort();
+  const bad = domains.find((d) => !DOMAIN.test(d));
+  if (bad !== undefined) throw new ApiFailure(422, 'invalid_input', `\`${bad}\` is not an email domain (like \`madlabs.tech\`).`);
+  return domains;
+}
+function group_fields(store: GroupStore, input: Partial<MemberGroup>, self?: MemberGroup) {
+  const name = (input.name ?? self?.name ?? '').trim();
+  if (!name || name.length > 100) throw new ApiFailure(422, 'invalid_input', 'A group name is 1 to 100 characters.');
+  if (store.groups.some((g) => g !== self && g.name === name)) throw new ApiFailure(422, 'invalid_input', `There is already a group named ${name}.`);
+  return { name, description: (input.description ?? self?.description ?? '').trim(), domains: normalize_domains(input.domains ?? self?.domains ?? []) };
+}
+let group_seq = 0;
+/** `/groups/**` and `/settings/terminal`, like crates/sun-api/src/groups.rs; `undefined` for any other route. */
+function groups_route(method: string, path: string, body: unknown): unknown {
+  const [bare, query = ''] = path.split('?');
+  const parts = bare.split('/').filter(Boolean).map(decodeURIComponent);
+  if (parts[0] !== 'groups' && bare !== '/settings/terminal') return undefined;
+  const store = group_store();
+  if (bare === '/groups/mine') return my_groups().map(({ member_ids: _, ...g }) => g);
+  if (!me_state.is_owner) throw forbidden('Only a deployment owner can do this.');
+  if (bare === '/settings/terminal') {
+    if (method === 'PUT') {
+      const policy = body as TerminalPolicy;
+      if (policy.groups.some((id) => !store.groups.some((g) => g.id === id))) throw not_found();
+      store.terminal = { mode: policy.mode, groups: [...new Set(policy.groups)] };
+      keep_groups(store);
+    }
+    return { ...store.terminal };
+  }
+  const input = (body ?? {}) as Partial<MemberGroup>;
+  if (parts.length === 1) {
+    if (method === 'GET') return [...store.groups].sort((a, b) => a.name.localeCompare(b.name));
+    const id = `01JGRP${String(Date.now()).slice(-8)}${String(++group_seq).padStart(12, '0')}`;
+    const group: MemberGroup = { id, ...group_fields(store, input), created_by: me_id() || null, created_at: now(), member_ids: [] };
+    store.groups.push(group);
+    keep_groups(store);
+    return group;
+  }
+  const group = store.groups.find((g) => g.id === parts[1]);
+  if (!group) throw not_found();
+  if (parts[2] === 'preview') {
+    const domains = new URLSearchParams(query).get('domains');
+    return by_domain(domains === null ? group.domains : normalize_domains(domains.split(',').filter(Boolean))).map((m) => ({ ...m }));
+  }
+  if (parts[2] === 'members') {
+    const member = member_by_id(parts[3]);
+    const manual = group.member_ids.includes(member.id);
+    if (method === 'DELETE' && !manual) throw not_found();
+    group.member_ids = method === 'DELETE' ? group.member_ids.filter((m) => m !== member.id) : manual ? group.member_ids : [...group.member_ids, member.id];
+  } else if (method === 'DELETE') {
+    // Its editor grants go with it, the terminal policy and host shares stop listing it.
+    store.groups = store.groups.filter((g) => g !== group);
+    store.terminal.groups = store.terminal.groups.filter((g) => g !== group.id);
+    for (const host of Object.keys(store.shares)) store.shares[host] = store.shares[host].filter((g) => g !== group.id);
+    const grants = JSON.parse(localStorage.getItem('sun_mock_editor_grants') ?? '[]') as { subject_type: string; subject_id?: string }[];
+    localStorage.setItem('sun_mock_editor_grants', JSON.stringify(grants.filter((g) => !(g.subject_type === 'group' && g.subject_id === group.id))));
+  } else {
+    Object.assign(group, group_fields(store, input, group));
+  }
+  keep_groups(store);
+  return method === 'PATCH' ? { ...group } : null;
+}
+
 const DEPLOYMENT_ONLY = /^\/(members|audit|smtp|settings\/(sso|security))(\/|$)/;
 
 /** The workspace members, invitations and sign-up routes, like crates/sun-api/src/auth/{members,invitations}.rs. */
@@ -631,6 +761,8 @@ function fake(method: string, path: string, body: unknown): unknown {
   }
   const answered = membership_route(method, path, body);
   if (answered !== undefined) return answered;
+  const grouped = groups_route(method, path, body);
+  if (grouped !== undefined) return grouped;
   if (DEPLOYMENT_ONLY.test(path) && !me_state.is_owner) throw forbidden('Only a deployment owner can do this.');
   if (route === 'GET /settings/sso') return sso_view();
   const sso_path = path.match(/^\/settings\/sso\/([^/]+)$/);
@@ -671,7 +803,7 @@ function fake(method: string, path: string, body: unknown): unknown {
     const memberships_of_me = memberships.filter((m) => m.member_id === me_id()).map((m) => ({ ...m }));
     const may = me_state.is_owner || bypass.mode === 'everyone' || (bypass.mode === 'members' && bypass.member_ids.includes(me_id()));
     const can_bypass = mock_allow_bypass && may;
-    return { ...me, memberships: memberships_of_me, email_verified: verified.has(me_id()), needs_email: !me_state.email, must_enroll_two_step, view_role, can_bypass };
+    return { ...me, memberships: memberships_of_me, email_verified: verified.has(me_id()), needs_email: !me_state.email, must_enroll_two_step, view_role, can_bypass, can_terminal: mock_can_terminal() };
   }
   if (route === 'POST /session') {
     const input = body as { email?: string; password?: string };

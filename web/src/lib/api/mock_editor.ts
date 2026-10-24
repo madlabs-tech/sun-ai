@@ -5,6 +5,7 @@
 import type { EditorCapability, EditorGrant, FsEntry, FsFile, FsStat } from './types';
 import { MockError, REPOS, not_found } from './mock';
 import { covers, type Role } from '../role';
+import { mock_can_terminal, mock_my_groups } from './auth';
 
 const MAX_FILE = 2 * 1024 * 1024;
 const STORE = 'sun_mock_editor';
@@ -79,10 +80,12 @@ function capabilities(repo_id = ''): EditorCapability[] {
   const role = mock_role();
   if (role === 'owner') return ['editor.read', 'editor.write', 'terminal'];
   const held = grants()
-    .filter((g) => (!g.repo_id || g.repo_id === repo_id) && (g.subject_type === 'all' || (g.subject_type === 'role' ? covers(role, g.subject_id) : g.subject_id === 'm_me')))
+    .filter((g) => (!g.repo_id || g.repo_id === repo_id) && (g.subject_type === 'all' || (g.subject_type === 'role' ? covers(role, g.subject_id) : g.subject_type === 'group' ? mock_my_groups().includes(g.subject_id) : g.subject_id === 'm_me')))
     .map((g) => g.capability);
   const all: EditorCapability[] = held.includes('editor.write') ? ['editor.read', ...held] : held;
-  return (['editor.read', 'editor.write', 'terminal'] as const).filter((c) => all.includes(c) && (role !== 'viewer' || c === 'editor.read'));
+  return (['editor.read', 'editor.write', 'terminal'] as const).filter(
+    (c) => all.includes(c) && (role !== 'viewer' || c === 'editor.read') && (c !== 'terminal' || mock_can_terminal()),
+  );
 }
 
 let grant_seq = 0;

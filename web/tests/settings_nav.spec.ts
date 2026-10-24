@@ -8,9 +8,9 @@ const settings_nav = (page: Page) => page.getByRole('navigation', { name: 'Setti
 const page_head = (page: Page, title: string) => page.getByRole('heading', { name: title, exact: true }).locator('..');
 
 // Every entry for the deployment owner, in nav order (General and Members are the workspace's, Overview the deployment's).
-const ALL = ['Account', 'Support', 'General', 'Members', 'Code', 'Editor access', 'Secrets', 'Plan & billing', 'Overview', 'Users', 'Audit log', 'Sign-in & 2-step', 'Bypass permissions', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
+const ALL = ['Account', 'Support', 'General', 'Members', 'Code', 'Editor access', 'Secrets', 'Plan & billing', 'Overview', 'Users', 'Groups', 'Audit log', 'Sign-in & 2-step', 'Bypass permissions', 'Terminal', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
 /** The deployment's pages: nobody but its owners sees them. */
-const DEPLOYMENT = ['Overview', 'Users', 'Audit log', 'Sign-in & 2-step', 'Bypass permissions', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
+const DEPLOYMENT = ['Overview', 'Users', 'Groups', 'Audit log', 'Sign-in & 2-step', 'Bypass permissions', 'Terminal', 'Email', 'Deployment secrets', 'Usage limits', 'Embeddings'];
 
 const no_overflow = async (page: Page) =>
   expect(await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)).toBeLessThanOrEqual(0);
@@ -77,7 +77,9 @@ const IDS: Record<string, string> = {
   'Editor access': 'editor',
   Overview: 'overview',
   Users: 'users',
+  Groups: 'groups',
   'Audit log': 'audit',
+  Terminal: 'terminal',
   Support: 'support',
   'Sign-in & 2-step': 'sign-in',
   Email: 'email',

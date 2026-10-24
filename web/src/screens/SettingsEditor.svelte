@@ -1,5 +1,5 @@
 <!-- Settings → <workspace> → Editor access (owners and admins: `edit_members`): who may read, write and open a
-     terminal in the repo editor, on every repository or one. Workspace owners hold all three always: not a grant,
+     terminal in the repo editor, on every repository or one, for everyone, a role, a group (deployment owners pick one) or a member. Workspace owners hold all three always: not a grant,
      so it can't be revoked. Write includes read; terminal is its own grant, never implied, because it is a shell
      on the host. One grant per capability; a revoke applies from the holder's next request. -->
 <script lang="ts">
@@ -8,8 +8,8 @@
   import Loaded from '../lib/ui/Loaded.svelte';
   import { api } from '../lib/api/client';
   import { auth, type WorkspaceMember } from '../lib/api/auth';
-  import type { EditorCapability, EditorGrant, GrantSubject, Repo } from '../lib/api/types';
-  import { current_workspace, error_text, toast } from '../lib/app_state.svelte';
+  import type { EditorCapability, EditorGrant, GrantSubject, MemberGroup, Repo } from '../lib/api/types';
+  import { current_workspace, error_text, is_owner, toast } from '../lib/app_state.svelte';
   import { repo_name } from '../lib/format';
   import { ROLE_LABEL, type Role } from '../lib/role';
 
@@ -30,10 +30,14 @@
     (e) => toast('danger', 'Couldn’t load repositories and members', error_text(e)),
   );
   const reload = () => (grants = api.editor_grants(workspace));
+  /** Groups are the deployment's: only its owners list them, so only they grant to one. */
+  let groups = $state<MemberGroup[]>([]);
+  if (is_owner()) auth.list_groups().then((list) => (groups = list), () => {});
 
   function subject_of(g: GrantSubject): string {
     if (g.subject_type === 'all') return 'All members';
     if (g.subject_type === 'role') return `${ROLE_LABEL[g.subject_id]}s and above`;
+    if (g.subject_type === 'group') return groups.find((x) => x.id === g.subject_id)?.name ?? 'A group';
     return people.find((p) => p.member_id === g.subject_id)?.username ?? 'A member no longer here';
   }
   const scope_of = (repo_id: string | null) => {
@@ -45,6 +49,7 @@
   let subject_type = $state<GrantSubject['subject_type']>('all');
   let role = $state<Role>('member');
   let member = $state('');
+  let group = $state('');
   let repo_id = $state('');
   let picked = $state<Record<EditorCapability, boolean>>({ 'editor.read': true, 'editor.write': false, terminal: false });
   let form_error = $state('');
@@ -54,10 +59,14 @@
   async function grant(e: SubmitEvent) {
     e.preventDefault();
     const capabilities = CAPABILITIES.map((c) => c.value).filter((c) => picked[c]);
-    form_error = !capabilities.length ? 'Pick at least one of Read, Write or Terminal.' : subject_type === 'member' && !member ? 'Pick a member.' : '';
+    form_error = !capabilities.length ? 'Pick at least one of Read, Write or Terminal.' : subject_type === 'member' && !member ? 'Pick a member.' : subject_type === 'group' && !group ? 'Pick a group.' : '';
     if (form_error) return;
     const subject: GrantSubject =
-      subject_type === 'all' ? { subject_type } : subject_type === 'role' ? { subject_type, subject_id: role } : { subject_type, subject_id: member };
+      subject_type === 'all'
+        ? { subject_type }
+        : subject_type === 'role'
+          ? { subject_type, subject_id: role }
+          : { subject_type, subject_id: subject_type === 'group' ? group : member };
     saving = true;
     const failed: string[] = [];
     for (const capability of capabilities) {
@@ -124,11 +133,14 @@
         options={[
           { value: 'all', label: 'All members' },
           { value: 'role', label: 'A role' },
+          ...(is_owner() ? [{ value: 'group', label: 'A group' }] : []),
           { value: 'member', label: 'A member' },
         ]}
       />
       {#if subject_type === 'role'}
         <Select label="Role" bind:value={role} options={ROLE_OPTIONS} />
+      {:else if subject_type === 'group'}
+        <Select label="Group" bind:value={group} placeholder="Pick a group" options={groups.map((g) => ({ value: g.id, label: g.name }))} />
       {:else if subject_type === 'member'}
         <Select label="Member" bind:value={member} placeholder="Pick a member" options={members} />
       {/if}

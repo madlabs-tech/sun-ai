@@ -4,7 +4,8 @@
      reload or overwrite, and one deleted since to recreate it or close the tab. Files over 2 MB and binary
      files show a notice instead. With more than one online host a picker shows; the last host per repo is remembered. Without `editor.write` (`GET …/editor/me`)
      it is a viewer: no save, create, rename or delete, and a Read-only badge. With `terminal`, Ctrl+` (or the
-     Terminal button) toggles the bottom terminal panel. ⌘/Ctrl+P opens quick open, ⌘/Ctrl+Shift+P its commands. -->
+     Terminal button) toggles the bottom terminal panel; when the terminal policy leaves them out (`/me` `can_terminal`),
+     a note says why. ⌘/Ctrl+P opens quick open, ⌘/Ctrl+Shift+P its commands. -->
 <script lang="ts">
   import { SvelteSet } from 'svelte/reactivity';
   import { Badge, Button, Dialog, Icon, Input, Select } from '@hryer/madlabs-design-system/svelte';
@@ -15,7 +16,7 @@
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import { ApiFailure, api, type EditorAt } from '../lib/api/client';
   import type { FsEntry, FsFile, Host, Repo } from '../lib/api/types';
-  import { current_workspace, error_text, local_get, local_set, toast } from '../lib/app_state.svelte';
+  import { app, current_workspace, error_text, local_get, local_set, toast } from '../lib/app_state.svelte';
   import { repo_name } from '../lib/format';
   import { href } from '../lib/router.svelte';
   import { editor_state, language_of } from '../lib/code_editor';
@@ -314,6 +315,8 @@
     <IconButton icon="search" label="Go to file" shortcut="⌘P" size="sm" aria-keyshortcuts="Meta+P Control+P" onclick={() => quick_open('')} />
     {#if can_terminal}
       <Button size="sm" variant="secondary" iconLeft="terminal" aria-keyshortcuts="Control+`" onclick={toggle_terminal}>Terminal</Button>
+    {:else if app.me?.can_terminal === false}
+      <span class="editor__no-terminal" role="note"><Icon name="lock" size={12} /> Terminal access is limited to certain groups. Ask a deployment owner.</span>
     {/if}
   {/if}
   {#if repo && !can_write}
@@ -468,6 +471,13 @@
 {/if}
 
 <style>
+  .editor__no-terminal {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--size-xs);
+    color: var(--fg-2);
+  }
   .editor {
     flex: 1;
     min-height: 0;

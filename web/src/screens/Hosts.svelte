@@ -1,17 +1,19 @@
 <!-- Hosts: the machines that run the open workspace's agent sessions. Each names the workspaces it serves and who
      enrolled it. "Add host" (manage_runtimes) mints a join token that attaches the new host here; a deployment owner,
      whoever enrolled a host, or a member of a group it is shared with may attach it to more workspaces (the kernel
-     says which: GET /hosts/attachable); anyone with manage_runtimes may detach one. -->
+     says which: GET /hosts/attachable); anyone with manage_runtimes may detach one. A deployment owner shares a host
+     with groups ("Share"); the kernel's own host only after a confirm, since its sessions can read SUN_MASTER_KEY. -->
 <script lang="ts">
-  import { Badge, Button, Dialog, Icon, Input, Tag } from '@hryer/madlabs-design-system/svelte';
+  import { Badge, Button, Checkbox, Dialog, Icon, Input, Tag } from '@hryer/madlabs-design-system/svelte';
   import IconButton from '../lib/ui/IconButton.svelte';
   import PageHeader from '../lib/ui/PageHeader.svelte';
   import Loaded from '../lib/ui/Loaded.svelte';
   import { api } from '../lib/api/client';
   import { auth } from '../lib/api/auth';
-  import type { AttachableHost, DeviceTool, Host, HostToken, KernelUse, SessionStats } from '../lib/api/types';
+  import type { AttachableHost, DeviceTool, Host, HostToken, KernelUse, MemberGroup, SessionStats } from '../lib/api/types';
   import { app, can, copy_text, current_workspace, error_text, is_owner, toast, workspace_of } from '../lib/app_state.svelte';
   import { bytes, clock, uptime } from '../lib/format';
+  import { href } from '../lib/router.svelte';
 
   const workspace = current_workspace();
   const here = workspace_of(workspace)?.name ?? 'this workspace';
@@ -51,17 +53,25 @@
   }
   load_others();
 
+  /** The caller's groups, to name the one a host is shared through (the kernel doesn't say which). */
+  let my_groups = $state<Pick<MemberGroup, 'name'>[]>([]);
+  if (manage && !owner) auth.my_groups().then((list) => (my_groups = list), () => {});
+  const shared_by = $derived(my_groups.length === 1 ? `Shared by ${my_groups[0].name}` : 'Shared with a group you’re in');
+
   function reload() {
     load = api.list_hosts(workspace);
     load_others();
   }
 
   let acting = $state('');
+  /** The host just attached, for the link to its runtimes. */
+  let attached_now = $state('');
   async function attach(h: Pick<Host, 'id' | 'name'>) {
     acting = h.id;
     try {
       await api.attach_host(workspace, h.id);
       toast('success', `${h.name} attached`, `${here}’s runs may go to it now.`);
+      attached_now = h.name;
       reload();
     } catch (e) {
       toast('danger', `Couldn’t attach ${h.name}`, error_text(e));
@@ -81,6 +91,45 @@
       reload();
     } catch (e) {
       toast('danger', `Couldn’t detach ${h.name}`, error_text(e));
+    }
+    acting = '';
+  }
+
+  // Share a host with groups (deployment owners).
+  let sharing = $state<Pick<Host, 'id' | 'name'> | null>(null);
+  let groups = $state<MemberGroup[]>([]);
+  let shared = $state<string[]>([]);
+  let picked = $state<string[]>([]);
+  let kernel_host = $state(false);
+  let confirm_kernel = $state(false);
+  let share_error = $state('');
+  async function open_share(h: Pick<Host, 'id' | 'name'>) {
+    try {
+      const [list, current] = await Promise.all([auth.list_groups(), api.host_shares(h.id)]);
+      groups = list;
+      shared = current.shares.map((s) => s.group_id);
+      [picked, kernel_host, confirm_kernel, share_error, sharing] = [[...shared], current.kernel, false, '', h];
+    } catch (e) {
+      toast('danger', `Couldn’t load ${h.name}’s shares`, error_text(e));
+    }
+  }
+  const adding = $derived(picked.filter((g) => !shared.includes(g)));
+  const share_changed = $derived(!!adding.length || shared.some((g) => !picked.includes(g)));
+  async function save_shares() {
+    if (!sharing) return;
+    if (kernel_host && adding.length && !confirm_kernel) {
+      share_error = 'Tick the box to share the kernel’s own host.';
+      return;
+    }
+    const h = sharing;
+    acting = h.id;
+    try {
+      for (const group of adding) await api.share_host(h.id, group, kernel_host);
+      for (const group of shared.filter((g) => !picked.includes(g))) await api.unshare_host(h.id, group);
+      toast('success', `${h.name} sharing saved`, picked.length ? 'Members of those groups may attach it now.' : 'Shared with no group.');
+      sharing = null;
+    } catch (e) {
+      share_error = error_text(e);
     }
     acting = '';
   }
@@ -186,6 +235,41 @@
   </Dialog>
 {/if}
 
+{#if sharing}
+  <Dialog open onclose={() => (sharing = null)} title="Share {sharing.name}">
+    <p class="sun-kill__lede">Members of these groups may attach it to the workspaces where they manage runtimes.</p>
+    {#if kernel_host}
+      <div class="sun-hosts__danger" role="alert">
+        <Icon name="triangle-alert" size={16} />
+        <span>
+          This is the kernel’s own host. Agent sessions and terminals on it run next to the kernel and can read
+          <span class="ml-mono">SUN_MASTER_KEY</span>, which decrypts every stored credential. Share a separate host if you can.
+        </span>
+      </div>
+    {/if}
+    <fieldset class="sun-hosts__groups" aria-label="Groups">
+      {#each groups as g (g.id)}
+        <Checkbox
+          label={g.name}
+          description={g.description || undefined}
+          checked={picked.includes(g.id)}
+          onchange={(e: Event) => (picked = (e.currentTarget as HTMLInputElement).checked ? [...picked, g.id] : picked.filter((p) => p !== g.id))}
+        />
+      {:else}
+        <p class="sun-row__meta">No groups yet. <a href={href('settings', 'groups')}>Create one</a> first.</p>
+      {/each}
+    </fieldset>
+    {#if kernel_host && adding.length}
+      <Checkbox label="I understand: its sessions can read SUN_MASTER_KEY" bind:checked={confirm_kernel} />
+    {/if}
+    {#if share_error}<p class="sun-hosts__error" role="alert">{share_error}</p>{/if}
+    {#snippet footer()}
+      <Button variant="secondary" onclick={() => (sharing = null)}>Cancel</Button>
+      <Button variant={kernel_host && adding.length ? 'danger' : 'ice'} loading={acting === sharing?.id} disabled={!share_changed} onclick={save_shares}>Save</Button>
+    {/snippet}
+  </Dialog>
+{/if}
+
 {#if detaching}
   <Dialog open onclose={() => (detaching = null)} title="Detach {detaching.name}?">
     <p class="sun-kill__lede">
@@ -201,6 +285,10 @@
 
 {#snippet status(h: Pick<Host, 'status'>)}
   {#if h.status === 'online'}<Badge tone="success" dot>Online</Badge>{:else}<Badge dot>Offline</Badge>{/if}
+{/snippet}
+
+{#snippet share(h: Pick<Host, 'id' | 'name'>)}
+  {#if owner}<Button size="sm" variant="secondary" iconLeft="users" aria-label="Share {h.name}" onclick={() => open_share(h)}>Share</Button>{/if}
 {/snippet}
 
 <div class="sun-page">
@@ -251,11 +339,19 @@
         </div>
         <div class="sun-row__aside">
           {@render status(h)}
+          {@render share(h)}
           {#if manage}<Button size="sm" variant="secondary" aria-label="Detach {h.name}" onclick={() => (detaching = h)}>Detach</Button>{/if}
         </div>
       </article>
     {/snippet}
   </Loaded>
+
+  {#if attached_now}
+    <p class="sun-hosts__next" role="status">
+      <Icon name="check" size={16} /><span><span class="ml-mono">{attached_now}</span> is attached. Its runtimes are on
+        <a href={href('runtimes')}>Runtimes</a>.</span>
+    </p>
+  {/if}
 
   {#if others.length}
     <section class="sun-hosts__others" aria-labelledby="other-hosts">
@@ -265,11 +361,15 @@
         <article class="sun-row" aria-label={h.name}>
           <span class="sun-tile"><Icon name="server" size={18} /></span>
           <div class="sun-row__body">
-            <div class="sun-row__title"><span class="ml-mono">{h.name}</span></div>
-            <div class="sun-row__meta"><span class="ml-mono">{h.capabilities.os}/{h.capabilities.arch}</span> · serves {serves(h)} · {h.via === 'share' ? 'shared with a group you’re in' : enrolled(h)}</div>
+            <div class="sun-row__title">
+              <span class="ml-mono">{h.name}</span>
+              {#if h.via === 'share'}<Badge tone="info"><Icon name="users" size={12} />{shared_by}</Badge>{/if}
+            </div>
+            <div class="sun-row__meta"><span class="ml-mono">{h.capabilities.os}/{h.capabilities.arch}</span> · serves {serves(h)}{h.via === 'share' ? '' : ` · ${enrolled(h)}`}</div>
           </div>
           <div class="sun-row__aside">
             {@render status(h)}
+            {@render share(h)}
             <Button size="sm" variant="ice" iconLeft="link" loading={acting === h.id} onclick={() => attach(h)}>Attach to this workspace</Button>
           </div>
         </article>
@@ -293,6 +393,44 @@
   }
   .sun-hosts__others > .sun-row__meta {
     margin: 0;
+  }
+  .sun-hosts__danger,
+  .sun-hosts__next {
+    display: flex;
+    gap: var(--space-2);
+    align-items: flex-start;
+    margin: 0 0 var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+    font-size: var(--size-sm);
+    line-height: 1.5;
+  }
+  .sun-hosts__danger {
+    background: var(--danger-soft);
+    color: var(--danger-fg);
+  }
+  .sun-hosts__next {
+    margin: 0;
+    background: var(--surface-raised);
+    color: var(--fg-2);
+  }
+  .sun-hosts__danger :global(.ml-icon),
+  .sun-hosts__next :global(.ml-icon) {
+    flex: none;
+    margin-top: 2px;
+  }
+  .sun-hosts__groups {
+    border: 0;
+    margin: 0 0 var(--space-3);
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .sun-hosts__error {
+    margin: var(--space-2) 0 0;
+    color: var(--danger-fg);
+    font-size: var(--size-sm);
   }
   .sun-hosts__enrol {
     display: flex;
