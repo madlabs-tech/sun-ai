@@ -133,7 +133,7 @@ test('a file changed on disk since it was opened: Reload takes theirs, Overwrite
   expect(file.content).toBe('theirs\nmine');
 });
 
-test('a file deleted since it was opened is a conflict too, and Overwrite brings it back', async ({ page }) => {
+test('a file deleted since it was opened: Recreate brings it back, Close tab drops it', async ({ page }) => {
   const { repo, at } = await sign_in(page);
   const name = `vanish-${Date.now()}.txt`;
   await put(page.request, at('file', name), 'here\n');
@@ -149,21 +149,19 @@ test('a file deleted since it was opened is a conflict too, and Overwrite brings
   expect(reply.status()).toBe(409);
   expect((await reply.json()).current).toBeNull();
 
-  const conflict = dialog(page, 'The file changed on disk');
-  await expect(conflict).toBeVisible();
-  await conflict.getByRole('button', { name: 'Overwrite' }).click();
-  await expect(conflict).toHaveCount(0);
+  const deleted = dialog(page, 'The file was deleted');
+  await expect(deleted).toBeVisible();
+  await deleted.getByRole('button', { name: 'Recreate' }).click();
+  await expect(deleted).toHaveCount(0);
   await expect(unsaved(page, name)).toHaveCount(0);
   expect((await (await page.request.get(at('file', name))).json()).content).toBe('here\nmine');
 
-  // Reload of a file that is gone: a toast, and the tab and its edits stay.
   expect((await page.request.delete(at('file', name))).status()).toBe(204);
   await append_and_save(page, '!');
-  await expect(conflict).toBeVisible();
-  await conflict.getByRole('button', { name: 'Reload' }).click();
-  await expect(conflict).toHaveCount(0);
-  await expect(toast(page).filter({ hasText: `Couldn’t reload ${name}` })).toBeVisible();
-  await expect(code(page)).toContainText('mine!');
+  await deleted.getByRole('button', { name: 'Close tab' }).click();
+  await expect(deleted).toHaveCount(0);
+  await expect(tab(page, name)).toHaveCount(0);
+  expect((await page.request.get(at('file', name))).status()).toBe(404);
 });
 
 test('a save over 2 MiB is a toast, not a crash, and the edit is kept', async ({ page }) => {
@@ -174,7 +172,7 @@ test('a save over 2 MiB is a toast, not a crash, and the edit is kept', async ({
   const saved = page.waitForResponse((r) => r.request().method() === 'PUT');
   await append_and_save(page, 'b');
   expect((await saved).status()).toBe(413);
-  await expect(toast(page).filter({ hasText: 'Couldn’t save near_limit.txt' })).toBeVisible();
+  await expect(toast(page).filter({ hasText: 'Couldn’t save near_limit.txt' })).toContainText('This file is over 2 MB, too large to save here.');
   await expect(unsaved(page, 'near_limit.txt')).toBeVisible();
   await expect(code(page)).toBeVisible();
   // Nothing written: the file is still 2 MiB of a's.
@@ -268,14 +266,16 @@ test('a viewer without a grant gets 403 and a read-only page that says why', asy
   const who = await viewer(owner, repo, false);
 
   const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
-  await sign_in(page, who);
-  const opened = page.waitForResponse((r) => r.url().includes('/editor/open?'));
+  const { at } = await sign_in(page, who);
+  expect((await page.request.post(at('open'), { data: {} })).status()).toBe(403);
+  // The page reads `editor/me` first, so it never asks to open the worktree.
+  const opens: string[] = [];
+  page.on('request', (r) => r.url().includes('/editor/open?') && opens.push(r.url()));
   await open_editor(page, repo);
-  expect((await opened).status()).toBe(403);
   await expect(page.getByText('Read-only')).toBeVisible();
-  await expect(page.getByText(/have `editor\.read` on this repository/)).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Try again' })).toBeVisible();
-  await expect(tree(page).getByRole('button', { name: 'New file' })).toHaveCount(0);
+  await expect(page.getByRole('alert')).toHaveText('You don’t have access to this repository’s editor. Ask a workspace owner or admin to grant it.');
+  await expect(tree(page)).toHaveCount(0);
+  expect(opens).toEqual([]);
   await page.context().close();
   await owner.dispose();
 });
