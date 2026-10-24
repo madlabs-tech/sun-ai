@@ -75,6 +75,10 @@ import type { OnLimit, OutboxItem, Resolution,
   TaskContext,
   TaskPullRequests,
   Repo,
+  EditorCapability,
+  FsEntry,
+  FsFile,
+  FsStat,
   RemoteRepo,
   VcsConnect,
   VcsConnection,
@@ -119,20 +123,21 @@ export class ApiFailure extends Error {
   }
 }
 
-/** A `Blob` body is sent raw with its own type (a logo); anything else as JSON. */
-async function http(method: string, path: string, body: unknown): Promise<{ status: number; data: unknown }> {
-  const raw = body instanceof Blob;
+/** A `Blob` body is sent raw with its own type (a logo), a string as raw UTF-8 text (a file); anything else as JSON. */
+async function http(method: string, path: string, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; data: unknown }> {
+  const payload = typeof body === 'string' ? new Blob([body], { type: 'text/plain; charset=utf-8' }) : body;
+  const raw = payload instanceof Blob;
   const response = await fetch(BASE + path, {
     method,
-    headers: body === undefined ? undefined : { 'content-type': raw ? body.type : 'application/json' },
-    body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
+    headers: payload === undefined ? headers : { ...headers, 'content-type': raw ? payload.type : 'application/json' },
+    body: payload === undefined ? undefined : raw ? payload : JSON.stringify(payload),
   });
   return { status: response.status, data: await response.json().catch(() => null) };
 }
 
-export async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+export async function request<T>(method: string, path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
   const { status, data } = use_mock
-    ? (await import('./mock')).mock_handle(method, path, body) : await http(method, path, body);
+    ? (await import('./mock')).mock_handle(method, path, body, headers) : await http(method, path, body, headers);
   if (status >= 400) {
     const error = (data as Partial<ApiError> | null)?.error;
     throw new ApiFailure(
@@ -153,6 +158,16 @@ const query = (params: Record<string, string | undefined>) => {
   const set = Object.entries(params).filter((p): p is [string, string] => !!p[1]);
   return set.length ? '?' + new URLSearchParams(set) : '';
 };
+
+/** The repo editor a call acts on: the caller's worktree of `repo` on `host`. */
+export interface EditorAt {
+  workspace: string;
+  repo: string;
+  host: string;
+}
+
+const editor_path = (at: EditorAt, what: string, path = '') =>
+  `/workspaces/${id_path(at.workspace)}/repos/${id_path(at.repo)}/editor/${what}` + query({ host_id: at.host, path });
 
 export const api = {
   /** The workspaces the signed-in person sees. */
@@ -209,6 +224,21 @@ export const api = {
   /** `edit_workspace`: deletes it (and its GitLab hook). */
   remove_repo: (workspace: string, repo_id: string) =>
     request<null>('DELETE', `/workspaces/${id_path(workspace)}/repos/${id_path(repo_id)}`),
+  /** The caller's capabilities in the repo's editor; read-only callers get a viewer. */
+  editor_me: (workspace: string, repo: string) =>
+    request<{ capabilities: EditorCapability[] }>('GET', `/workspaces/${id_path(workspace)}/repos/${id_path(repo)}/editor/me`),
+  /** Makes the caller's editor worktree on the host on first use (may clone: slow). */
+  editor_open: (at: EditorAt) => request<{ root: string }>('POST', editor_path(at, 'open'), {}),
+  /** One directory level; `path` '' is the root. */
+  editor_tree: (at: EditorAt, path: string) => request<{ entries: FsEntry[]; truncated: boolean }>('GET', editor_path(at, 'tree', path)),
+  editor_read: (at: EditorAt, path: string) => request<FsFile>('GET', editor_path(at, 'file', path)),
+  /** With `hash`, 409 `conflict` when the file changed on disk since; without, overwrites. */
+  editor_write: (at: EditorAt, path: string, content: string, hash?: string) =>
+    request<FsStat>('PUT', editor_path(at, 'file', path), content, hash ? { 'if-match': hash } : undefined),
+  editor_create: (at: EditorAt, path: string, kind: 'file' | 'dir') => request<null>('POST', editor_path(at, 'file', path), { kind }),
+  /** A file, or a whole directory. */
+  editor_delete: (at: EditorAt, path: string) => request<null>('DELETE', editor_path(at, 'file', path)),
+  editor_rename: (at: EditorAt, from: string, to: string) => request<null>('POST', editor_path(at, 'rename'), { from, to }),
   /** The workspace's git connections and which git apps the operator configured; never a token. */
   list_vcs: (workspace: string) => request<VcsList>('GET', `/workspaces/${id_path(workspace)}/vcs`),
   /** The GitHub App install page to open in a new tab (state-signed, 10 min). GitHub comes back to

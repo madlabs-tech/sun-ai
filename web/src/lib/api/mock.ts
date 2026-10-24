@@ -54,6 +54,7 @@ import { billing_route } from './mock_billing';
 import { knowledge_route, link_source } from './mock_knowledge';
 import { memory_route } from './mock_memory';
 import { is_vcs_route, vcs_route } from './mock_vcs';
+import { editor_route } from './mock_editor';
 import { pull_request_route } from './mock_pull_requests';
 import { agents_naming, agents_route, find_agent } from './mock_agents';
 import { budget_route, has_ecosystem_secret, on_limit_route, settings_route } from './mock_settings';
@@ -1012,16 +1013,16 @@ function credential_fields(input: Partial<CreateCredential>, c: StoredCredential
 }
 
 /** Answers like the kernel would: status + JSON body. */
-export function mock_handle(method: string, full_path: string, body: unknown): { status: number; data: unknown } {
+export function mock_handle(method: string, full_path: string, body: unknown, headers?: Record<string, string>): { status: number; data: unknown } {
   try {
-    return { status: 200, data: route(method, full_path, body) };
+    return { status: 200, data: route(method, full_path, body, headers) };
   } catch (e) {
     if (e instanceof MockError) return { status: e.status, data: e.body };
     throw e;
   }
 }
 
-function route(method: string, full_path: string, body: unknown): unknown {
+function route(method: string, full_path: string, body: unknown, headers?: Record<string, string>): unknown {
   const [path, query = ''] = full_path.split('?');
   const params = new URLSearchParams(query);
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
@@ -1037,6 +1038,7 @@ function route(method: string, full_path: string, body: unknown): unknown {
   if (parts[0] === 'evals' || parts[0] === 'eval_sets') return eval_route(method, parts, input);
   if (parts[0] === 'marketplace') return market_route(method, parts, input, params);
   if (parts[0] === 'subscriptions' || parts[0] === 'support') return billing_route(method, parts, input, params);
+  if (parts[0] === 'workspaces' && parts[2] === 'repos' && parts[4] === 'editor') return editor_route(method, parts, params, body, headers);
   if (is_vcs_route(method, parts)) return vcs_route(method, parts, params, input);
   if (parts[0] === 'tasks' && (parts[2] === 'pull_requests' || parts[2] === 'pr_auto_complete')) return pull_request_route(method, parts, input);
   if (method === 'GET' && path === '/agents') return in_workspace(agents_route(method, parts, input) as Agent[]);

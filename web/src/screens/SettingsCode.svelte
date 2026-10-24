@@ -14,7 +14,7 @@
   import type { GitSettings, RemoteRepo, Repo, VcsConnection, VcsList, VcsProvider, Workspace } from '../lib/api/types';
   import { app, current_workspace, error_text, keep_workspace, toast, workspace_of } from '../lib/app_state.svelte';
   import { actor_name, repo_icon, repo_identity, repo_name } from '../lib/format';
-  import { vcs_landing } from '../lib/router.svelte';
+  import { go, vcs_landing } from '../lib/router.svelte';
 
   const id = (workspace_of(current_workspace()) as Workspace).id;
   const PROVIDER: Record<VcsProvider, string> = { github: 'GitHub', gitlab: 'GitLab' };
@@ -345,6 +345,7 @@
             label="Actions for {repo.url}"
             icon="ellipsis"
             items={[
+              { label: 'Open editor', icon: 'file-code', onselect: () => go('editor', repo.id) },
               { label: 'Edit', icon: 'pencil', onselect: () => open_draft(repo) },
               { label: 'Delete repository', icon: 'trash-2', danger: true, onselect: () => (removing = repo) },
             ]}
