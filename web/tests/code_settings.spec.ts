@@ -155,7 +155,7 @@ test('repositories by URL: duplicates are refused, SSH URLs are fine, rows edit 
 
   // ⋯ → Edit changes the description; the URL stays.
   await row.getByRole('button', { name: /^Actions for/ }).click();
-  await page.getByRole('menuitem', { name: 'Edit' }).click();
+  await page.getByRole('menuitem', { name: 'Edit', exact: true }).click();
   dialog = page.getByRole('dialog').filter({ hasText: 'Edit repository' });
   await expect(dialog.getByLabel('Repository URL')).toBeDisabled();
   await dialog.getByLabel('Description').fill('Marketing site (Astro, Tailwind)');

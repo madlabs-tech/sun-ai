@@ -415,6 +415,35 @@ export interface Repo {
   description: string;
 }
 
+/** What the caller may do in a repo's editor (`GET …/editor/me`). */
+export type EditorCapability = 'editor.read' | 'editor.write' | 'terminal';
+
+/** One entry of `GET …/editor/tree`: directories first, then by name. */
+export interface FsEntry {
+  name: string;
+  kind: 'file' | 'dir' | 'symlink';
+  size: number;
+  /** `.git` or `node_modules`: shown closed. */
+  collapsed: boolean;
+}
+
+/** `GET …/editor/file`: no `content` when `too_large` (over 2 MiB) or `binary`. */
+export interface FsFile {
+  size: number;
+  mtime_ms: number;
+  hash: string | null;
+  too_large: boolean;
+  binary: boolean;
+  content: string | null;
+}
+
+/** A saved file's version (`PUT …/editor/file`). */
+export interface FsStat {
+  size: number;
+  mtime_ms: number;
+  hash: string;
+}
+
 export type VcsProvider = 'github' | 'gitlab';
 
 /** `GET /workspaces/:id/vcs`: how a workspace reaches a git host. Never carries a token or secret. */

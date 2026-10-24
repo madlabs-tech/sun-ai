@@ -86,6 +86,10 @@
       <div class="sun-page" role="status">Loading…</div>
     {:else if route.page === 'canvas' && route.id && feature_on('canvas')}
       <Canvas id={route.id} />
+    {:else if route.page === 'editor' && route.id}
+      {#key `${app.workspace}/${route.id}`}
+        {#await import('./screens/Editor.svelte') then { default: Editor }}<Editor repo_id={route.id} />{/await}
+      {/key}
     {:else if task_ref}
       <TaskPage id={task_ref} project_id={route.page === 'projects' ? (route.id ?? undefined) : undefined} />
     {:else if route.page === 'projects' && route.id && Page}
