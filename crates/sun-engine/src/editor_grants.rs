@@ -8,15 +8,16 @@
 use sun_core::editor_grant::{EditorCapability, EditorGrant, GrantSubject, check_viewer_cap};
 use sun_core::model::{AuditAction, Repo, Role};
 use sun_core::{EditorGrantId, Error, HostId, MemberId, RepoId, Result, WorkspaceId};
-use sun_store::{AuditRepo, EditorGrantRepo, MemberRepo, MembershipRepo, RepoRepo, Tx};
+use sun_store::{AuditRepo, EditorGrantRepo, GroupRepo, MemberRepo, MembershipRepo, RepoRepo, Tx};
 
 use crate::Engine;
 
-/// `ana`, `role:member` or `all` for an audit target.
+/// `ana`, `role:member`, `group:Team` or `all` for an audit target.
 async fn subject_name(tx: &mut Tx, subject: GrantSubject) -> Result<String> {
     Ok(match subject {
         GrantSubject::All => "all".into(),
         GrantSubject::Role(role) => format!("role:{role}"),
+        GrantSubject::Group(id) => format!("group:{}", tx.get_group(id).await?.name),
         GrantSubject::Member(id) => tx.get_member(id).await?.username,
     })
 }
@@ -63,9 +64,9 @@ impl Engine {
 
     /// Grants `capability` to `subject` in `workspace` (on `repo`, or every
     /// repo there), audited as `actor`. `NotFound` for a repo of another
-    /// workspace; `InvalidInput` for a member not in the workspace, more
-    /// than `editor.read` for a viewer (the role or a member who is one),
-    /// or a grant that already exists.
+    /// workspace; `InvalidInput` for an unknown group, a member not in the
+    /// workspace, more than `editor.read` for a viewer (the role or a
+    /// member who is one), or a grant that already exists.
     pub async fn grant_editor(
         &self,
         workspace: WorkspaceId,
@@ -82,6 +83,15 @@ impl Engine {
         match subject {
             GrantSubject::All => {}
             GrantSubject::Role(role) => check_viewer_cap(role, capability)?,
+            // A viewer in the group holds `editor.read` at most (capped at
+            // resolution).
+            GrantSubject::Group(id) => match tx.get_group(id).await {
+                Ok(_) => {}
+                Err(sun_store::StoreError::Core(Error::NotFound(_))) => {
+                    return Err(Error::InvalidInput("There is no such group.".into()));
+                }
+                Err(e) => return Err(e.into()),
+            },
             GrantSubject::Member(id) => {
                 let role: Role = tx.role_of(workspace, id).await?.ok_or_else(|| {
                     Error::InvalidInput("They aren't a member of this workspace.".into())

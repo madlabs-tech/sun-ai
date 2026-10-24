@@ -69,6 +69,7 @@ mod editor_grants;
 mod eval;
 mod executor;
 mod gates;
+mod groups;
 mod knowledge;
 mod market;
 mod mcp;
@@ -118,6 +119,7 @@ pub use executor::{
     WatchdogConfig,
 };
 pub use gates::GateResult;
+pub use groups::GroupChange;
 pub use knowledge::{
     ContextPreview, EMBEDDING_API_KEY, EmbeddingProvider, EmbeddingSettings, SuggestedSource,
     SyncReport, ecosystem_scope,
