@@ -1,8 +1,9 @@
 name: cli-matrix
 
 # Every week, record each agent CLI's latest version, replay every
-# recorded version through the adapter contract tests, and open a PR that pins
-# the versions that pass (crates/sun-runtime/fixtures/versions.txt). A version
+# recorded version through the adapter contract tests, and push a branch that
+# pins the versions that pass (crates/sun-runtime/fixtures/versions.txt), with a
+# PR when Actions is allowed to open one. A version
 # that breaks the contract fails this workflow and stays unpinned, so readiness
 # warns users on it and names the pinned known-good fallback.
 # Recording spends real quota: the prompts are tiny (scripts/record-fixtures.sh).
@@ -76,9 +77,15 @@ jobs:
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -m "test(runtime): pin the latest agent cli versions"
           git push origin "$branch"
-          gh pr create --base main --head "$branch" \
+          # The org forbids Actions from opening PRs. A refused PR is not a test
+          # failure: leave the pushed branch for the oversight loop to open.
+          out=$(gh pr create --base main --head "$branch" \
             --title "test(runtime): pin the latest agent cli versions" \
-            --body "The weekly cli-matrix run recorded these CLI versions and they pass the adapter contract tests."
+            --body "The weekly cli-matrix run recorded these CLI versions and they pass the adapter contract tests." 2>&1) \
+            && { echo "$out"; exit 0; }
+          echo "$out"
+          grep -q 'not permitted to create or approve pull requests' <<<"$out" || exit 1
+          echo "::notice::Actions may not open PRs here; open one from $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...$branch?expand=1"
 
       - name: Fail when a CLI broke the contract
         if: steps.claude_code.outcome == 'failure' || steps.codex.outcome == 'failure' || steps.opencode.outcome == 'failure'
