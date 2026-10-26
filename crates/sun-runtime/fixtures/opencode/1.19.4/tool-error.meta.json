@@ -1,0 +1,57 @@
+{
+  "cli": "opencode",
+  "case": "tool-error",
+  "transport": "acp",
+  "synthetic": false,
+  "cli_version": "1.19.4",
+  "recorded_at": "2026-10-26T10:15:53Z",
+  "argv": [
+    "npx",
+    "-y",
+    "opencode-ai@latest",
+    "acp"
+  ],
+  "client_messages": [
+    {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "initialize",
+      "params": {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+          "fs": {
+            "readTextFile": false,
+            "writeTextFile": false
+          },
+          "terminal": false
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "session/new",
+      "params": {
+        "cwd": "/work",
+        "mcpServers": []
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "method": "session/prompt",
+      "params": {
+        "sessionId": "ses_e884a78dfffeEt6YFTS9tgMkWz",
+        "prompt": [
+          {
+            "type": "text",
+            "text": "Read missing.txt with your file-read tool, not the shell (do not create it), then report the error in one line."
+          }
+        ]
+      }
+    }
+  ],
+  "exit_code": 0,
+  "stderr_tail": "",
+  "note": null
+}
